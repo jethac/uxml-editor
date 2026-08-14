@@ -9,6 +9,8 @@ export interface SourcePatch {
 }
 
 export type PatchValidationCode =
+  | 'invalid-patch'
+  | 'invalid-replacement'
   | 'non-integer'
   | 'negative-offset'
   | 'reversed-span'
@@ -32,6 +34,20 @@ interface IndexedPatch extends SourcePatch {
   readonly patchIndex: number;
 }
 
+interface PatchSnapshot {
+  readonly start: unknown;
+  readonly end: unknown;
+  readonly replacement: unknown;
+}
+
+type NormalizedPatchValidation =
+  | { readonly ok: true; readonly patches: readonly IndexedPatch[] }
+  | { readonly ok: false; readonly error: PatchValidationIssue };
+
+type PatchSnapshotValidation =
+  | { readonly ok: true; readonly patch: PatchSnapshot }
+  | { readonly ok: false; readonly error: PatchValidationIssue };
+
 export class SourcePatchValidationError extends Error {
   readonly issue: PatchValidationIssue;
 
@@ -43,13 +59,40 @@ export class SourcePatchValidationError extends Error {
 }
 
 export function validatePatchSet(source: string, patches: readonly SourcePatch[]): PatchValidation {
+  const normalized = normalizePatchSet(source, patches);
+  if (!normalized.ok) return invalid(normalized.error);
+
+  const output = applyNormalizedPatches(source, normalized.patches);
+  const inverse = invertNormalizedPatches(source, normalized.patches);
+  const inverseValidation = normalizePatchSet(output, inverse);
+  if (!inverseValidation.ok) return invalid(inverseValidation.error);
+
+  return valid(normalized.patches);
+}
+
+export function applyPatches(source: string, patches: readonly SourcePatch[]): string {
+  return applyNormalizedPatches(source, requireValidPatchSet(source, patches));
+}
+
+export function invertPatches(source: string, patches: readonly SourcePatch[]): readonly SourcePatch[] {
+  return invertNormalizedPatches(source, requireValidPatchSet(source, patches));
+}
+
+function normalizePatchSet(source: string, patches: readonly SourcePatch[]): NormalizedPatchValidation {
   const indexed: IndexedPatch[] = [];
 
   for (let patchIndex = 0; patchIndex < patches.length; patchIndex += 1) {
-    const patch = patches[patchIndex];
+    const snapshot = snapshotPatch(patches[patchIndex], patchIndex);
+    if (!snapshot.ok) return snapshot;
+    const patch = snapshot.patch;
     const issue = validatePatch(source, patch, patchIndex);
-    if (issue) return invalid(issue);
-    indexed.push(Object.freeze({ ...patch, patchIndex }));
+    if (issue) return invalidNormalized(issue);
+    indexed.push(Object.freeze({
+      start: patch.start as number,
+      end: patch.end as number,
+      replacement: patch.replacement as string,
+      patchIndex,
+    }));
   }
 
   indexed.sort(comparePatches);
@@ -57,7 +100,7 @@ export function validatePatchSet(source: string, patches: readonly SourcePatch[]
     const previous = indexed[index - 1];
     const current = indexed[index];
     if (current.start === previous.start) {
-      return invalid({
+      return invalidNormalized({
         code: 'ambiguous-same-start',
         patchIndex: current.patchIndex,
         conflictingPatchIndex: previous.patchIndex,
@@ -65,7 +108,7 @@ export function validatePatchSet(source: string, patches: readonly SourcePatch[]
       });
     }
     if (current.start < previous.end) {
-      return invalid({
+      return invalidNormalized({
         code: 'overlap',
         patchIndex: current.patchIndex,
         conflictingPatchIndex: previous.patchIndex,
@@ -74,14 +117,10 @@ export function validatePatchSet(source: string, patches: readonly SourcePatch[]
     }
   }
 
-  return Object.freeze({
-    ok: true as const,
-    patches: Object.freeze(indexed.map(({ patchIndex: _patchIndex, ...patch }) => Object.freeze(patch))),
-  });
+  return Object.freeze({ ok: true as const, patches: Object.freeze(indexed) });
 }
 
-export function applyPatches(source: string, patches: readonly SourcePatch[]): string {
-  const normalized = requireValidPatchSet(source, patches);
+function applyNormalizedPatches(source: string, normalized: readonly SourcePatch[]): string {
   let result = source;
 
   for (let index = normalized.length - 1; index >= 0; index -= 1) {
@@ -92,8 +131,7 @@ export function applyPatches(source: string, patches: readonly SourcePatch[]): s
   return result;
 }
 
-export function invertPatches(source: string, patches: readonly SourcePatch[]): readonly SourcePatch[] {
-  const normalized = requireValidPatchSet(source, patches);
+function invertNormalizedPatches(source: string, normalized: readonly SourcePatch[]): readonly SourcePatch[] {
   const inverse: SourcePatch[] = [];
   let offsetDelta = 0;
 
@@ -125,20 +163,40 @@ function requireValidPatchSet(source: string, patches: readonly SourcePatch[]): 
   return validation.patches;
 }
 
-function validatePatch(source: string, patch: SourcePatch, patchIndex: number): PatchValidationIssue | null {
-  if (!Number.isInteger(patch.start) || !Number.isInteger(patch.end)) {
+function snapshotPatch(candidate: unknown, patchIndex: number): PatchSnapshotValidation {
+  if (typeof candidate !== 'object' || candidate === null) {
+    return invalidSnapshot(issue('invalid-patch', patchIndex, `Patch ${patchIndex} must be an object.`));
+  }
+
+  try {
+    const patch = candidate as { start: unknown; end: unknown; replacement: unknown };
+    return Object.freeze({
+      ok: true as const,
+      patch: Object.freeze({ start: patch.start, end: patch.end, replacement: patch.replacement }),
+    });
+  } catch {
+    return invalidSnapshot(issue('invalid-patch', patchIndex, `Patch ${patchIndex} could not be read.`));
+  }
+}
+
+function validatePatch(source: string, patch: PatchSnapshot, patchIndex: number): PatchValidationIssue | null {
+  const { start, end, replacement } = patch;
+  if (typeof start !== 'number' || typeof end !== 'number' || !Number.isInteger(start) || !Number.isInteger(end)) {
     return issue('non-integer', patchIndex, `Patch ${patchIndex} has non-integer offsets.`);
   }
-  if (patch.start < 0 || patch.end < 0) {
+  if (typeof replacement !== 'string') {
+    return issue('invalid-replacement', patchIndex, `Patch ${patchIndex} has a non-string replacement.`);
+  }
+  if (start < 0 || end < 0) {
     return issue('negative-offset', patchIndex, `Patch ${patchIndex} has a negative offset.`);
   }
-  if (patch.end < patch.start) {
+  if (end < start) {
     return issue('reversed-span', patchIndex, `Patch ${patchIndex} ends before it starts.`);
   }
-  if (patch.start > source.length || patch.end > source.length) {
-    return issue('out-of-range', patchIndex, `Patch ${patchIndex} ends at ${patch.end}, outside source length ${source.length}.`);
+  if (start > source.length || end > source.length) {
+    return issue('out-of-range', patchIndex, `Patch ${patchIndex} ends at ${end}, outside source length ${source.length}.`);
   }
-  if (splitsSurrogatePair(source, patch.start) || splitsSurrogatePair(source, patch.end)) {
+  if (splitsSurrogatePair(source, start) || splitsSurrogatePair(source, end)) {
     return issue('surrogate-boundary', patchIndex, `Patch ${patchIndex} splits a UTF-16 surrogate pair.`);
   }
   return null;
@@ -165,5 +223,20 @@ function issue(code: PatchValidationCode, patchIndex: number, message: string): 
 }
 
 function invalid(error: PatchValidationIssue): PatchValidation {
+  return Object.freeze({ ok: false as const, error: Object.freeze(error) });
+}
+
+function valid(indexed: readonly IndexedPatch[]): PatchValidation {
+  return Object.freeze({
+    ok: true as const,
+    patches: Object.freeze(indexed.map(({ start, end, replacement }) => Object.freeze({ start, end, replacement }))),
+  });
+}
+
+function invalidNormalized(error: PatchValidationIssue): NormalizedPatchValidation {
+  return Object.freeze({ ok: false as const, error: Object.freeze(error) });
+}
+
+function invalidSnapshot(error: PatchValidationIssue): PatchSnapshotValidation {
   return Object.freeze({ ok: false as const, error: Object.freeze(error) });
 }

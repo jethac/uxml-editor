@@ -1,6 +1,6 @@
 import { applyPatches, type SourcePatch } from '../commands/SourcePatch';
 
-export type NewlineStyle = 'none' | 'lf' | 'crlf' | 'mixed';
+export type NewlineStyle = 'none' | 'lf' | 'crlf' | 'cr' | 'mixed';
 
 export class SourceBuffer {
   readonly newlineStyle: NewlineStyle;
@@ -21,8 +21,11 @@ export class SourceBuffer {
 function observeNewlineStyle(text: string): NewlineStyle {
   const crlf = (text.match(/\r\n/g) ?? []).length;
   const lf = (text.match(/(?<!\r)\n/g) ?? []).length;
-  if (crlf === 0 && lf === 0) return 'none';
-  if (crlf === 0) return 'lf';
-  if (lf === 0) return 'crlf';
-  return 'mixed';
+  const cr = (text.match(/\r(?!\n)/g) ?? []).length;
+  const styles = Number(crlf > 0) + Number(lf > 0) + Number(cr > 0);
+  if (styles === 0) return 'none';
+  if (styles > 1) return 'mixed';
+  if (crlf > 0) return 'crlf';
+  if (lf > 0) return 'lf';
+  return 'cr';
 }

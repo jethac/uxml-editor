@@ -124,6 +124,89 @@ describe('SourcePatch', () => {
     }
   });
 
+  it.each([
+    ['a high surrogate followed by an inserted low surrogate', '\uD800', [{ start: 1, end: 1, replacement: '\uDC00' }]],
+    ['an inserted high surrogate followed by a low surrogate', '\uDC00', [{ start: 0, end: 0, replacement: '\uD800' }]],
+    [
+      'an adjacent inverse group that begins inside a newly formed pair',
+      '\uD800xy',
+      [
+        { start: 1, end: 2, replacement: '\uDC00' },
+        { start: 2, end: 3, replacement: 'z' },
+      ],
+    ],
+  ])('rejects %s because its inverse would split a surrogate pair', (_label, source, patches) => {
+    const validation = validatePatchSet(source, patches);
+
+    expect(validation).toMatchObject({ ok: false, error: { code: 'surrogate-boundary' } });
+    expect(() => applyPatches(source, patches)).toThrow(SourcePatchValidationError);
+    expect(() => invertPatches(source, patches)).toThrow(SourcePatchValidationError);
+  });
+
+  it('snapshots getter-backed patch fields exactly once before validation', () => {
+    let startReads = 0;
+    let endReads = 0;
+    let replacementReads = 0;
+    let extraReads = 0;
+    const patch = {
+      get start() {
+        startReads += 1;
+        return startReads === 1 ? 0 : 2;
+      },
+      get end() {
+        endReads += 1;
+        return endReads === 1 ? 1 : 3;
+      },
+      get replacement() {
+        replacementReads += 1;
+        return replacementReads === 1 ? 'X' : 'Y';
+      },
+      get extra() {
+        extraReads += 1;
+        throw new Error('must not read extra fields');
+      },
+    };
+
+    const validation = validatePatchSet('abc', [patch as SourcePatch]);
+
+    expect(validation).toEqual({ ok: true, patches: [{ start: 0, end: 1, replacement: 'X' }] });
+    expect(startReads).toBe(1);
+    expect(endReads).toBe(1);
+    expect(replacementReads).toBe(1);
+    expect(extraReads).toBe(0);
+    expect(validation.ok && Object.keys(validation.patches[0])).toEqual(['start', 'end', 'replacement']);
+  });
+
+  it.each([
+    ['a null patch entry', [null]],
+    ['a non-object patch entry', [1]],
+    ['a missing replacement', [{ start: 0, end: 1 }]],
+    ['a non-string replacement', [{ start: 0, end: 1, replacement: null }]],
+  ])('returns an owned validation error for %s', (_label, patches) => {
+    expect(() => validatePatchSet('abc', patches as unknown as readonly SourcePatch[])).not.toThrow();
+    expect(validatePatchSet('abc', patches as unknown as readonly SourcePatch[])).toMatchObject({
+      ok: false,
+      error: { code: expect.any(String) },
+    });
+    expect(() => applyPatches('abc', patches as unknown as readonly SourcePatch[])).toThrow(SourcePatchValidationError);
+    expect(() => invertPatches('abc', patches as unknown as readonly SourcePatch[])).toThrow(SourcePatchValidationError);
+  });
+
+  it('returns an owned validation error when reading a patch field throws', () => {
+    const patch = {
+      get start() {
+        throw new Error('untrusted getter');
+      },
+      end: 1,
+      replacement: 'X',
+    };
+
+    expect(validatePatchSet('abc', [patch] as unknown as readonly SourcePatch[])).toMatchObject({
+      ok: false,
+      error: { code: 'invalid-patch' },
+    });
+  });
+
   it('inverts length-changing, adjacent patches against transformed-output offsets', () => {
     const source = 'a\r\n😀 &amp; \"quoted\"\u00a0text';
     const patches = [
@@ -184,7 +267,9 @@ describe('SourcePatch', () => {
           if (!validation.ok) continue;
 
           const transformed = applyPatches(source, patches);
-          expect(applyPatches(transformed, invertPatches(source, patches))).toBe(source);
+          const inverse = invertPatches(source, patches);
+          expect(validatePatchSet(transformed, inverse)).toMatchObject({ ok: true });
+          expect(applyPatches(transformed, inverse)).toBe(source);
         }
       }
     }
@@ -203,6 +288,14 @@ describe('SourceBuffer', () => {
     expect(original.text).toBe('<ui:Label />\r\n');
     expect(Object.isFrozen(original)).toBe(true);
     expect(Object.isFrozen(next)).toBe(true);
+  });
+
+  it.each([
+    ['a bare CR file', 'first\rsecond\r', 'cr'],
+    ['bare CR and LF', 'first\rsecond\n', 'mixed'],
+    ['bare CR and CRLF', 'first\r\nsecond\r', 'mixed'],
+  ] as const)('observes %s as %s', (_label, text, newlineStyle) => {
+    expect(new SourceBuffer('Assets/UI/Menu.uxml', text).newlineStyle).toBe(newlineStyle);
   });
 });
 
