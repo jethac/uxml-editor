@@ -138,6 +138,31 @@ replaceable.
   files and 46 tests; `npm run build` passed `tsc --noEmit` and Vite bundling;
   `git diff --check` and the staged diff check exited 0 before the fix commit.
 
+## Task 3 Fix Round 2
+
+- Commit: `363938e` (`fix: scale source patch validation`); no push or amend.
+- Red: the supplied `a\\uD800` repro reported generated inverse patch index 1
+  instead of caller patch index 0. The caller-order permutation test also
+  demonstrated that provenance must follow the low-surrogate insertion. The
+  deterministic 1,200,000-code-unit / 6,000-patch round trip exceeded Vitest's
+  normal five-second test timeout under the former repeated full-string
+  construction.
+- Green: validation snapshots and sorts once, then proves inverse surrogate
+  safety directly at each contiguous forward-patch group. It uses source
+  boundary code units and the first/last nonempty replacement code units, or
+  the unchanged source boundaries for a deleting group. Validation reports the
+  causal caller patch index. It no longer builds transformed output or
+  normalizes an inverse patch set.
+- Inversion emits one patch per contiguous source group with transformed
+  offsets from a cumulative delta, replacement length equal to the group output
+  length, and the original source slice as replacement. Application constructs
+  a right-to-left chunk array and joins once, so it does not rebuild the whole
+  document for every patch. Existing exhaustive accepted cases still validate
+  their inverse and restore the exact source.
+- Benchmark: the isolated deterministic large regression completed in 27ms of
+  Vitest test execution on this workspace, with no timing assertion in the
+  test itself.
+
 ## Task 2 Fix Round 1
 
 - Red: `npm test -- src/core/adapter/UxmlPreviewAdapter.test.ts` first exited 1
