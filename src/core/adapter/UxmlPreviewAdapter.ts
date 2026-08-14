@@ -92,13 +92,16 @@ function diagnosticFromWarning(
   nodes: ReadonlyMap<EditorNodeId, ElementNode>,
 ): EditorDiagnostic {
   const nodeId = warning.node === undefined ? undefined : editorNodeId(warning.node);
+  const source = warning.at === undefined
+    ? undefined
+    : sourceForReference(warning.at, input, originsBySheet);
   return {
     origin,
     severity: 'warning',
     kind: warning.kind as EditorDiagnosticKind,
     message: warning.message,
     ...(nodeId === undefined ? {} : { nodeId }),
-    ...(warning.at === undefined ? {} : { source: sourceForReference(warning.at, input, originsBySheet) }),
+    ...(source === undefined ? {} : { source }),
   };
 }
 
@@ -137,22 +140,26 @@ function editorStyleOrigin(
   nodes: ReadonlyMap<EditorNodeId, ElementNode>,
 ): StyleExplanationOrigin {
   switch (origin.kind) {
-    case 'inline':
+    case 'inline': {
+      const source = sourceForInlineOrigin(origin, input, nodes);
       return {
         kind: 'inline',
         nodeId: editorNodeId(origin.node),
         declarationIndex: origin.declIndex,
-        source: sourceForInlineOrigin(origin, input, nodes),
+        ...(source === undefined ? {} : { source }),
       };
-    case 'rule':
+    }
+    case 'rule': {
+      const source = sourceForRuleOrigin(origin, model, originsBySheet);
       return {
         kind: 'rule',
-        source: sourceForRuleOrigin(origin, model, originsBySheet),
+        ...(source === undefined ? {} : { source }),
         sheetPath: originsBySheet[origin.sheet] ?? null,
         itemIndex: origin.item,
         declarationIndex: origin.declIndex,
         ...(origin.states === undefined ? {} : { states: [...origin.states] }),
       };
+    }
     case 'inherited':
       return {
         kind: 'inherited',

@@ -3,12 +3,13 @@ import packageLockText from '../../../package-lock.json?raw';
 import noticesText from '../../../THIRD-PARTY-NOTICES.md?raw';
 import minimalUss from '../../../tests/fixtures/minimal.uss?raw';
 import uxml from '../../../tests/fixtures/minimal.uxml?raw';
+import { parse as parseJavaScript } from '@babel/parser';
 import { describe, expect, it, vi } from 'vitest';
 import { UxmlPreviewAdapter } from './UxmlPreviewAdapter';
 import type { EditorElement, ProjectParseInput } from './types';
 
 const paletteUss = 'VisualElement { padding-left: 4px; }\n';
-const sourceModules = import.meta.glob('/src/**/*.{ts,tsx}', {
+const sourceModules = import.meta.glob('/src/**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}', {
   eager: true,
   query: '?raw',
   import: 'default',
@@ -73,15 +74,58 @@ const deterministicMeasureText = (text: string) => ({
   height: 16,
 });
 
+type AstNode = { readonly type: string; readonly [key: string]: unknown };
+
+function isAstNode(value: unknown): value is AstNode {
+  return typeof value === 'object' && value !== null && 'type' in value;
+}
+
+function isPreviewSpecifier(value: unknown): boolean {
+  return isAstNode(value) && value.type === 'StringLiteral' && value.value === 'uxml-preview';
+}
+
 function importsPreview(source: string): boolean {
-  const module = "['\"]uxml-preview['\"]";
-  const statement = '(?:^|[;\\r\\n])\\s*';
-  return [
-    new RegExp(`${statement}import\\s*${module}`, 'm'),
-    new RegExp(`${statement}import\\s+(?:type\\s+)?(?:(?!;)[\\s\\S])*?\\bfrom\\s*${module}\\s*;`, 'm'),
-    new RegExp(`\\bimport\\s*\\(\\s*${module}\\s*\\)`),
-    new RegExp(`${statement}export\\s+(?:type\\s+)?(?:(?!;)[\\s\\S])*?\\bfrom\\s*${module}\\s*;`, 'm'),
-  ].some((pattern) => pattern.test(source));
+  const ast = parseJavaScript(source, {
+    sourceType: 'unambiguous',
+    plugins: ['typescript', 'jsx'],
+  });
+  const visit = (value: unknown): boolean => {
+    if (Array.isArray(value)) {
+      return value.some(visit);
+    }
+    if (!isAstNode(value)) {
+      return false;
+    }
+    if (
+      (value.type === 'ImportDeclaration'
+        || value.type === 'ExportNamedDeclaration'
+        || value.type === 'ExportAllDeclaration'
+        || value.type === 'ImportExpression')
+      && isPreviewSpecifier(value.source)
+    ) {
+      return true;
+    }
+    if (
+      value.type === 'TSImportEqualsDeclaration'
+      && isAstNode(value.moduleReference)
+      && value.moduleReference.type === 'TSExternalModuleReference'
+      && isPreviewSpecifier(value.moduleReference.expression)
+    ) {
+      return true;
+    }
+    if (
+      value.type === 'CallExpression'
+      && isAstNode(value.callee)
+      && value.callee.type === 'Import'
+      && Array.isArray(value.arguments)
+      && isPreviewSpecifier(value.arguments[0])
+    ) {
+      return true;
+    }
+    return Object.values(value).some(visit);
+  };
+
+  return visit(ast.program);
 }
 
 function deferred<T>() {
@@ -272,7 +316,13 @@ describe('UxmlPreviewAdapter', () => {
     vi.resetModules();
     vi.doMock('uxml-preview', async (importOriginal) => {
       const actual = await importOriginal<typeof import('uxml-preview')>();
-      return { ...actual, loadLayoutEngine: vi.fn(() => yoga.promise) };
+      return {
+        ...actual,
+        loadLayoutEngine: vi.fn(async () => {
+          await yoga.promise;
+          await actual.loadLayoutEngine();
+        }),
+      };
     });
 
     try {
@@ -398,6 +448,51 @@ describe('UxmlPreviewAdapter', () => {
     expect(hover!.candidates[0]!.order).toBeLessThan(hover!.candidates[1]!.order);
   });
 
+  it('omits source fields for unmappable inline and rule origins', async () => {
+    vi.resetModules();
+    vi.doMock('uxml-preview', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('uxml-preview')>();
+      return {
+        ...actual,
+        explainProperty: vi.fn(() => [
+          {
+            property: 'color',
+            value: '#111111',
+            origin: { kind: 'inline', node: 999, declIndex: 0 },
+            rank: 1,
+            specificity: [0, 0, 0],
+            order: 0,
+            winner: false,
+          },
+          {
+            property: 'color',
+            value: '#222222',
+            origin: { kind: 'rule', sheet: 999, item: 999, declIndex: 0 },
+            rank: 1,
+            specificity: [0, 0, 0],
+            order: 1,
+            winner: true,
+          },
+        ]),
+      };
+    });
+
+    try {
+      const { UxmlPreviewAdapter: IsolatedAdapter } = await import('./UxmlPreviewAdapter');
+      const adapter = new IsolatedAdapter();
+      const parsed = adapter.parseProject(fixtureInput());
+      const explanation = adapter.explain(parsed, parsed.root.id, 'color');
+
+      expect(explanation?.candidates).toHaveLength(2);
+      for (const candidate of explanation!.candidates) {
+        expect(candidate.origin).not.toHaveProperty('source');
+      }
+    } finally {
+      vi.doUnmock('uxml-preview');
+      vi.resetModules();
+    }
+  });
+
   it('keeps the preview pin and detects every import form outside the adapter boundary', () => {
     const packageJson = JSON.parse(packageJsonText) as {
       dependencies: Record<string, string>;
@@ -416,6 +511,11 @@ describe('UxmlPreviewAdapter', () => {
     expect(importsPreview(`import { parse } from '${previewPackage}';`)).toBe(true);
     expect(importsPreview(`export { parse } from '${previewPackage}';`)).toBe(true);
     expect(importsPreview(`export * from '${previewPackage}';`)).toBe(true);
+    expect(importsPreview(`import {\n  parse,\n} from '${previewPackage}'`)).toBe(true);
+    expect(importsPreview(`export {\n  parse,\n} from '${previewPackage}'`)).toBe(true);
+    expect(importsPreview(`import data from '${previewPackage}' with { type: 'json' }`)).toBe(true);
+    expect(importsPreview(`import preview = require('${previewPackage}');`)).toBe(true);
+    expect(importsPreview(`// import '${previewPackage}'\nconst value = '${previewPackage}';\nconst template = \`import '${previewPackage}'\`;`)).toBe(false);
     expect(packageJson.dependencies['uxml-preview']).toBe('0.4.0');
     expect(packageJson.dependencies).not.toHaveProperty('@types/node');
     expect(packageJson.devDependencies).not.toHaveProperty('@types/node');

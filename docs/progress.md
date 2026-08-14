@@ -111,3 +111,20 @@ editor state; rendered and component state must stay derived and replaceable.
   `npm run build` exited 0 after `tsc --noEmit` and Vite bundling. The final
   production source scan found `uxml-preview` only in
   `src/core/adapter/UxmlPreviewAdapter.ts`.
+
+## Task 2 Fix Round 2
+
+- Red: the isolated supersession command exited 1 because its gated
+  `loadLayoutEngine` mock resolved without invoking the real Yoga loader, so
+  the latest render rejected. The import-boundary red run also exited 1 because
+  the regex did not recognize a semicolon-free multiline static import.
+- Green: the supersession mock now waits for its gate and calls the real loader;
+  the first request rejects with `RenderSupersededError`, the latest frame is
+  live, and its disposal remains idempotent. The source guard uses
+  `@babel/parser@8.0.4` as an exact MIT development-only dependency and Vite
+  raw-globs every requested TS/JS extension. Its structured AST detects static,
+  re-export, literal dynamic, import-attribute, and TypeScript external-module
+  imports while ignoring comments, strings, and templates.
+- Conversion of diagnostics plus inline/rule style origins now omits `source`
+  when no editor span can be mapped. Focused assertions verify the field is
+  absent rather than present with `undefined`.
