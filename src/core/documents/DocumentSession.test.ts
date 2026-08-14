@@ -72,6 +72,21 @@ describe('DocumentSession', () => {
     expect(session.history.canUndo).toBe(false);
   });
 
+  it.each([
+    ['transaction metadata', { id: '', label: 'Invalid', patchesByFile: new Map() }, 'invalid-transaction'],
+    ['transaction selection', { id: 'invalid-selection', label: 'Invalid selection', patchesByFile: new Map(), selectionAfter: [null] }, 'invalid-selection'],
+  ])('reports a specific public error code for invalid %s', (_label, input, code) => {
+    const session = openFixture();
+
+    try {
+      session.commit(input as never);
+      throw new Error('Expected commit to fail.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(DocumentSessionError);
+      expect((error as DocumentSessionError).code).toBe(code);
+    }
+  });
+
   it('does not publish a candidate when the adapter rejects it', () => {
     const session = openFixture();
     const before = session.snapshot();
@@ -85,16 +100,38 @@ describe('DocumentSession', () => {
     expect(session.document).toBe(beforeDocument);
   });
 
-  it('returns copy-safe immutable snapshots rather than its internal file map', () => {
+  it('returns runtime-immutable snapshots rather than a mutable copy of its internal file map', () => {
     const session = openFixture();
     const first = session.snapshot();
-    (first.files as Map<string, unknown>).set('injected', 'bad');
+
+    expect(() => (first.files as Map<string, unknown>).set('injected', 'bad')).toThrow();
 
     const second = session.snapshot();
 
     expect(second.files.has('injected')).toBe(false);
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.files.get(entryPath))).toBe(true);
+  });
+
+  it('publishes a runtime-immutable parsed document through the session and commit result', () => {
+    const session = DocumentSession.open(new Map([
+      [entryPath, '<UXML><UnknownControl /></UXML>'],
+      [sheetPath, '.root {}'],
+    ]), entryPath, new TestAdapter());
+    const opened = session.document;
+
+    expect(() => (opened.source.stylesheets as Map<string, string>).set('injected.uss', 'bad')).toThrow();
+    expect(() => (opened.diagnostics as EditorDiagnostic[]).push({
+      origin: 'parse', severity: 'warning', kind: 'malformed', message: 'Injected.',
+    })).toThrow();
+    expect(() => { (opened.diagnostics[0] as { message: string }).message = 'Changed.'; }).toThrow();
+
+    const result = session.commit(transaction('noop', 'No-op', new Map([[entryPath, []]])));
+    expect(result.document).toBe(session.document);
+    expect(Object.isFrozen(result.document)).toBe(true);
+    expect(Object.isFrozen(result.document.source)).toBe(true);
+    expect(result.document.source.stylesheets.has('injected.uss')).toBe(false);
+    expect(result.document.diagnostics[0].message).toBe('Unknown control.');
   });
 
   it('requires the exact entry path and accepts SourceBuffer values', async () => {
@@ -104,6 +141,55 @@ describe('DocumentSession', () => {
     expect(() => DocumentSession.open(new Map([[sheetPath, '.a {}']]), entryPath, adapter)).toThrow(/entry/i);
     const session = DocumentSession.open(new Map([[entryPath, new SourceBuffer(entryPath, '<UXML />')]]), entryPath, adapter);
     expect(session.snapshot().files.get(entryPath)?.text).toBe('<UXML />');
+  });
+
+  it('resolves entry and nested relative stylesheet imports against deterministic project paths', () => {
+    const adapter = new TestAdapter();
+    DocumentSession.open(new Map([
+      [entryPath, '<UXML />'],
+      ['Assets/UI/styles/base.uss', '@import "../shared/colors.uss";'],
+      ['Assets/UI/shared/colors.uss', '.accent { color: red; }'],
+    ]), entryPath, adapter);
+    const resolve = adapter.inputs[0].resolveImport;
+
+    expect(resolve('styles/base.uss', null)).toEqual({
+      path: 'Assets/UI/styles/base.uss',
+      text: '@import "../shared/colors.uss";',
+    });
+    expect(resolve('../shared/colors.uss', 'styles/base.uss')).toEqual({
+      path: 'Assets/UI/shared/colors.uss',
+      text: '.accent { color: red; }',
+    });
+  });
+
+  it('normalizes root-fixed, project-fixed, and Windows-style import references', () => {
+    const adapter = new TestAdapter();
+    DocumentSession.open(new Map([
+      [entryPath, '<UXML />'],
+      ['Assets/Shared/root.uss', '.root {}'],
+      ['Packages/com.example/theme.uss', '.theme {}'],
+      ['Assets/UI/shared/colors.uss', '.colors {}'],
+    ]), entryPath, adapter);
+    const resolve = adapter.inputs[0].resolveImport;
+
+    expect(resolve('/Assets/Shared/./root.uss', null)?.path).toBe('Assets/Shared/root.uss');
+    expect(resolve('project://Packages/com.example/theme.uss', null)?.path).toBe('Packages/com.example/theme.uss');
+    expect(resolve('Assets/Shared/root.uss', 'styles/base.uss')?.path).toBe('Assets/Shared/root.uss');
+    expect(resolve('..\\shared\\colors.uss', 'styles\\base.uss')?.path).toBe('Assets/UI/shared/colors.uss');
+  });
+
+  it('leaves escaping, absolute-drive, remote, and missing stylesheet imports unresolved', () => {
+    const adapter = new TestAdapter();
+    DocumentSession.open(new Map([
+      [entryPath, '<UXML />'],
+      ['Assets/UI/styles/base.uss', '.base {}'],
+    ]), entryPath, adapter);
+    const resolve = adapter.inputs[0].resolveImport;
+
+    expect(resolve('../../../../outside.uss', 'styles/base.uss')).toBeNull();
+    expect(resolve('C:\\outside.uss', null)).toBeNull();
+    expect(resolve('https://example.com/remote.uss', null)).toBeNull();
+    expect(resolve('styles/missing.uss', null)).toBeNull();
   });
 
   it('resolves a unique authored name before structural information', () => {
@@ -141,6 +227,51 @@ describe('DocumentSession', () => {
 
     expect(locator.authoredName).toBeUndefined();
     expect(resolveElementLocator(session.document.root, locator)).toBe(secondLabel.id);
+  });
+
+  it.each([
+    ['renamed', 'name="target"', 'name="renamed"'],
+    ['removed', ' name="target"', ''],
+  ])('retains selection when an authored name is %s at the same structural path', (_label, original, replacement) => {
+    const source = '<UXML><Button name="target" text="Play" /></UXML>';
+    const session = DocumentSession.open(new Map([[entryPath, source]]), entryPath, new TestAdapter());
+    const selected = session.document.root.children[0];
+    session.setSelection([createElementLocator(session.document.root, selected.id)!]);
+    const start = source.indexOf(original);
+
+    session.commit(transaction(`name-${_label}`, `Name ${_label}`, new Map([
+      [entryPath, [{ start, end: start + original.length, replacement }]],
+    ])));
+
+    expect(session.selectedNodeIds).toHaveLength(1);
+    expect(nodeById(session.document.root, session.selectedNodeIds[0]).name).toBe('Button');
+  });
+
+  it.each([
+    ['edited', 'text="Play"', 'text="Stop"'],
+    ['removed', ' tooltip="Old"', ''],
+  ])('retains an unnamed selection when an authored attribute is %s at the same structural path', (_label, original, replacement) => {
+    const source = '<UXML><Button text="Play" tooltip="Old" /></UXML>';
+    const session = DocumentSession.open(new Map([[entryPath, source]]), entryPath, new TestAdapter());
+    const selected = session.document.root.children[0];
+    session.setSelection([createElementLocator(session.document.root, selected.id)!]);
+    const start = source.indexOf(original);
+
+    session.commit(transaction(`attribute-${_label}`, `Attribute ${_label}`, new Map([
+      [entryPath, [{ start, end: start + original.length, replacement }]],
+    ])));
+
+    expect(session.selectedNodeIds).toHaveLength(1);
+    expect(nodeById(session.document.root, session.selectedNodeIds[0]).name).toBe('Button');
+  });
+
+  it('returns unresolved when a missing structural path falls back to indistinguishable candidates', () => {
+    const session = DocumentSession.open(new Map([[entryPath,
+      '<UXML><VisualElement><Label /><Label /></VisualElement></UXML>',
+    ]]), entryPath, new TestAdapter());
+    const locator = createElementLocator(session.document.root, session.document.root.children[0].children[1].id)!;
+
+    expect(resolveElementLocator(session.document.root, { ...locator, childPath: [99] })).toBeNull();
   });
 
   it('keeps an unnamed selection attached after a differently tagged sibling is inserted before it', () => {

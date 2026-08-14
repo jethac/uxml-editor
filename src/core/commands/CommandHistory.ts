@@ -21,8 +21,13 @@ export class CommandHistory {
 
   execute(transaction: EditorTransaction): CommitResult {
     const result = this.session.commit(transaction);
-    const forward = copyEditorTransaction(result.forward);
-    const inverse = copyEditorTransaction(result.inverse);
+    this.recordSuccessfulExecution(result);
+    return result;
+  }
+
+  private recordSuccessfulExecution(result: CommitResult): void {
+    const forward = result.forward;
+    const inverse = result.inverse;
     const previous = this.undoStack[this.undoStack.length - 1];
     if (this.coalescingAllowed && canCoalesce(previous, forward)) {
       this.undoStack[this.undoStack.length - 1] = {
@@ -35,7 +40,6 @@ export class CommandHistory {
     }
     this.redoStack.length = 0;
     this.coalescingAllowed = true;
-    return result;
   }
 
   undo(): readonly CommitResult[] | null {
@@ -59,15 +63,11 @@ export class CommandHistory {
   }
 
   replay(transactions: readonly EditorTransaction[]): readonly CommitResult[] {
-    const results: CommitResult[] = [];
-    const log: EditorTransaction[] = [];
-    for (const transaction of transactions) {
-      const result = this.execute(transaction);
-      results.push(result);
-      log.push(copyEditorTransaction(result.forward));
-    }
-    this.replayed = Object.freeze(log);
-    return Object.freeze(results);
+    const normalized = Object.freeze(transactions.map(copyEditorTransaction));
+    const results = this.session.commitSequence(normalized);
+    results.forEach((result) => this.recordSuccessfulExecution(result));
+    this.replayed = Object.freeze(results.map((result) => result.forward));
+    return results;
   }
 }
 

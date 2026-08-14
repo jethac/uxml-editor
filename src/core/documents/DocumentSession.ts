@@ -1,4 +1,6 @@
 import type { EditorNodeId, ParsedPreviewDocument, ProjectParseInput, UxmlPreviewPort } from '../adapter/types';
+import { freezeParsedPreviewDocument } from '../adapter/immutableParsedDocument';
+import { ImmutableMap } from '../collections/ImmutableMap';
 import { CommandHistory } from '../commands/CommandHistory';
 import {
   EditorTransactionError,
@@ -36,6 +38,7 @@ export type DocumentSessionErrorCode =
   | 'invalid-buffer'
   | 'missing-file'
   | 'invalid-patch'
+  | 'invalid-transaction'
   | 'invalid-selection'
   | 'parse-failed';
 
@@ -86,7 +89,7 @@ export class DocumentSession {
   get selectedNodeIds(): readonly EditorNodeId[] { return Object.freeze([...this.resolvedSelection]); }
 
   snapshot(): DocumentSnapshot {
-    return Object.freeze({ entryPath: this.entryPath, files: new Map(this.files) });
+    return Object.freeze({ entryPath: this.entryPath, files: new ImmutableMap(this.files) });
   }
 
   setSelection(locators: readonly ElementLocator[]): void {
@@ -211,17 +214,97 @@ function parse(adapter: UxmlPreviewPort, files: ReadonlyMap<string, SourceBuffer
   for (const [path, buffer] of files) {
     if (path.toLowerCase().endsWith('.uss')) stylesheets.set(path, buffer.text);
   }
+  const stylesheetLookup = createStylesheetLookup(stylesheets);
   const input: ProjectParseInput = {
     uxmlPath: entryPath,
     uxml: entry.text,
     stylesheets,
-    resolveImport: (url) => stylesheets.has(url) ? { path: url, text: stylesheets.get(url)! } : null,
+    resolveImport: (url, from) => {
+      const path = resolveProjectImportPath(url, from, entryPath);
+      return path === null ? null : stylesheetLookup.get(path) ?? null;
+    },
   };
   try {
-    return adapter.parseProject(input);
+    return freezeParsedPreviewDocument(adapter.parseProject(input));
   } catch (error) {
     throw new DocumentSessionError('parse-failed', 'The candidate source buffers could not be parsed.', error);
   }
+}
+
+function createStylesheetLookup(stylesheets: ReadonlyMap<string, string>): ReadonlyMap<string, { readonly path: string; readonly text: string } | null> {
+  const lookup = new Map<string, { readonly path: string; readonly text: string } | null>();
+  for (const [path, text] of stylesheets) {
+    const normalized = normalizeProjectPath(path);
+    if (normalized === null) continue;
+    if (lookup.has(normalized)) {
+      lookup.set(normalized, null);
+    } else {
+      lookup.set(normalized, Object.freeze({ path: normalized, text }));
+    }
+  }
+  return lookup;
+}
+
+function resolveProjectImportPath(url: string, from: string | null, entryPath: string): string | null {
+  const entry = normalizeProjectPath(entryPath);
+  if (entry === null) return null;
+  const importer = from === null
+    ? entry
+    : isProjectFixedPath(from)
+      ? normalizeProjectPath(from)
+      : resolveRelativeProjectPath(from, directoryOf(entry));
+  if (importer === null) return null;
+  return isProjectFixedPath(url)
+    ? normalizeProjectPath(url)
+    : resolveRelativeProjectPath(url, directoryOf(importer));
+}
+
+function resolveRelativeProjectPath(path: string, baseDirectory: string): string | null {
+  const normalizedSeparators = path.replace(/\\/g, '/');
+  if (hasNonProjectScheme(normalizedSeparators) || normalizedSeparators.startsWith('/')) return null;
+  return normalizeProjectPath(baseDirectory.length === 0
+    ? normalizedSeparators
+    : `${baseDirectory}/${normalizedSeparators}`);
+}
+
+function normalizeProjectPath(path: string): string | null {
+  let normalized = path.replace(/\\/g, '/');
+  if (normalized.startsWith('project://')) {
+    normalized = normalized.slice('project://'.length);
+  } else if (hasNonProjectScheme(normalized)) {
+    return null;
+  }
+  normalized = normalized.replace(/^\/+/, '');
+  const segments: string[] = [];
+  for (const segment of normalized.split('/')) {
+    if (segment.length === 0 || segment === '.') continue;
+    if (segment === '..') {
+      if (segments.length === 0) return null;
+      segments.pop();
+    } else {
+      segments.push(segment);
+    }
+  }
+  return segments.length === 0 ? null : segments.join('/');
+}
+
+function isProjectFixedPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/');
+  return normalized.startsWith('/')
+    || normalized.startsWith('project://')
+    || normalized === 'Assets'
+    || normalized.startsWith('Assets/')
+    || normalized === 'Packages'
+    || normalized.startsWith('Packages/');
+}
+
+function hasNonProjectScheme(path: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(path);
+}
+
+function directoryOf(path: string): string {
+  const separator = path.lastIndexOf('/');
+  return separator === -1 ? '' : path.slice(0, separator);
 }
 
 function snapshotLocators(locators: readonly ElementLocator[]): readonly ElementLocator[] {
@@ -247,6 +330,9 @@ function resolveSelection(document: ParsedPreviewDocument, locators: readonly El
 
 function asSessionError(error: unknown): DocumentSessionError {
   if (error instanceof DocumentSessionError) return error;
-  if (error instanceof EditorTransactionError) return new DocumentSessionError('invalid-patch', error.message, error);
-  return new DocumentSessionError('invalid-patch', 'The editor transaction could not be normalized.', error);
+  if (error instanceof EditorTransactionError) {
+    const code = error.code === 'invalid-selection' ? 'invalid-selection' : 'invalid-transaction';
+    return new DocumentSessionError(code, error.message, error);
+  }
+  return new DocumentSessionError('invalid-transaction', 'The editor transaction could not be normalized.', error);
 }

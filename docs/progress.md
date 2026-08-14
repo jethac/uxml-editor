@@ -250,3 +250,32 @@ replaceable.
   After `commitSequence` was introduced, the focused suite passed while
   confirming exact rollback and unchanged undo/redo availability in both
   directions.
+
+## Task 4 Review Fix Round 1
+
+- Replay red: a two-transaction replay whose second parse failed left the
+  first transaction's USS bytes published (`red` became `blue`) and had already
+  mutated history. Green: replay now snapshots every caller transaction before
+  mutation, uses the session's atomic commit sequence, records normal history
+  only after all commits succeed, and publishes `replayLog` last. The regression
+  restores source, selection, undo/redo availability, replay log, and the
+  observable coalescing barrier.
+- Immutability red: three mutation attempts succeeded against snapshot files,
+  parsed stylesheets, and session document internals. Green: a shared
+  runtime-immutable map backs source snapshots and parsed stylesheet views;
+  editor-owned source, element, diagnostic, and origin structures are
+  copied/frozen while the adapter-owned parsed document identity remains the
+  WeakMap key. Upstream opaque models remain private and unfrozen.
+- Locator red: name rename/removal and unnamed attribute edit/removal produced
+  four unresolved selections. Green: direct child-path resolution now checks
+  qualified tag and ancestor structure only; authored attribute hints remain
+  fallback disambiguators, and indistinguishable fallback candidates still
+  resolve to null.
+- Import red: entry-relative, nested-relative, root-fixed, project-fixed, and
+  Windows-style references did not resolve. Green: the session builds a
+  deterministic normalized USS lookup, anchors relative importer paths to the
+  entry, resolves dot segments, and leaves project-root escapes, drive paths,
+  remote URLs, ambiguous aliases, and missing files unresolved.
+- Error-code red: malformed transaction metadata and selection locators both
+  surfaced as `invalid-patch`. Green: they now report `invalid-transaction` and
+  `invalid-selection` respectively without changing the transaction contract.

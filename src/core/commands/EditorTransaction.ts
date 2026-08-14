@@ -1,4 +1,5 @@
 import type { ElementLocator } from '../documents/ElementLocator';
+import { ImmutableMap } from '../collections/ImmutableMap';
 import type { SourcePatch } from './SourcePatch';
 
 export interface EditorTransaction {
@@ -15,6 +16,7 @@ export type EditorTransactionErrorCode =
   | 'invalid-label'
   | 'invalid-patches-by-file'
   | 'invalid-file-path'
+  | 'invalid-selection'
   | 'invalid-coalesce-key';
 
 export class EditorTransactionError extends Error {
@@ -62,7 +64,7 @@ export function normalizeEditorTransaction(candidate: EditorTransaction): Editor
       id,
       label,
       patchesByFile: new ImmutableMap(copiedPatches),
-      ...(selectionAfter === undefined ? {} : { selectionAfter: Object.freeze(selectionAfter.map(copyLocator)) }),
+      ...(selectionAfter === undefined ? {} : { selectionAfter: copySelection(selectionAfter) }),
       ...(coalesceKey === undefined ? {} : { coalesceKey }),
     });
   } catch (error) {
@@ -73,6 +75,20 @@ export function normalizeEditorTransaction(candidate: EditorTransaction): Editor
 
 export function copyEditorTransaction(transaction: EditorTransaction): EditorTransaction {
   return normalizeEditorTransaction(transaction);
+}
+
+function copySelection(candidate: unknown): readonly ElementLocator[] {
+  if (!Array.isArray(candidate)) {
+    throw new EditorTransactionError('invalid-selection', 'selectionAfter must be an array when provided.');
+  }
+  try {
+    return Object.freeze(candidate.map((locator) => {
+      if (typeof locator !== 'object' || locator === null) throw new TypeError('Invalid locator.');
+      return copyLocator(locator as ElementLocator);
+    }));
+  } catch (error) {
+    throw new EditorTransactionError('invalid-selection', 'selectionAfter could not be snapshotted.', error);
+  }
 }
 
 function copyLocator(locator: ElementLocator): ElementLocator {
@@ -87,25 +103,4 @@ function copyLocator(locator: ElementLocator): ElementLocator {
 
 function isReadonlyMap(candidate: unknown): candidate is ReadonlyMap<unknown, unknown> {
   return typeof candidate === 'object' && candidate !== null && typeof (candidate as ReadonlyMap<unknown, unknown>)[Symbol.iterator] === 'function';
-}
-
-export class ImmutableMap<K, V> implements ReadonlyMap<K, V> {
-  readonly #entriesMap: Map<K, V>;
-
-  constructor(entries?: Iterable<readonly [K, V]>) {
-    this.#entriesMap = new Map(entries);
-    Object.freeze(this);
-  }
-
-  get size(): number { return this.#entriesMap.size; }
-  get(key: K): V | undefined { return this.#entriesMap.get(key); }
-  has(key: K): boolean { return this.#entriesMap.has(key); }
-  forEach(callbackfn: (value: V, key: K, map: ReadonlyMap<K, V>) => void, thisArg?: unknown): void {
-    this.#entriesMap.forEach((value, key) => callbackfn.call(thisArg, value, key, this));
-  }
-  entries(): IterableIterator<[K, V]> { return this.#entriesMap.entries(); }
-  keys(): IterableIterator<K> { return this.#entriesMap.keys(); }
-  values(): IterableIterator<V> { return this.#entriesMap.values(); }
-  [Symbol.iterator](): IterableIterator<[K, V]> { return this.#entriesMap.entries(); }
-  get [Symbol.toStringTag](): string { return 'ReadonlyMap'; }
 }

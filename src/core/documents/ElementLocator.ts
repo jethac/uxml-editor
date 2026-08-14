@@ -45,7 +45,7 @@ export function resolveElementLocator(root: EditorElement, locator: ElementLocat
   }
 
   const direct = candidates.find((candidate) => equalPath(candidate.childPath, locator.childPath));
-  if (direct && matchesLocator(direct, locator)) return direct.element.id;
+  if (direct && matchesStructure(direct, locator)) return direct.element.id;
 
   const matches = candidates.filter((candidate) => matchesLocator(candidate, locator));
   return matches.length === 1 ? matches[0].element.id : null;
@@ -62,11 +62,15 @@ function listElements(root: EditorElement): readonly LocatedElement[] {
 }
 
 function matchesLocator(candidate: LocatedElement, locator: ElementLocator): boolean {
-  return candidate.element.name === locator.qualifiedTag
-    && equalPath(candidate.ancestorTags, locator.ancestorTags)
+  return matchesStructure(candidate, locator)
     && locator.attributeHints.every((hint) => candidate.element.attributes.some((attribute) =>
       attribute.name === hint.name && attribute.value === hint.value,
     ));
+}
+
+function matchesStructure(candidate: LocatedElement, locator: ElementLocator): boolean {
+  return candidate.element.name === locator.qualifiedTag
+    && equalPath(candidate.ancestorTags, locator.ancestorTags);
 }
 
 function equalPath(left: readonly (string | number)[], right: readonly (string | number)[]): boolean {

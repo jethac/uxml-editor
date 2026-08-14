@@ -31,6 +31,7 @@ import type {
   StyleExplanationOrigin,
   UxmlPreviewPort,
 } from './types';
+import { freezeParsedPreviewDocument } from './immutableParsedDocument';
 
 const documentModels = new WeakMap<ParsedPreviewDocument, UxmlDocument>();
 const documentNodes = new WeakMap<ParsedPreviewDocument, ReadonlyMap<EditorNodeId, ElementNode>>();
@@ -233,7 +234,7 @@ export class UxmlPreviewAdapter implements UxmlPreviewPort {
     const originsBySheet = model.sheets.map((_, index) => resolvedOrigins[index] ?? null);
     const nodes = new Map<EditorNodeId, ElementNode>();
     const root = toEditorElement(model.root, source.uxmlPath, nodes);
-    const document: ParsedPreviewDocument = {
+    const document = freezeParsedPreviewDocument({
       source,
       root,
       originsBySheet,
@@ -244,7 +245,7 @@ export class UxmlPreviewAdapter implements UxmlPreviewPort {
         originsBySheet,
         nodes,
       )),
-    };
+    });
     documentModels.set(document, model);
     documentNodes.set(document, nodes);
     return document;

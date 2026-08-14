@@ -42,6 +42,50 @@ describe('CommandHistory', () => {
     expect(Object.isFrozen(results)).toBe(true);
   });
 
+  it('rolls back session, history, selection, and replay log when a later replay transaction fails', () => {
+    const adapter = new SimpleAdapter();
+    const session = openSession(adapter);
+    session.history.replay([
+      edit('seed', 'Seed replay', new Map([[entryPath, [{ start: 26, end: 30, replacement: 'Seed' }]]]), 'text'),
+    ]);
+    session.history.execute(edit('branch', 'Branch', new Map([[entryPath, [{ start: 26, end: 30, replacement: 'Hold' }]]])));
+    session.history.undo();
+    const selected = session.locatorFor('button' as EditorNodeId)!;
+    session.setSelection([selected]);
+    const before = session.snapshot();
+    const beforeLog = session.history.replayLog;
+    const beforeCanUndo = session.history.canUndo;
+    const beforeCanRedo = session.history.canRedo;
+    adapter.failWhenSourceIncludes = 'Fail';
+
+    expect(() => session.history.replay([
+      {
+        ...edit('style', 'Change style', new Map([[sheetPath, [{ start: 17, end: 20, replacement: 'blue' }]]])),
+        selectionAfter: [session.locatorFor('root' as EditorNodeId)!],
+      },
+      edit('fail', 'Fail later', new Map([[entryPath, [{ start: 26, end: 30, replacement: 'Fail' }]]])),
+    ])).toThrow(/parse/i);
+
+    expect(session.snapshot()).toEqual(before);
+    expect(session.selection).toEqual([selected]);
+    expect(session.selectedNodeIds).toEqual(['button']);
+    expect(session.history.canUndo).toBe(beforeCanUndo);
+    expect(session.history.canRedo).toBe(beforeCanRedo);
+    expect(session.history.replayLog).toEqual(beforeLog);
+
+    adapter.failWhenSourceIncludes = undefined;
+    session.history.redo();
+    expect(session.snapshot().files.get(entryPath)?.text).toContain('Hold');
+    session.history.undo();
+    expect(session.snapshot()).toEqual(before);
+    session.history.execute(edit('after-failure', 'After failure', new Map([
+      [entryPath, [{ start: 26, end: 30, replacement: 'Next' }]],
+    ]), 'text'));
+    session.history.undo();
+    expect(session.snapshot()).toEqual(before);
+    expect(session.history.canUndo).toBe(true);
+  });
+
   it('clears redo when a successful new execute branches history', () => {
     const session = openSession();
     session.history.execute(edit('first', 'First', new Map([[entryPath, [{ start: 26, end: 30, replacement: 'Start' }]]])));

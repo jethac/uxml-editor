@@ -172,6 +172,21 @@ describe('UxmlPreviewAdapter', () => {
     expect(Object.isFrozen(button.attributes[0].source)).toBe(true);
   });
 
+  it('keeps parsed public state runtime-immutable without breaking identity-based serialization', () => {
+    const adapter = new UxmlPreviewAdapter();
+    const parsed = adapter.parseProject(fixtureInput());
+    const before = adapter.serializeEntry(parsed);
+
+    expect(() => (parsed.source.stylesheets as Map<string, string>).set('injected.uss', 'bad')).toThrow();
+    expect(() => (parsed.diagnostics as Array<unknown>).push('bad')).toThrow();
+    expect(() => (parsed.originsBySheet as Array<string | null>).push('bad.uss')).toThrow();
+    expect(() => { (parsed.source as { uxml: string }).uxml = '<broken />'; }).toThrow();
+
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed.source)).toBe(true);
+    expect(adapter.serializeEntry(parsed)).toEqual(before);
+  });
+
   it('uses fallback resolver sources by canonical path and preserves their exact text', () => {
     const adapter = new UxmlPreviewAdapter();
     const entryText = '@import "nested.uss";\r\nLabel { color: #010203; }\r\n';
