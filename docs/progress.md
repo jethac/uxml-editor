@@ -113,7 +113,30 @@ replaceable.
   emoji, insertions, deletions, replacements, and no-op sets.
 - `SourceBuffer` is a frozen path-plus-exact-text value object. Its `apply`
   method returns a new buffer, leaving the original untouched; it observes
-  `none`, LF, CRLF, or mixed newline style without making encoding promises.
+  `none`, LF, CRLF, CR, or mixed newline style without making encoding promises.
+
+## Task 3 Fix Round 1
+
+- Commit: `6f623d9` (`fix: harden source patch validation`); no push or amend.
+- Red: `npm test -- src/core/commands/SourcePatch.test.ts` exited 1 with 11
+  expected failures. The prior validator accepted low/high surrogate insertions
+  that made inverse offsets split a transformed pair, re-read getter-backed
+  patch fields through validation/spread, threw for null and throwing entries,
+  accepted missing/non-string replacements, and did not classify bare CR.
+- Green: validation now snapshots and freezes only `start`, `end`, and
+  `replacement` after reading each field exactly once. It rejects non-objects
+  and throwing access as `invalid-patch`, and missing/non-string replacements
+  as `invalid-replacement`. It internally validates the generated inverse
+  against transformed output before reporting a forward set as valid, without
+  public validation/inversion recursion.
+- The patch suite covers both low/high cross-boundary cases, adjacent inverse
+  groups, getter-backed snapshots, malformed runtime input, CR-only text, and
+  CR mixes. The exhaustive loop now asserts inverse validation before the
+  exact restoration assertion. `SourceBuffer` separately observes CRLF, lone
+  LF, and lone CR; more than one observed style is `mixed`.
+- Verification: focused Task 3 tests passed 29 tests; `npm test` passed 4
+  files and 46 tests; `npm run build` passed `tsc --noEmit` and Vite bundling;
+  `git diff --check` and the staged diff check exited 0 before the fix commit.
 
 ## Task 2 Fix Round 1
 
