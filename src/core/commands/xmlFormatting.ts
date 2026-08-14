@@ -13,12 +13,28 @@ export function readXmlAttributeLexeme(
 ): XmlAttributeLexeme | null {
   if (!validSpan(source, span)) return null;
   const lexeme = source.slice(span.start, span.end);
-  const match = /^([^\s=/>]+)\s*=\s*(["'])([\s\S]*)\2$/.exec(lexeme);
-  if (!match) return null;
-  const quoteOffset = lexeme.indexOf(match[2]);
+  let cursor = 0;
+  while (
+    cursor < lexeme.length
+    && !isXmlWhitespaceCharacter(lexeme[cursor])
+    && !'=/>'.includes(lexeme[cursor])
+  ) {
+    cursor += 1;
+  }
+  if (cursor === 0) return null;
+  const name = lexeme.slice(0, cursor);
+  while (isXmlWhitespaceCharacter(lexeme[cursor])) cursor += 1;
+  if (lexeme[cursor] !== '=') return null;
+  cursor += 1;
+  while (isXmlWhitespaceCharacter(lexeme[cursor])) cursor += 1;
+  const quote = lexeme[cursor];
+  if (quote !== '"' && quote !== "'") return null;
+  const quoteOffset = cursor;
+  const closingQuote = lexeme.indexOf(quote, quoteOffset + 1);
+  if (closingQuote !== lexeme.length - 1) return null;
   return Object.freeze({
-    name: match[1],
-    quote: match[2] as '"' | "'",
+    name,
+    quote,
     valueStart: span.start + quoteOffset + 1,
     valueEnd: span.end - 1,
   });
@@ -115,6 +131,10 @@ function validSpan(source: string, span: EditorSourceSpan): boolean {
     && span.start >= 0
     && span.end >= span.start
     && span.end <= source.length;
+}
+
+function isXmlWhitespaceCharacter(character: string | undefined): boolean {
+  return character === ' ' || character === '\t' || character === '\r' || character === '\n';
 }
 
 function isXmlCodePoint(codePoint: number): boolean {

@@ -4,32 +4,29 @@ import { resolveElementLocator, type ElementLocator } from '../documents/Element
 import { normalizeEditorTransaction, type EditorTransaction } from './EditorTransaction';
 import type { SourcePatch } from './SourcePatch';
 import {
-  decodeXmlAttributeValue,
   escapeXmlAttributeValue,
   isQualifiedXmlName,
   isXmlElementFragment,
   readXmlAttributeLexeme,
 } from './xmlFormatting';
+import { UxmlCommandError } from './uxmlCommandError';
+import {
+  planDestinationInsertion,
+  planWrapperPatches,
+  trailingXmlWhitespace,
+} from './uxmlInsertion';
+import {
+  namespaceBindingsAt,
+  preservesNamespaceSemantics,
+  requireAttributeNamespace,
+  requireBoundQName,
+  requireSafeNamespaceRemoval,
+} from './uxmlNamespaces';
+import { exactClosingNameSpan, outerEnd, requireEntrySource } from './uxmlSourceSpans';
+import { containsElement, parentOf, walkElements } from './uxmlTree';
 
-export type UxmlCommandErrorCode =
-  | 'invalid-locator'
-  | 'unresolved-locator'
-  | 'invalid-name'
-  | 'invalid-value'
-  | 'invalid-index'
-  | 'invalid-fragment'
-  | 'invalid-selection'
-  | 'illegal-hierarchy'
-  | 'illegal-root'
-  | 'ambiguous-source'
-  | 'missing-attribute';
-
-export class UxmlCommandError extends Error {
-  constructor(readonly code: UxmlCommandErrorCode, message: string, readonly cause?: unknown) {
-    super(message);
-    this.name = 'UxmlCommandError';
-  }
-}
+export { UxmlCommandError } from './uxmlCommandError';
+export type { UxmlCommandErrorCode } from './uxmlCommandError';
 
 export function setAttribute(
   session: DocumentSession,
@@ -124,66 +121,13 @@ export function insertElement(
   if (typeof fragment !== 'string' || !isXmlElementFragment(fragment, namespaceBindings)) {
     throw new UxmlCommandError('invalid-fragment', 'Inserted source must be exactly one XML element fragment.');
   }
-  if (parent.spans.closeTag === null) {
-    const source = requireEntrySource(session, parent.spans.openTag.path);
-    const slash = parent.spans.openTag.end - 2;
-    if (source.slice(slash, parent.spans.openTag.end) !== '/>') {
-      throw new UxmlCommandError('ambiguous-source', `The self-closing delimiter for ${parent.name} is not safe to edit.`);
-    }
-    const { newline, parentIndent, childIndent } = childFormatting(
-      source,
-      session.document.root,
-      parent,
-    );
-    const inner = newline.length === 0
-      ? `${fragment}</${parent.name}>`
-      : `${newline}${childIndent}${fragment}${newline}${parentIndent}</${parent.name}>`;
-    return transaction('insert-element', `Insert element in ${parent.name}`, parent.spans.openTag.path, [{
-      start: slash,
-      end: parent.spans.openTag.end,
-      replacement: `>${inner}`,
-    }]);
-  }
-
   const source = requireEntrySource(session, parent.spans.openTag.path);
-  const current = parent.children[index];
-  if (current !== undefined) {
-    const lowerBound = index === 0
-      ? parent.spans.openTag.end
-      : outerEnd(source, parent.children[index - 1]);
-    const insertion = current.spans.openTag.start;
-    const separator = trailingXmlWhitespace(source.slice(lowerBound, insertion));
-    return transaction('insert-element', `Insert element in ${parent.name}`, parent.spans.openTag.path, [{
-      start: insertion,
-      end: insertion,
-      replacement: `${fragment}${separator}`,
-    }]);
-  }
-
-  const previous = parent.children[index - 1];
-  if (previous === undefined) {
-    const tail = trailingXmlWhitespace(source.slice(parent.spans.inner.start, parent.spans.inner.end));
-    const insertion = parent.spans.inner.end - tail.length;
-    const { newline, childIndent } = childFormatting(source, session.document.root, parent);
-    const prefix = newline.length === 0 ? '' : `${newline}${childIndent}`;
-    return transaction('insert-element', `Insert element in ${parent.name}`, parent.spans.openTag.path, [{
-      start: insertion,
-      end: insertion,
-      replacement: `${prefix}${fragment}`,
-    }]);
-  }
-  const previousLowerBound = index === 1
-    ? parent.spans.openTag.end
-    : outerEnd(source, parent.children[index - 2]);
-  const separator = trailingXmlWhitespace(
-    source.slice(previousLowerBound, previous.spans.openTag.start),
+  return transaction(
+    'insert-element',
+    `Insert element in ${parent.name}`,
+    parent.spans.openTag.path,
+    [planDestinationInsertion(source, session.document.root, parent, index, fragment)],
   );
-  const insertion = outerEnd(source, previous);
-  return transaction('insert-element', `Insert element in ${parent.name}`, parent.spans.openTag.path, [{
-    start: insertion,
-    end: insertion,
-    replacement: `${separator}${fragment}`,
-  }]);
 }
 
 export function removeElement(
@@ -341,28 +285,14 @@ export function moveElement(
   const start = elements[0].spans.openTag.start;
   const end = outerEnd(source, elements[elements.length - 1]);
   const fragment = source.slice(start, end);
-  let insertion: SourcePatch;
-  if (destination.spans.closeTag === null) {
-    const slash = destination.spans.openTag.end - 2;
-    if (source.slice(slash, destination.spans.openTag.end) !== '/>') {
-      throw new UxmlCommandError('ambiguous-source', `The self-closing delimiter for ${destination.name} is not safe to edit.`);
-    }
-    const { newline, parentIndent, childIndent } = childFormatting(
-      source,
-      session.document.root,
-      destination,
-    );
-    const inner = newline.length === 0
-      ? `${fragment}</${destination.name}>`
-      : `${newline}${childIndent}${fragment}${newline}${parentIndent}</${destination.name}>`;
-    insertion = Object.freeze({
-      start: slash,
-      end: destination.spans.openTag.end,
-      replacement: `>${inner}`,
-    });
-  } else {
-    insertion = insertionPatch(session, source, destination, index, fragment, destinationChildren);
-  }
+  const insertion = planDestinationInsertion(
+    source,
+    session.document.root,
+    destination,
+    index,
+    fragment,
+    destinationChildren,
+  );
   const patches: SourcePatch[] = [
     { start, end, replacement: '' },
     insertion,
@@ -412,23 +342,12 @@ export function wrapElements(
   elements.forEach((element) => exactClosingNameSpan(source, element));
   const start = first.spans.openTag.start;
   const end = outerEnd(source, last);
-  const { newline, parentIndent } = childFormatting(source, session.document.root, parent);
-  const wrapperIndent = lineIndentAt(source, start);
-  const observedUnit = wrapperIndent.startsWith(parentIndent)
-    ? wrapperIndent.slice(parentIndent.length)
-    : '';
-  const unit = observedUnit.length > 0 ? observedUnit : wrapperIndent.includes('\t') ? '\t' : '  ';
-  const before = newline.length === 0
-    ? `<${wrapperName}>`
-    : `<${wrapperName}>${newline}${wrapperIndent}${unit}`;
-  const after = newline.length === 0
-    ? `</${wrapperName}>`
-    : `${newline}${wrapperIndent}</${wrapperName}>`;
-
-  return transaction('wrap-elements', `Wrap in ${wrapperName}`, path, [
-    { start, end: start, replacement: before },
-    { start: end, end, replacement: after },
-  ]);
+  return transaction(
+    'wrap-elements',
+    `Wrap in ${wrapperName}`,
+    path,
+    planWrapperPatches(source, session.document.root, parent, start, end, wrapperName),
+  );
 }
 
 export function renameElement(
@@ -518,7 +437,7 @@ function requireElement(session: DocumentSession, locator: ElementLocator): Edit
   if (nodeId === null) {
     throw new UxmlCommandError('unresolved-locator', 'The element locator does not resolve uniquely in this session.');
   }
-  const element = walk(session.document.root).find((candidate) => candidate.id === nodeId);
+  const element = walkElements(session.document.root).find((candidate) => candidate.id === nodeId);
   if (!element) {
     throw new UxmlCommandError('unresolved-locator', 'The resolved element is absent from this session.');
   }
@@ -574,385 +493,6 @@ function snapshotLocator(candidate: ElementLocator): ElementLocator {
   } catch (error) {
     throw new UxmlCommandError('invalid-locator', 'The element locator is malformed.', error);
   }
-}
-
-function requireEntrySource(session: DocumentSession, path: string): string {
-  const buffer = session.snapshot().files.get(path);
-  if (!buffer || path !== session.entryPath) {
-    throw new UxmlCommandError('ambiguous-source', `Element source ${path} is not the session entry source.`);
-  }
-  return buffer.text;
-}
-
-function walk(root: EditorElement): readonly EditorElement[] {
-  return [root, ...root.children.flatMap(walk)];
-}
-
-function namespaceBindingsAt(root: EditorElement, target: EditorElement): ReadonlyMap<string, string> {
-  const lineage = lineageTo(root, target);
-  if (lineage === null) {
-    throw new UxmlCommandError('ambiguous-source', `${target.name} is absent from the document tree.`);
-  }
-  let bindings = new Map<string, string>([
-    ['xml', 'http://www.w3.org/XML/1998/namespace'],
-  ]);
-  for (const element of lineage) {
-    const scoped = withNamespaceDeclarations(bindings, element);
-    if (scoped === null) {
-      throw new UxmlCommandError(
-        'ambiguous-source',
-        `The namespace declarations in scope for ${target.name} are not safe to interpret.`,
-      );
-    }
-    bindings = scoped;
-  }
-  return bindings;
-}
-
-function namespaceBindingsBefore(root: EditorElement, target: EditorElement): ReadonlyMap<string, string> {
-  const lineage = lineageTo(root, target);
-  if (lineage === null) {
-    throw new UxmlCommandError('ambiguous-source', `${target.name} is absent from the document tree.`);
-  }
-  let bindings = new Map<string, string>([
-    ['xml', 'http://www.w3.org/XML/1998/namespace'],
-  ]);
-  for (const element of lineage.slice(0, -1)) {
-    const scoped = withNamespaceDeclarations(bindings, element);
-    if (scoped === null) {
-      throw new UxmlCommandError(
-        'ambiguous-source',
-        `The namespace declarations above ${target.name} are not safe to interpret.`,
-      );
-    }
-    bindings = scoped;
-  }
-  return bindings;
-}
-
-function requireSafeNamespaceRemoval(
-  root: EditorElement,
-  element: EditorElement,
-  attributeName: string,
-  authoredValue: string,
-): void {
-  const prefix = attributeName === 'xmlns' ? '' : attributeName.slice('xmlns:'.length);
-  const removedUri = decodeXmlAttributeValue(authoredValue);
-  if (removedUri === null || !isUsableNamespaceBinding(prefix, removedUri)) {
-    throw new UxmlCommandError(
-      'ambiguous-source',
-      `Namespace declaration ${attributeName} is not safe to interpret.`,
-    );
-  }
-  const inherited = namespaceBindingsBefore(root, element);
-  const inheritedUri = prefix.length === 0 ? inherited.get(prefix) ?? '' : inherited.get(prefix);
-  if (inheritedUri === removedUri) return;
-  if (subtreeDependsOnNamespace(element, prefix, true)) {
-    throw new UxmlCommandError(
-      'illegal-hierarchy',
-      `Removing ${attributeName} would change or unbind a QName in ${element.name}.`,
-    );
-  }
-}
-
-function subtreeDependsOnNamespace(
-  element: EditorElement,
-  prefix: string,
-  declarationOwner: boolean,
-): boolean {
-  if (!declarationOwner) {
-    const declarationName = prefix.length === 0 ? 'xmlns' : `xmlns:${prefix}`;
-    const overrides = element.attributes.filter((attribute) => attribute.name === declarationName);
-    if (overrides.length > 1) {
-      throw new UxmlCommandError('ambiguous-source', `${declarationName} occurs more than once on ${element.name}.`);
-    }
-    if (overrides.length === 1) {
-      const overrideUri = decodeXmlAttributeValue(overrides[0].value);
-      if (overrideUri === null || !isUsableNamespaceBinding(prefix, overrideUri)) {
-        throw new UxmlCommandError(
-          'ambiguous-source',
-          `Nested namespace declaration ${declarationName} is not safe to interpret.`,
-        );
-      }
-      return false;
-    }
-  }
-
-  if (qNameUsesNamespacePrefix(element.name, prefix, false)) return true;
-  if (element.attributes.some((attribute) =>
-    attribute.name !== 'xmlns'
-    && !attribute.name.startsWith('xmlns:')
-    && qNameUsesNamespacePrefix(attribute.name, prefix, true),
-  )) {
-    return true;
-  }
-  return element.children.some((child) => subtreeDependsOnNamespace(child, prefix, false));
-}
-
-function qNameUsesNamespacePrefix(name: string, prefix: string, attribute: boolean): boolean {
-  const colon = name.indexOf(':');
-  if (prefix.length === 0) return !attribute && colon < 0;
-  return colon === prefix.length && name.slice(0, colon) === prefix;
-}
-
-function isUsableNamespaceBinding(prefix: string, uri: string): boolean {
-  if (prefix === 'xmlns') return false;
-  if (prefix === 'xml') return uri === 'http://www.w3.org/XML/1998/namespace';
-  if (prefix.length === 0) return !isReservedNamespaceUri(uri);
-  return uri.length > 0 && !isReservedNamespaceUri(uri);
-}
-
-function requireAttributeNamespace(
-  root: EditorElement,
-  element: EditorElement,
-  name: string,
-  value: string,
-): void {
-  if (name === 'xmlns') {
-    if (isReservedNamespaceUri(value)) {
-      throw new UxmlCommandError('invalid-value', 'The default namespace cannot use a reserved namespace URI.');
-    }
-    return;
-  }
-  if (name.startsWith('xmlns:')) {
-    const prefix = name.slice('xmlns:'.length);
-    if (prefix === 'xmlns') {
-      throw new UxmlCommandError('invalid-name', 'The xmlns prefix cannot itself be declared.');
-    }
-    if (prefix === 'xml') {
-      if (value !== 'http://www.w3.org/XML/1998/namespace') {
-        throw new UxmlCommandError('invalid-value', 'The xml prefix must use the XML namespace URI.');
-      }
-      return;
-    }
-    if (value.length === 0 || isReservedNamespaceUri(value)) {
-      throw new UxmlCommandError(
-        'invalid-value',
-        `Namespace prefix ${prefix} requires a non-reserved, non-empty namespace URI.`,
-      );
-    }
-    return;
-  }
-  requireBoundQName(root, element, name, true);
-}
-
-function requireBoundQName(
-  root: EditorElement,
-  context: EditorElement,
-  qualifiedName: string,
-  attribute: boolean,
-): void {
-  const bindings = namespaceBindingsAt(root, context);
-  if (resolvedNamespace(qualifiedName, attribute, bindings) === null) {
-    throw new UxmlCommandError(
-      'illegal-hierarchy',
-      `Namespace prefix in ${qualifiedName} is not bound at ${context.name}.`,
-    );
-  }
-}
-
-function preservesNamespaceSemantics(
-  element: EditorElement,
-  sourceBindings: ReadonlyMap<string, string>,
-  destinationBindings: ReadonlyMap<string, string>,
-): boolean {
-  const sourceScope = withNamespaceDeclarations(sourceBindings, element);
-  const destinationScope = withNamespaceDeclarations(destinationBindings, element);
-  if (sourceScope === null || destinationScope === null) return false;
-  if (resolvedNamespace(element.name, false, sourceScope)
-    !== resolvedNamespace(element.name, false, destinationScope)) {
-    return false;
-  }
-  for (const attribute of element.attributes) {
-    if (attribute.name === 'xmlns' || attribute.name.startsWith('xmlns:')) continue;
-    const sourceNamespace = resolvedNamespace(attribute.name, true, sourceScope);
-    const destinationNamespace = resolvedNamespace(attribute.name, true, destinationScope);
-    if (sourceNamespace === null || sourceNamespace !== destinationNamespace) return false;
-  }
-  return element.children.every((child) =>
-    preservesNamespaceSemantics(child, sourceScope, destinationScope),
-  );
-}
-
-function withNamespaceDeclarations(
-  inherited: ReadonlyMap<string, string>,
-  element: EditorElement,
-): Map<string, string> | null {
-  const scoped = new Map(inherited);
-  for (const attribute of element.attributes) {
-    const namespaceUri = attribute.name === 'xmlns' || attribute.name.startsWith('xmlns:')
-      ? decodeXmlAttributeValue(attribute.value)
-      : null;
-    if (attribute.name === 'xmlns') {
-      if (namespaceUri === null || isReservedNamespaceUri(namespaceUri)) return null;
-      scoped.set('', namespaceUri);
-      continue;
-    }
-    if (!attribute.name.startsWith('xmlns:')) continue;
-    if (namespaceUri === null) return null;
-    const prefix = attribute.name.slice('xmlns:'.length);
-    if (!isQualifiedXmlName(prefix) || prefix.includes(':') || prefix === 'xmlns') return null;
-    if (prefix === 'xml') {
-      if (namespaceUri !== 'http://www.w3.org/XML/1998/namespace') return null;
-    } else if (namespaceUri.length === 0 || isReservedNamespaceUri(namespaceUri)) {
-      return null;
-    }
-    scoped.set(prefix, namespaceUri);
-  }
-  return scoped;
-}
-
-function resolvedNamespace(
-  qualifiedName: string,
-  attribute: boolean,
-  bindings: ReadonlyMap<string, string>,
-): string | null {
-  if (!isQualifiedXmlName(qualifiedName)) return null;
-  const colon = qualifiedName.indexOf(':');
-  if (colon < 0) return attribute ? '' : bindings.get('') ?? '';
-  const prefix = qualifiedName.slice(0, colon);
-  if (prefix === 'xmlns') return null;
-  return bindings.get(prefix) ?? null;
-}
-
-function isReservedNamespaceUri(value: string): boolean {
-  return value === 'http://www.w3.org/XML/1998/namespace'
-    || value === 'http://www.w3.org/2000/xmlns/';
-}
-
-function lineageTo(root: EditorElement, target: EditorElement): readonly EditorElement[] | null {
-  if (root.id === target.id) return [root];
-  for (const child of root.children) {
-    const descendants = lineageTo(child, target);
-    if (descendants !== null) return [root, ...descendants];
-  }
-  return null;
-}
-
-function outerEnd(source: string, element: EditorElement): number {
-  const closeName = exactClosingNameSpan(source, element);
-  return closeName === null
-    ? Math.max(element.spans.openTag.end, element.spans.inner.end)
-    : element.spans.closeTag!.end;
-}
-
-function exactClosingNameSpan(
-  source: string,
-  element: EditorElement,
-): { readonly start: number; readonly end: number } | null {
-  const { openTag, inner, closeTag } = element.spans;
-  if (closeTag === null) return null;
-  const start = closeTag.start + 2;
-  const end = start + element.name.length;
-  if (
-    inner.path !== openTag.path
-    || closeTag.path !== openTag.path
-    || inner.end !== closeTag.start
-    || source.slice(closeTag.start, start) !== '</'
-    || source.slice(start, end) !== element.name
-    || !/^[\t\r\n ]*>$/.test(source.slice(end, closeTag.end))
-  ) {
-    throw new UxmlCommandError(
-      'ambiguous-source',
-      `The recovered closing tag for ${element.name} does not match its source span exactly.`,
-    );
-  }
-  return Object.freeze({ start, end });
-}
-
-function insertionPatch(
-  session: DocumentSession,
-  source: string,
-  parent: EditorElement,
-  index: number,
-  fragment: string,
-  children: readonly EditorElement[] = parent.children,
-): SourcePatch {
-  const current = children[index];
-  if (current !== undefined) {
-    const lowerBound = index === 0
-      ? parent.spans.inner.start
-      : outerEnd(source, children[index - 1]);
-    const start = current.spans.openTag.start;
-    const separator = trailingXmlWhitespace(source.slice(lowerBound, start));
-    return Object.freeze({ start, end: start, replacement: `${fragment}${separator}` });
-  }
-  const previous = children[index - 1];
-  if (previous !== undefined) {
-    const lowerBound = index === 1
-      ? parent.spans.inner.start
-      : outerEnd(source, children[index - 2]);
-    const separator = trailingXmlWhitespace(source.slice(lowerBound, previous.spans.openTag.start));
-    const start = outerEnd(source, previous);
-    return Object.freeze({ start, end: start, replacement: `${separator}${fragment}` });
-  }
-
-  const tail = trailingXmlWhitespace(source.slice(parent.spans.inner.start, parent.spans.inner.end));
-  const start = parent.spans.inner.end - tail.length;
-  const { newline, childIndent } = childFormatting(source, session.document.root, parent);
-  const prefix = newline.length === 0 ? '' : `${newline}${childIndent}`;
-  return Object.freeze({ start, end: start, replacement: `${prefix}${fragment}` });
-}
-
-function trailingXmlWhitespace(value: string): string {
-  return /[\t\r\n ]*$/.exec(value)?.[0] ?? '';
-}
-
-function childFormatting(
-  source: string,
-  root: EditorElement,
-  parent: EditorElement,
-): { readonly newline: string; readonly parentIndent: string; readonly childIndent: string } {
-  const lineStart = Math.max(
-    source.lastIndexOf('\n', parent.spans.openTag.start - 1),
-    source.lastIndexOf('\r', parent.spans.openTag.start - 1),
-  ) + 1;
-  const beforeTag = source.slice(lineStart, parent.spans.openTag.start);
-  const parentIndent = /^[\t ]*$/.test(beforeTag) ? beforeTag : '';
-  const innerLineBreak = /\r\n|[\r\n]/.exec(
-    source.slice(parent.spans.inner.start, parent.spans.inner.end),
-  )?.[0] ?? '';
-  const lineBreak = lineStart === 0
-    ? innerLineBreak
-    : source[lineStart - 1] === '\n' && source[lineStart - 2] === '\r'
-      ? '\r\n'
-      : source[lineStart - 1];
-  if (lineBreak.length === 0) {
-    return Object.freeze({ newline: '', parentIndent, childIndent: '' });
-  }
-
-  const ancestor = parentOf(root, parent);
-  const ancestorIndent = ancestor === null ? '' : lineIndentAt(source, ancestor.spans.openTag.start);
-  const observedUnit = parentIndent.startsWith(ancestorIndent)
-    ? parentIndent.slice(ancestorIndent.length)
-    : '';
-  const unit = observedUnit.length > 0
-    ? observedUnit
-    : parentIndent.includes('\t') ? '\t' : '  ';
-  return Object.freeze({
-    newline: lineBreak,
-    parentIndent,
-    childIndent: `${parentIndent}${unit}`,
-  });
-}
-
-function lineIndentAt(source: string, offset: number): string {
-  const lineStart = Math.max(source.lastIndexOf('\n', offset - 1), source.lastIndexOf('\r', offset - 1)) + 1;
-  const indentation = source.slice(lineStart, offset);
-  return /^[\t ]*$/.test(indentation) ? indentation : '';
-}
-
-function parentOf(root: EditorElement, target: EditorElement): EditorElement | null {
-  for (const child of root.children) {
-    if (child.id === target.id) return root;
-    const found = parentOf(child, target);
-    if (found !== null) return found;
-  }
-  return null;
-}
-
-function containsElement(root: EditorElement, target: EditorElement): boolean {
-  return root.id === target.id || root.children.some((child) => containsElement(child, target));
 }
 
 function describeInvalidName(value: unknown): string {

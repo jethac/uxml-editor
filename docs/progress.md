@@ -333,3 +333,34 @@ replaceable.
   session, and history suites passed 50 tests; `npm test` passed 7 files and
   135 tests; `npm run build` passed `tsc --noEmit` and Vite bundling with 16
   modules; and `git diff --check` exited 0 with only line-ending notices.
+
+## Task 5 Review Fix Round 1
+
+- Paired destination safety red: insert and move both planned child insertion
+  into an element whose recovered close span was the ancestor `</ui:UXML>`.
+  Green: `planDestinationInsertion` is now the single insert/move choke point;
+  every paired destination requires an exact matching closing QName/span before
+  any insertion or trivia offset is returned.
+- Namespace move red: unbound and reserved moved QNames compared as equal when
+  both source and destination resolution returned null. Green: every moved
+  element, including nested descendants, requires non-null source and
+  destination namespace resolution before URI comparison.
+- Duplicate declaration red: repeated default or prefixed namespace declarations
+  on one element silently overwrote each other in scope construction. Green:
+  per-element prefix tracking rejects same-URI and different-URI duplicates as
+  ambiguous for insert, rename, wrap, namespaced attribute, and move safety.
+- Attribute lexing red: JavaScript whitespace admitted NBSP/form feed around
+  `=`, and a greedy body admitted an interior matching quote. Green: the exact
+  span lexer accepts only XML whitespace around `=`, requires the first matching
+  quote to terminate the span, and continues to allow opposite quotes and
+  entity references inside values.
+- `uxmlCommands.ts` retains the eight public command functions and delegates to
+  acyclic modules for command errors, tree traversal, exact source-span safety,
+  namespace scope, and destination/trivia planning. The former 1,165-line test
+  file is split into attribute, insertion/removal, move/wrap, and
+  namespace/recovery suites with shared deterministic fixtures. All 38 prior
+  declarations plus four new regressions remain, totaling 52 Vitest cases.
+- Verification: the four command suites passed 52 tests; touched adapter,
+  session, and history suites passed 50 tests; `npm test` passed 10 files and
+  139 tests; `npm run build` passed `tsc --noEmit` and Vite bundling with 16
+  modules; and `git diff --check` exited 0 with only line-ending notices.
