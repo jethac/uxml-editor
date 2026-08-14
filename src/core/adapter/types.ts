@@ -39,10 +39,17 @@ export interface EditorDiagnostic {
   readonly nodeId?: EditorNodeId;
 }
 
+export interface EditorAuthoredAttribute {
+  readonly name: string;
+  readonly value: string;
+  readonly source: EditorSourceSpan;
+}
+
 export interface EditorElement {
   readonly id: EditorNodeId;
   readonly name: string;
   readonly source: EditorSourceSpan;
+  readonly attributes: readonly EditorAuthoredAttribute[];
   readonly children: readonly EditorElement[];
 }
 

@@ -216,3 +216,37 @@ replaceable.
 - Verification: the focused boundary test passed 1 test; the full adapter
   file passed 12 tests; `npm test` passed 3 files and 17 tests; and
   `npm run build` passed `tsc --noEmit` and Vite bundling.
+
+## Task 4 Document Sessions And Command History
+
+- Red: `npm test -- src/core/documents/DocumentSession.test.ts
+  src/core/commands/CommandHistory.test.ts` exited 1 before production modules
+  existed. Vite import analysis reported the missing `DocumentSession` and
+  `ElementLocator` modules from the new focused suites.
+- Green: the focused command exited 0 with 2 files and 21 tests. It covers
+  exact multi-file undo/redo, replay into an equivalent session, redo
+  invalidation, explicit-key coalescing and barriers, caller mutation,
+  invalid transactions, warning-only parses, and pre/post selection restoration
+  across undo and redo.
+- `DocumentSession` is now the atomic authority over immutable `SourceBuffer`
+  values and its adapter-parsed document. It validates every affected patch set
+  before applying candidates, computes inverse patches from original bytes,
+  reparses the candidate entry plus exact available USS buffers, then publishes
+  files, parsed state, diagnostics, and locator selection together. Missing
+  files, invalid patches, and parse failures publish nothing.
+- Element locators retain a unique authored `name`, structural child path,
+  qualified tag, ancestor signature, and authored attribute hints. Resolution
+  uses only globally unique names; duplicate names fall through to structural
+  resolution and genuinely ambiguous candidates remain unresolved. The adapter
+  exposes frozen editor-owned authored attribute values and source spans.
+- Transaction and replay snapshots clone/freeze patches, locators, and
+  read-only map views. Coalesced history stores forward steps in order and
+  inverse steps in reverse order; undo/redo forms a coalescing barrier. A
+  session-owned commit sequence checkpoints files, parsed document, locators,
+  and resolved node IDs so a later reparse failure rolls back every earlier
+  coalesced undo/redo step before history touches either stack.
+- Second red/green: a failure injected into the second inverse/forward parse of
+  a coalesced entry first left the session at the intermediate `Step` source.
+  After `commitSequence` was introduced, the focused suite passed while
+  confirming exact rollback and unchanged undo/redo availability in both
+  directions.

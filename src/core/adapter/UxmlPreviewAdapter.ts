@@ -63,12 +63,17 @@ function toEditorElement(
 ): EditorElement {
   const id = editorNodeId(node.id);
   nodes.set(id, node);
-  return {
+  return Object.freeze({
     id,
     name: node.name.prefix === null ? node.name.local : `${node.name.prefix}:${node.name.local}`,
-    source: { path: uxmlPath, ...node.spans.openTag },
-    children: node.children.map((child) => toEditorElement(child, uxmlPath, nodes)),
-  };
+    source: Object.freeze({ path: uxmlPath, ...node.spans.openTag }),
+    attributes: Object.freeze(node.attributes.map((attribute) => Object.freeze({
+      name: attribute.name,
+      value: attribute.value,
+      source: Object.freeze({ path: uxmlPath, ...attribute.span }),
+    }))),
+    children: Object.freeze(node.children.map((child) => toEditorElement(child, uxmlPath, nodes))),
+  });
 }
 
 function sourceForReference(

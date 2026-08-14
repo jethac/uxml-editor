@@ -158,6 +158,20 @@ describe('UxmlPreviewAdapter', () => {
     expect(input.resolveImport).not.toHaveBeenCalled();
   });
 
+  it('exposes frozen editor-owned authored attribute values and source spans', () => {
+    const parsed = new UxmlPreviewAdapter().parseProject(styleFixtureInput());
+    const button = nodeByName(parsed.root, 'ui:Button');
+
+    expect(button.attributes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'name', value: 'child', source: expect.objectContaining({ path: 'Assets/UI/styles.uxml' }) }),
+      expect.objectContaining({ name: 'text', value: 'Button' }),
+    ]));
+    expect(Object.isFrozen(button)).toBe(true);
+    expect(Object.isFrozen(button.attributes)).toBe(true);
+    expect(Object.isFrozen(button.attributes[0])).toBe(true);
+    expect(Object.isFrozen(button.attributes[0].source)).toBe(true);
+  });
+
   it('uses fallback resolver sources by canonical path and preserves their exact text', () => {
     const adapter = new UxmlPreviewAdapter();
     const entryText = '@import "nested.uss";\r\nLabel { color: #010203; }\r\n';
