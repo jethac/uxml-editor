@@ -62,10 +62,8 @@ export function validatePatchSet(source: string, patches: readonly SourcePatch[]
   const normalized = normalizePatchSet(source, patches);
   if (!normalized.ok) return invalid(normalized.error);
 
-  const output = applyNormalizedPatches(source, normalized.patches);
-  const inverse = invertNormalizedPatches(source, normalized.patches);
-  const inverseValidation = normalizePatchSet(output, inverse);
-  if (!inverseValidation.ok) return invalid(inverseValidation.error);
+  const inverseBoundaryIssue = validateInverseBoundaries(source, normalized.patches);
+  if (inverseBoundaryIssue) return invalid(inverseBoundaryIssue);
 
   return valid(normalized.patches);
 }
@@ -121,40 +119,107 @@ function normalizePatchSet(source: string, patches: readonly SourcePatch[]): Nor
 }
 
 function applyNormalizedPatches(source: string, normalized: readonly SourcePatch[]): string {
-  let result = source;
+  const chunks: string[] = [];
+  let cursor = source.length;
 
   for (let index = normalized.length - 1; index >= 0; index -= 1) {
     const patch = normalized[index];
-    result = result.slice(0, patch.start) + patch.replacement + result.slice(patch.end);
+    chunks.push(source.slice(patch.end, cursor), patch.replacement);
+    cursor = patch.start;
   }
 
-  return result;
+  chunks.push(source.slice(0, cursor));
+  chunks.reverse();
+  return chunks.join('');
 }
 
 function invertNormalizedPatches(source: string, normalized: readonly SourcePatch[]): readonly SourcePatch[] {
   const inverse: SourcePatch[] = [];
   let offsetDelta = 0;
+  let groupStartIndex = 0;
 
-  for (const patch of normalized) {
-    const start = patch.start + offsetDelta;
-    const end = start + patch.replacement.length;
-    const replacement = source.slice(patch.start, patch.end);
-    const previous = inverse[inverse.length - 1];
+  while (groupStartIndex < normalized.length) {
+    let groupEndIndex = groupStartIndex;
+    let transformedLength = normalized[groupStartIndex].replacement.length;
 
-    // Adjacent source edits can collapse to one transformed-output boundary.
-    if (previous && start <= previous.end) {
-      inverse[inverse.length - 1] = Object.freeze({
-        start: previous.start,
-        end: Math.max(previous.end, end),
-        replacement: previous.replacement + replacement,
-      });
-    } else {
-      inverse.push(Object.freeze({ start, end, replacement }));
+    while (
+      groupEndIndex + 1 < normalized.length
+      && normalized[groupEndIndex + 1].start === normalized[groupEndIndex].end
+    ) {
+      groupEndIndex += 1;
+      transformedLength += normalized[groupEndIndex].replacement.length;
     }
-    offsetDelta += patch.replacement.length - (patch.end - patch.start);
+
+    const first = normalized[groupStartIndex];
+    const last = normalized[groupEndIndex];
+    const start = first.start + offsetDelta;
+    inverse.push(Object.freeze({
+      start,
+      end: start + transformedLength,
+      replacement: source.slice(first.start, last.end),
+    }));
+    offsetDelta += transformedLength - (last.end - first.start);
+    groupStartIndex = groupEndIndex + 1;
   }
 
   return Object.freeze(inverse);
+}
+
+function validateInverseBoundaries(source: string, normalized: readonly IndexedPatch[]): PatchValidationIssue | null {
+  let groupStartIndex = 0;
+
+  while (groupStartIndex < normalized.length) {
+    let groupEndIndex = groupStartIndex;
+    let firstNonempty: IndexedPatch | undefined;
+    let lastNonempty: IndexedPatch | undefined;
+
+    do {
+      const patch = normalized[groupEndIndex];
+      if (patch.replacement.length > 0) {
+        firstNonempty ??= patch;
+        lastNonempty = patch;
+      }
+      if (
+        groupEndIndex + 1 >= normalized.length
+        || normalized[groupEndIndex + 1].start !== patch.end
+      ) {
+        break;
+      }
+      groupEndIndex += 1;
+    } while (true);
+
+    const first = normalized[groupStartIndex];
+    const last = normalized[groupEndIndex];
+    const before = source.charCodeAt(first.start - 1);
+    const after = source.charCodeAt(last.end);
+    const startBoundaryAfter = firstNonempty
+      ? firstNonempty.replacement.charCodeAt(0)
+      : after;
+    const endBoundaryBefore = lastNonempty
+      ? lastNonempty.replacement.charCodeAt(lastNonempty.replacement.length - 1)
+      : before;
+
+    if (isHighSurrogate(before) && isLowSurrogate(startBoundaryAfter)) {
+      const causalPatch = firstNonempty ?? first;
+      return issue(
+        'surrogate-boundary',
+        causalPatch.patchIndex,
+        `Patch ${causalPatch.patchIndex} would make its inverse split a UTF-16 surrogate pair.`,
+      );
+    }
+    if (isHighSurrogate(endBoundaryBefore) && isLowSurrogate(after)) {
+      const causalPatch = lastNonempty ?? first;
+      return issue(
+        'surrogate-boundary',
+        causalPatch.patchIndex,
+        `Patch ${causalPatch.patchIndex} would make its inverse split a UTF-16 surrogate pair.`,
+      );
+    }
+
+    groupStartIndex = groupEndIndex + 1;
+  }
+
+  return null;
 }
 
 function requireValidPatchSet(source: string, patches: readonly SourcePatch[]): readonly SourcePatch[] {

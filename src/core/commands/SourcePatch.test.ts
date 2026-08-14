@@ -143,6 +143,30 @@ describe('SourcePatch', () => {
     expect(() => invertPatches(source, patches)).toThrow(SourcePatchValidationError);
   });
 
+  it.each([
+    [
+      'the first caller patch when it is the low-surrogate insertion',
+      [
+        { start: 2, end: 2, replacement: '\uDC00' },
+        { start: 0, end: 1, replacement: 'b' },
+      ],
+      0,
+    ],
+    [
+      'the second caller patch when it is the low-surrogate insertion',
+      [
+        { start: 0, end: 1, replacement: 'b' },
+        { start: 2, end: 2, replacement: '\uDC00' },
+      ],
+      1,
+    ],
+  ])('reports %s for an inverse surrogate boundary', (_label, patches, patchIndex) => {
+    expect(validatePatchSet('a\uD800', patches)).toMatchObject({
+      ok: false,
+      error: { code: 'surrogate-boundary', patchIndex },
+    });
+  });
+
   it('snapshots getter-backed patch fields exactly once before validation', () => {
     let startReads = 0;
     let endReads = 0;
@@ -273,6 +297,23 @@ describe('SourcePatch', () => {
         }
       }
     }
+  });
+
+  it('round-trips a deterministic large source with many patches', () => {
+    const patchCount = 6_000;
+    const stride = 200;
+    const source = 'a'.repeat(patchCount * stride);
+    const patches = Array.from({ length: patchCount }, (_, index) => {
+      const start = index * stride;
+      return { start, end: start + 1, replacement: 'b' };
+    });
+
+    expect(validatePatchSet(source, patches)).toMatchObject({ ok: true });
+    const transformed = applyPatches(source, patches);
+    const inverse = invertPatches(source, patches);
+
+    expect(validatePatchSet(transformed, inverse)).toMatchObject({ ok: true });
+    expect(applyPatches(transformed, inverse)).toBe(source);
   });
 });
 
