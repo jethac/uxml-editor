@@ -1,0 +1,21 @@
+[package]
+name = "uxml-editor"
+version = "0.0.0"
+description = "Standalone visual editor for UXML and USS"
+authors = ["jethac"]
+license = "Apache-2.0"
+repository = "https://github.com/jethac/uxml-editor"
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "uxml_editor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = [] }
