@@ -47,8 +47,43 @@ avoid relying on behavior outside jsdom's declared range.
   `'wasm-unsafe-eval'`, and preview inline styles. `devCsp` adds only
   `ws://localhost:1420` for Vite HMR; no remote source is permitted.
 
+## Task 2 Adapter Characterization
+
+- Red: `npm test -- src/core/adapter/UxmlPreviewAdapter.test.ts` exited 1
+  before implementation because `./UxmlPreviewAdapter` did not exist. The
+  Vitest import-analysis error identified the missing module at the test import.
+- Green: the same focused command exited 0 with 1 test file and 7 tests after
+  the editor-owned adapter was added. The suite uses a fixed 640 by 480 panel
+  and a fixed 8-pixels-per-character, 16-pixel-high text measurement for
+  repeatable Yoga rendering.
+- The adapter owns the opaque parsed model in module-private `WeakMap`s. Its
+  public contract exposes only editor node IDs, source spans, diagnostics,
+  render frames, and style explanation candidates/origins.
+- `parseProject` resolves exact input stylesheet buffers before consulting the
+  host resolver. It records the returned canonical paths in parsed-sheet order;
+  imported stylesheet buffers remain authoritative during no-op serialization
+  because upstream `serialize` returns only one USS source.
+- A shared promise loads Yoga once. A later render through the same adapter
+  disposes the previous upstream result, and editor frame disposal is
+  idempotent.
+- The dependency characterization asserts `uxml-preview@0.4.0`, lock integrity
+  `sha512-CS26v3f85dQ5ZFbTGnoCyTtpyaD1/emDlg6/7+/G3JeGi82oghiGBxxmh5qSdJDQrzs53lKXqPhEvVc4CDQXSg==`,
+  and upstream tag commit `f358e98a805d4ae5a52fc04ff6989b3053354539`.
+  `THIRD-PARTY-NOTICES.md` also carries Apache-2.0 attribution for
+  `uxml-preview` and the MIT Meta notice for bundled `yoga-layout@3.2.1`
+  (integrity
+  `sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ==`).
+- The adapter test uses Node filesystem APIs to scan the TypeScript import
+  boundary. `@types/node@24.13.3` is therefore a pinned development-only
+  declaration dependency and `tsconfig.json` includes the `node` type library;
+  the browser runtime dependency graph is unchanged.
+- Final verification: `npm test` exited 0 with 3 test files and 12 tests
+  passing. `npm run build` exited 0 after `tsc --noEmit`; Vite emitted the
+  browser bundle. The final import scan found no `uxml-preview` reference
+  outside `src/core/adapter`.
+
 ## Next Action
 
-Task 2 will introduce the pinned `uxml-preview` adapter and characterization
-tests. `DocumentSession` remains the sole source of truth for later editor
-state; rendered and component state must stay derived and replaceable.
+Task 3 can add source patches and reparse the authoritative buffers after each
+transaction. `DocumentSession` remains the sole source of truth for later
+editor state; rendered and component state must stay derived and replaceable.
