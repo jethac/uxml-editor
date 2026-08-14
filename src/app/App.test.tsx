@@ -7,4 +7,9 @@ describe('application shell', () => {
     render(<App />);
     expect(screen.getByRole('application', { name: 'UXML Editor' })).toBeVisible();
   });
+
+  it('does not expose the empty command bar as a toolbar', () => {
+    render(<App />);
+    expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+  });
 });

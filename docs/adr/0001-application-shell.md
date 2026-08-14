@@ -47,9 +47,10 @@ The first generated no-bundle build failed before compilation because Tauri
 rejects the default identifier `com.tauri.dev`. Setting the application-owned
 identifier `com.jethac.uxml-editor` fixed the root cause. TypeScript 7.0.2,
 Vite 8.2.1, and Vitest 4.1.10 all executed successfully under Node 25.2.1.
-`jsdom@30.0.1` emits an engine warning because it supports Node 22.22.2,
-24.15.0, or 26 and later, but the focused and full tests execute successfully;
-the requested exact pin is retained because no runtime blocker was observed.
+That remains historical spike evidence, not a supported project runtime:
+`jsdom@30.0.1` excludes Node 25. The declared project range is
+`>=24.15.0 <25`, the intersection supported by every pinned package, and the
+README recommends the current Node 24 LTS release for development and CI.
 
 ## Boundaries
 
@@ -60,6 +61,14 @@ Tauri packages.
 The React entry point imports no Tauri package, and the current capability
 contains only `core:default`. Native plugins and project-path permissions will
 be added only with the HostPort implementation and its contract tests.
+
+Tauri applies separate least-privilege policies to production assets and the
+Vite development page. Both exclude remote origins, permit only self-hosted
+scripts plus Yoga's required `'wasm-unsafe-eval'`, and allow inline styles for
+the preview renderer. Production permits only Tauri's local IPC endpoints;
+development additionally permits `ws://localhost:1420` for Vite HMR. Vite owns
+port 1420 with `strictPort: true`, so Tauri cannot follow a fallback port and
+load unrelated content.
 
 ## Rejected Alternatives
 

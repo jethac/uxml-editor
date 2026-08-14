@@ -9,14 +9,16 @@ implemented yet.
 
 ## Requirements
 
-- Node.js and npm
+- Node.js 24.15.0 or a newer 24.x release, with npm
 - Rust stable with the `x86_64-pc-windows-msvc` target
 - Visual Studio C++ build tools and the Windows SDK for desktop builds
 - WebView2 runtime for desktop execution
 
-The initial executable spike was verified with Node 25.2.1, npm 11.6.2,
-rustc/cargo 1.92.0, Visual Studio 2022/2026 build tools, and WebView2
-151.0.4129.78.
+The supported Node range is `>=24.15.0 <25`, the intersection supported by all
+pinned packages. Use the current Node 24 LTS release for development and CI.
+The initial executable spike was also measured under unsupported Node 25.2.1
+with npm 11.6.2; rustc/cargo 1.92.0, Visual Studio 2022/2026 build tools, and
+WebView2 151.0.4129.78 supplied the native toolchain.
 
 ## Commands
 

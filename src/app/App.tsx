@@ -3,7 +3,7 @@ import './app.css';
 export function App() {
   return (
     <div className="workbench" role="application" aria-label="UXML Editor">
-      <header className="command-bar" role="toolbar" aria-label="Command bar">
+      <header className="command-bar" aria-label="Command bar">
         <strong>UXML Editor</strong>
         <span>No project open</span>
       </header>

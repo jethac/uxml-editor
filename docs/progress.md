@@ -33,6 +33,20 @@ Node 25.2.1 is outside the declared engine range of `jsdom@30.0.1`, so npm emits
 exact requested pin remains in place. Use a supported Node 24 release in CI to
 avoid relying on behavior outside jsdom's declared range.
 
+## Task 1 Review Fix Round
+
+- Red: `npm test -- src/config/foundation.test.ts` exited 1 while the focused
+  engine assertion expected `>=24.15.0 <25` and the manifest temporarily
+  contained `^24.15.0`; the assertion reported the exact mismatch. The
+  assertion also retains checks for Vite port 1420 with `strictPort`, explicit
+  production and development CSPs, and the non-toolbar static header.
+- Green: after restoring the selected `>=24.15.0 <25` Node 24 LTS range in the
+  manifest and lockfile, `npm test -- src/config/foundation.test.ts
+  src/app/App.test.tsx` exited 0 with 2 test files and 5 tests passing.
+- The production CSP allows only self-hosted content and Tauri IPC, Yoga's
+  `'wasm-unsafe-eval'`, and preview inline styles. `devCsp` adds only
+  `ws://localhost:1420` for Vite HMR; no remote source is permitted.
+
 ## Next Action
 
 Task 2 will introduce the pinned `uxml-preview` adapter and characterization
