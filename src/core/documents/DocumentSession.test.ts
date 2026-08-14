@@ -433,6 +433,11 @@ function parseElements(source: string, path: string): EditorElement {
       id: `node-${sequence++}` as EditorNodeId,
       name: match[1],
       source: { path, start: match.index, end: match.index + match[0].length },
+      spans: {
+        openTag: { path, start: match.index, end: match.index + match[0].length },
+        inner: { path, start: match.index + match[0].length, end: match.index + match[0].length },
+        closeTag: null,
+      },
       attributes: attributes(rawAttributes, path, match.index + match[1].length + 1),
       children: [],
     };
@@ -448,6 +453,11 @@ interface MutableElement {
   id: EditorNodeId;
   name: string;
   source: { path: string; start: number; end: number };
+  spans: {
+    openTag: { path: string; start: number; end: number };
+    inner: { path: string; start: number; end: number };
+    closeTag: { path: string; start: number; end: number } | null;
+  };
   attributes: Array<{ name: string; value: string; source: { path: string; start: number; end: number } }>;
   children: MutableElement[];
 }
@@ -464,6 +474,11 @@ function freezeElement(node: MutableElement): EditorElement {
   return Object.freeze({
     ...node,
     source: Object.freeze(node.source),
+    spans: Object.freeze({
+      openTag: Object.freeze(node.spans.openTag),
+      inner: Object.freeze(node.spans.inner),
+      closeTag: node.spans.closeTag === null ? null : Object.freeze(node.spans.closeTag),
+    }),
     attributes: Object.freeze(node.attributes.map((attribute) => Object.freeze({ ...attribute, source: Object.freeze(attribute.source) }))),
     children: Object.freeze(node.children.map(freezeElement)),
   });

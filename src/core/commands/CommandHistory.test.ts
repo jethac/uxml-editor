@@ -251,11 +251,13 @@ class SimpleAdapter implements UxmlPreviewPort {
       id: 'root' as EditorNodeId,
       name: 'UXML',
       source: Object.freeze({ path: input.uxmlPath, start: 0, end: input.uxml.length }),
+      spans: frozenSpans(input.uxmlPath, 0, 6, input.uxml.length - 7, input.uxml.length),
       attributes: Object.freeze([]),
       children: Object.freeze([Object.freeze({
         id: 'button' as EditorNodeId,
         name: 'Button',
         source: Object.freeze({ path: input.uxmlPath, start: 6, end: input.uxml.length - 7 }),
+        spans: frozenSpans(input.uxmlPath, 6, 26, input.uxml.length - 16, input.uxml.length - 7),
         attributes: Object.freeze([Object.freeze({ name: 'name', value: 'play', source: Object.freeze({ path: input.uxmlPath, start: 14, end: 25 }) })]),
         children: Object.freeze([]),
       })]),
@@ -265,4 +267,12 @@ class SimpleAdapter implements UxmlPreviewPort {
   serializeEntry(): never { throw new Error('Not used.'); }
   render(): Promise<never> { return Promise.reject(new Error('Not used.')); }
   explain(): null { return null; }
+}
+
+function frozenSpans(path: string, openStart: number, openEnd: number, closeStart: number, closeEnd: number) {
+  return Object.freeze({
+    openTag: Object.freeze({ path, start: openStart, end: openEnd }),
+    inner: Object.freeze({ path, start: openEnd, end: closeStart }),
+    closeTag: Object.freeze({ path, start: closeStart, end: closeEnd }),
+  });
 }

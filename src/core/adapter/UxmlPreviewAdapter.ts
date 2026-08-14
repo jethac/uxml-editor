@@ -68,6 +68,13 @@ function toEditorElement(
     id,
     name: node.name.prefix === null ? node.name.local : `${node.name.prefix}:${node.name.local}`,
     source: Object.freeze({ path: uxmlPath, ...node.spans.openTag }),
+    spans: Object.freeze({
+      openTag: Object.freeze({ path: uxmlPath, ...node.spans.openTag }),
+      inner: Object.freeze({ path: uxmlPath, ...node.spans.inner }),
+      closeTag: node.spans.closeTag === null
+        ? null
+        : Object.freeze({ path: uxmlPath, ...node.spans.closeTag }),
+    }),
     attributes: Object.freeze(node.attributes.map((attribute) => Object.freeze({
       name: attribute.name,
       value: attribute.value,

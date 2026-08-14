@@ -159,14 +159,39 @@ describe('UxmlPreviewAdapter', () => {
   });
 
   it('exposes frozen editor-owned authored attribute values and source spans', () => {
-    const parsed = new UxmlPreviewAdapter().parseProject(styleFixtureInput());
+    const input = styleFixtureInput();
+    const parsed = new UxmlPreviewAdapter().parseProject(input);
     const button = nodeByName(parsed.root, 'ui:Button');
+    const parent = nodeByName(parsed.root, 'ui:VisualElement');
+    const openTag = '<ui:Button name="child" text="Button" style="opacity: 0.4" />';
+    const openTagStart = input.uxml.indexOf(openTag);
 
     expect(button.attributes).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'name', value: 'child', source: expect.objectContaining({ path: 'Assets/UI/styles.uxml' }) }),
       expect.objectContaining({ name: 'text', value: 'Button' }),
     ]));
+    expect(button.spans).toEqual({
+      openTag: { path: input.uxmlPath, start: openTagStart, end: openTagStart + openTag.length },
+      inner: { path: input.uxmlPath, start: openTagStart + openTag.length, end: openTagStart + openTag.length },
+      closeTag: null,
+    });
+    const parentOpen = input.uxml.indexOf('<ui:VisualElement name="parent"');
+    const parentOpenEnd = input.uxml.indexOf('>', parentOpen) + 1;
+    const parentClose = input.uxml.indexOf('</ui:VisualElement>', parentOpenEnd);
+    expect(parent.spans).toEqual({
+      openTag: { path: input.uxmlPath, start: parentOpen, end: parentOpenEnd },
+      inner: { path: input.uxmlPath, start: parentOpenEnd, end: parentClose },
+      closeTag: {
+        path: input.uxmlPath,
+        start: parentClose,
+        end: parentClose + '</ui:VisualElement>'.length,
+      },
+    });
     expect(Object.isFrozen(button)).toBe(true);
+    expect(Object.isFrozen(button.spans)).toBe(true);
+    expect(Object.isFrozen(button.spans.openTag)).toBe(true);
+    expect(Object.isFrozen(button.spans.inner)).toBe(true);
+    expect(Object.isFrozen(parent.spans.closeTag)).toBe(true);
     expect(Object.isFrozen(button.attributes)).toBe(true);
     expect(Object.isFrozen(button.attributes[0])).toBe(true);
     expect(Object.isFrozen(button.attributes[0].source)).toBe(true);

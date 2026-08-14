@@ -35,6 +35,10 @@ function isDeepFrozenDocument(document: ParsedPreviewDocument): boolean {
 function isDeepFrozenElement(element: EditorElement): boolean {
   return Object.isFrozen(element)
     && Object.isFrozen(element.source)
+    && Object.isFrozen(element.spans)
+    && Object.isFrozen(element.spans.openTag)
+    && Object.isFrozen(element.spans.inner)
+    && (element.spans.closeTag === null || Object.isFrozen(element.spans.closeTag))
     && Object.isFrozen(element.attributes)
     && element.attributes.every((attribute) => Object.isFrozen(attribute) && Object.isFrozen(attribute.source))
     && Object.isFrozen(element.children)
@@ -55,6 +59,11 @@ function freezeElement(element: EditorElement): EditorElement {
     id: element.id,
     name: element.name,
     source: freezeSpan(element.source),
+    spans: Object.freeze({
+      openTag: freezeSpan(element.spans.openTag),
+      inner: freezeSpan(element.spans.inner),
+      closeTag: element.spans.closeTag === null ? null : freezeSpan(element.spans.closeTag),
+    }),
     attributes: Object.freeze(element.attributes.map((attribute) => Object.freeze({
       name: attribute.name,
       value: attribute.value,

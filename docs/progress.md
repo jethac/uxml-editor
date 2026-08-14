@@ -297,3 +297,39 @@ replaceable.
   then a structurally safe direct fallback for ordinary attribute changes.
   Missing-path ambiguous fallback remains unresolved, and all 25
   `DocumentSession` tests preserve the round-1 locator behavior.
+
+## Task 5 UXML Structural And Attribute Commands
+
+- Added typed, normalized transactions for `setAttribute`, `removeAttribute`,
+  `insertElement`, `removeElement`, `duplicateElement`, `moveElement`,
+  `wrapElements`, and `renameElement`. Commands snapshot caller locators and
+  emit deterministic source patches consumed directly by `DocumentSession`
+  and `CommandHistory`.
+- The adapter boundary now exposes frozen editor-owned open-tag, inner, and
+  optional close-tag spans. Commands never import `uxml-preview`, serialize an
+  upstream model, or mutate upstream dirty state. Existing attribute values are
+  patched inside their authored quotes; structural changes splice exact source
+  and synthesize only operation-owned XML whitespace and indentation.
+- Preservation coverage includes declarations, namespace prefixes, comments,
+  unsupported children, recoverable malformed text, self-closing and paired
+  elements, quote styles, CRLF, and mixed indentation. Unsafe locators, names,
+  values, indices, roots, hierarchy changes, selections, source spans, and
+  namespace changes fail with explicit `UxmlCommandError` codes.
+- Namespace comparisons decode predefined and numeric XML character references
+  without rewriting authored declaration bytes. Insertions require every QName
+  prefix to be locally bound; moves preserve inherited namespace semantics;
+  namespace declaration removal rejects dependent subtree QNames until a nested
+  override makes the subtree independent. Malformed or unknown references are
+  rejected as ambiguous source.
+- Compatibility limit: the command API currently accepts the parser-compatible
+  ASCII QName subset (`[A-Za-z_][A-Za-z0-9_.-]*`, with at most one namespace
+  colon). XML-valid Unicode names are rejected with `UxmlCommandError` because
+  pinned `uxml-preview@0.4.0` demonstrably does not round-trip them reliably.
+- Recovered closing spans must contain the exact matching QName before any
+  structural range can be removed, copied, moved, wrapped, or renamed. For an
+  unterminated element with no close span, the safe range includes the complete
+  recovered inner span. Multi-element selections validate every member.
+- Verification: the command suite passed 48 tests; the touched adapter,
+  session, and history suites passed 50 tests; `npm test` passed 7 files and
+  135 tests; `npm run build` passed `tsc --noEmit` and Vite bundling with 16
+  modules; and `git diff --check` exited 0 with only line-ending notices.

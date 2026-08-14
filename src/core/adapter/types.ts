@@ -45,10 +45,17 @@ export interface EditorAuthoredAttribute {
   readonly source: EditorSourceSpan;
 }
 
+export interface EditorElementSpans {
+  readonly openTag: EditorSourceSpan;
+  readonly inner: EditorSourceSpan;
+  readonly closeTag: EditorSourceSpan | null;
+}
+
 export interface EditorElement {
   readonly id: EditorNodeId;
   readonly name: string;
   readonly source: EditorSourceSpan;
+  readonly spans: EditorElementSpans;
   readonly attributes: readonly EditorAuthoredAttribute[];
   readonly children: readonly EditorElement[];
 }
