@@ -128,3 +128,16 @@ editor state; rendered and component state must stay derived and replaceable.
 - Conversion of diagnostics plus inline/rule style origins now omits `source`
   when no editor span can be mapped. Focused assertions verify the field is
   absent rather than present with `undefined`.
+
+## Task 2 Fix Round 3
+
+- Commit: `6d8bec1` (`fix: catch additional preview import forms`); no push.
+- Red: the focused boundary test exited 1 because the AST walker did not
+  recognize `TSImportType` source literals or CommonJS `require` calls.
+- Green: the walker now detects `type T = import('uxml-preview').T` and
+  `require('uxml-preview')`, while ignoring `require(variable)`, unrelated
+  package literals, and comment/string/template lookalikes. Existing import
+  forms remain covered.
+- Verification: the focused boundary test passed 1 test; the full adapter
+  file passed 12 tests; `npm test` passed 3 files and 17 tests; and
+  `npm run build` passed `tsc --noEmit` and Vite bundling.
