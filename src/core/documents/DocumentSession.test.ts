@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DocumentSession, DocumentSessionError } from './DocumentSession';
 import { createElementLocator, resolveElementLocator } from './ElementLocator';
+import { freezeParsedPreviewDocument } from '../adapter/immutableParsedDocument';
 import type {
   EditorDiagnostic,
   EditorElement,
@@ -132,6 +133,36 @@ describe('DocumentSession', () => {
     expect(Object.isFrozen(result.document.source)).toBe(true);
     expect(result.document.source.stylesheets.has('injected.uss')).toBe(false);
     expect(result.document.diagnostics[0].message).toBe('Unknown control.');
+  });
+
+  it('rejects a shallow-frozen adapter document whose nested public state remains mutable', () => {
+    try {
+      DocumentSession.open(new Map([
+        [entryPath, '<UXML><UnknownControl /></UXML>'],
+        [sheetPath, '.root {}'],
+      ]), entryPath, new ShallowFrozenAdapter());
+      throw new Error('Expected shallow-frozen parsed state to be rejected.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(DocumentSessionError);
+      expect((error as DocumentSessionError).code).toBe('parse-failed');
+    }
+  });
+
+  it('normalizes an already deep-frozen parsed document idempotently without changing identity', () => {
+    const raw = new TestAdapter().parseProject({
+      uxmlPath: entryPath,
+      uxml: '<UXML><UnknownControl /></UXML>',
+      stylesheets: new Map([[sheetPath, '.root {}']]),
+      resolveImport: () => null,
+    });
+    const first = freezeParsedPreviewDocument(raw);
+    const second = freezeParsedPreviewDocument(first);
+
+    expect(second).toBe(first);
+    expect(() => (second.source.stylesheets as Map<string, string>).set('injected.uss', 'bad')).toThrow();
+    expect(() => (second.diagnostics as EditorDiagnostic[]).push({
+      origin: 'parse', severity: 'warning', kind: 'malformed', message: 'Injected.',
+    })).toThrow();
   });
 
   it('requires the exact entry path and accepts SourceBuffer values', async () => {
@@ -291,6 +322,22 @@ describe('DocumentSession', () => {
     expect(nodeById(session.document.root, session.selectedNodeIds[0]).name).toBe('Button');
   });
 
+  it('keeps an unnamed selection on its uniquely hinted original after same-tag insertion at its old path', () => {
+    const source = '<UXML><VisualElement><Button text="Keep" /><Label /></VisualElement></UXML>';
+    const session = DocumentSession.open(new Map([[entryPath, source]]), entryPath, new TestAdapter());
+    const selected = session.document.root.children[0].children[0];
+    session.setSelection([createElementLocator(session.document.root, selected.id)!]);
+    const offset = source.indexOf('<Button');
+
+    session.commit(transaction('insert-same-tag', 'Insert same tag', new Map([
+      [entryPath, [{ start: offset, end: offset, replacement: '<Button text="New" />' }]],
+    ])));
+
+    expect(session.selectedNodeIds).toHaveLength(1);
+    const resolved = nodeById(session.document.root, session.selectedNodeIds[0]);
+    expect(resolved.attributes.find((attribute) => attribute.name === 'text')?.value).toBe('Keep');
+  });
+
   it('clears a removed selection and resolves unknown controls through their authored tag signature', () => {
     const session = DocumentSession.open(new Map([[entryPath,
       '<UXML><UnknownControl data-kind="custom" /></UXML>',
@@ -363,6 +410,12 @@ class TestAdapter implements UxmlPreviewPort {
   serializeEntry(): never { throw new Error('Not used by document tests.'); }
   render(): Promise<never> { return Promise.reject(new Error('Not used by document tests.')); }
   explain(): null { return null; }
+}
+
+class ShallowFrozenAdapter extends TestAdapter {
+  override parseProject(input: ProjectParseInput): ParsedPreviewDocument {
+    return Object.freeze(super.parseProject(input));
+  }
 }
 
 function parseElements(source: string, path: string): EditorElement {

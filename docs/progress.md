@@ -279,3 +279,21 @@ replaceable.
 - Error-code red: malformed transaction metadata and selection locators both
   surfaced as `invalid-patch`. Green: they now report `invalid-transaction` and
   `invalid-selection` respectively without changing the transaction contract.
+
+## Task 4 Review Fix Round 2
+
+- Deep-immutability red: a shallow-frozen third-party adapter document was
+  accepted because normalization checked only the top-level object; its nested
+  stylesheet map and diagnostic array remained mutable. The focused run had
+  one expected failure while the genuine deep-frozen idempotence case passed.
+  Green: frozen inputs now undergo a complete editor-owned structure check.
+  Verified deep-frozen documents retain their adapter identity; malformed
+  frozen documents are rejected through the session's deterministic
+  `parse-failed` error. No upstream opaque model is traversed or frozen.
+- Same-tag locator red: inserting `Button text="New"` at the old structural
+  path of selected `Button text="Keep"` moved selection to the new sibling.
+  Green: resolution now prefers a direct candidate only when its full old
+  hints still match, then a unique structurally eligible hinted candidate,
+  then a structurally safe direct fallback for ordinary attribute changes.
+  Missing-path ambiguous fallback remains unresolved, and all 25
+  `DocumentSession` tests preserve the round-1 locator behavior.
