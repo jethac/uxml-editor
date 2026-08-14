@@ -1,4 +1,4 @@
-@import "Assets/UI/styles/palette.uss";
+@import "/Assets/UI/styles/palette.uss";
 
 Label {
   color: #ffffff;

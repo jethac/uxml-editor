@@ -3,6 +3,7 @@ import {
   loadLayoutEngine,
   parse,
   render as renderPreview,
+  resolveStyles,
   serialize,
 } from 'uxml-preview';
 import type {
@@ -25,6 +26,7 @@ import type {
   PreviewRenderOptions,
   SerializedProject,
   StyleCandidate,
+  StyleExplanationOptions,
   StyleExplanation,
   StyleExplanationOrigin,
   UxmlPreviewPort,
@@ -41,6 +43,10 @@ function editorNodeId(nodeId: NodeId): EditorNodeId {
 function loadLayoutEngineOnce(): Promise<void> {
   layoutEnginePromise ??= loadLayoutEngine();
   return layoutEnginePromise;
+}
+
+function isRootFixedUrl(url: string): boolean {
+  return url.startsWith('project://') || url.startsWith('/');
 }
 
 function cloneInput(input: import('./types').ProjectParseInput): import('./types').ProjectParseInput {
@@ -78,19 +84,6 @@ function sourceForReference(
   return path === null || path === undefined ? undefined : { path, ...reference.span };
 }
 
-function sourceForNode(
-  nodeId: NodeId | undefined,
-  input: import('./types').ProjectParseInput,
-  nodes: ReadonlyMap<EditorNodeId, ElementNode>,
-): EditorSourceSpan | undefined {
-  if (nodeId === undefined) {
-    return undefined;
-  }
-
-  const node = nodes.get(editorNodeId(nodeId));
-  return node === undefined ? undefined : { path: input.uxmlPath, ...node.spans.openTag };
-}
-
 function diagnosticFromWarning(
   warning: Warning,
   origin: EditorDiagnostic['origin'],
@@ -105,9 +98,7 @@ function diagnosticFromWarning(
     kind: warning.kind as EditorDiagnosticKind,
     message: warning.message,
     ...(nodeId === undefined ? {} : { nodeId }),
-    ...(warning.at === undefined
-      ? { source: sourceForNode(warning.node, input, nodes) }
-      : { source: sourceForReference(warning.at, input, originsBySheet) }),
+    ...(warning.at === undefined ? {} : { source: sourceForReference(warning.at, input, originsBySheet) }),
   };
 }
 
@@ -128,10 +119,22 @@ function sourceForRuleOrigin(
     : { path, ...declaration.span };
 }
 
+function sourceForInlineOrigin(
+  origin: Extract<StyleOrigin, { kind: 'inline' }>,
+  input: import('./types').ProjectParseInput,
+  nodes: ReadonlyMap<EditorNodeId, ElementNode>,
+): EditorSourceSpan | undefined {
+  const node = nodes.get(editorNodeId(origin.node));
+  const style = node?.attributes.find((attribute) => attribute.name === 'style');
+  return style === undefined ? undefined : { path: input.uxmlPath, ...style.span };
+}
+
 function editorStyleOrigin(
   origin: StyleOrigin,
   model: UxmlDocument,
   originsBySheet: readonly (string | null)[],
+  input: import('./types').ProjectParseInput,
+  nodes: ReadonlyMap<EditorNodeId, ElementNode>,
 ): StyleExplanationOrigin {
   switch (origin.kind) {
     case 'inline':
@@ -139,6 +142,7 @@ function editorStyleOrigin(
         kind: 'inline',
         nodeId: editorNodeId(origin.node),
         declarationIndex: origin.declIndex,
+        source: sourceForInlineOrigin(origin, input, nodes),
       };
     case 'rule':
       return {
@@ -153,7 +157,7 @@ function editorStyleOrigin(
       return {
         kind: 'inherited',
         from: editorNodeId(origin.from),
-        origin: editorStyleOrigin(origin.origin, model, originsBySheet),
+        origin: editorStyleOrigin(origin.origin, model, originsBySheet, input, nodes),
       };
     case 'builtin-theme':
       return {
@@ -171,11 +175,13 @@ function editorCandidate(
   candidate: Candidate,
   model: UxmlDocument,
   originsBySheet: readonly (string | null)[],
+  input: import('./types').ProjectParseInput,
+  nodes: ReadonlyMap<EditorNodeId, ElementNode>,
 ): StyleCandidate {
   return {
     property: candidate.property,
     value: candidate.value,
-    origin: editorStyleOrigin(candidate.origin, model, originsBySheet),
+    origin: editorStyleOrigin(candidate.origin, model, originsBySheet, input, nodes),
     rank: candidate.rank === 1 ? 'author' : 'builtin-theme',
     specificity: [...candidate.specificity] as [number, number, number],
     order: candidate.order,
@@ -183,20 +189,31 @@ function editorCandidate(
   };
 }
 
+export class RenderSupersededError extends Error {
+  constructor() {
+    super('Render request was superseded by a newer request.');
+    this.name = 'RenderSupersededError';
+  }
+}
+
 export class UxmlPreviewAdapter implements UxmlPreviewPort {
   private activeFrame: PreviewFrame | undefined;
+  private renderGeneration = 0;
 
   parseProject(input: import('./types').ProjectParseInput): ParsedPreviewDocument {
-    const source = cloneInput(input);
+    const initialSource = cloneInput(input);
+    const loadedStylesheets = new Map(initialSource.stylesheets);
+    const source = { ...initialSource, stylesheets: loadedStylesheets };
     const resolvedOrigins: string[] = [];
     const model = parse(source.uxml, undefined, {
       resolveImport: (url, from) => {
-        const fromBuffers = source.stylesheets.get(url);
-        const resolved = fromBuffers === undefined
-          ? source.resolveImport(url, from)
-          : { path: url, text: fromBuffers };
+        const buffer = source.stylesheets.get(url);
+        const resolved = buffer !== undefined && (from === null || isRootFixedUrl(url))
+          ? { path: url, text: buffer }
+          : source.resolveImport(url, from);
         if (resolved !== null) {
           resolvedOrigins.push(resolved.path);
+          loadedStylesheets.set(resolved.path, resolved.text);
         }
         return resolved?.text ?? null;
       },
@@ -238,7 +255,11 @@ export class UxmlPreviewAdapter implements UxmlPreviewPort {
   ): Promise<PreviewFrame> {
     const model = this.modelFor(document);
     const nodes = this.nodesFor(document);
+    const generation = ++this.renderGeneration;
     await loadLayoutEngineOnce();
+    if (generation !== this.renderGeneration) {
+      throw new RenderSupersededError();
+    }
     this.activeFrame?.dispose();
 
     const result = renderPreview(model, container, options);
@@ -285,20 +306,37 @@ export class UxmlPreviewAdapter implements UxmlPreviewPort {
     document: ParsedPreviewDocument,
     nodeId: EditorNodeId,
     property: string,
+    options?: StyleExplanationOptions,
   ): StyleExplanation | null {
-    const node = this.nodesFor(document).get(nodeId);
+    const nodes = this.nodesFor(document);
+    const node = nodes.get(nodeId);
     if (node === undefined) {
       return null;
     }
 
     const model = this.modelFor(document);
+    const computed = resolveStyles(model, options).styles.get(node.id)?.get(property);
     return {
       nodeId,
       property,
-      candidates: explainProperty(model, node, property).map((candidate) => editorCandidate(
+      computed: computed === undefined
+        ? { value: null, origin: { kind: 'default' } }
+        : {
+          value: computed.value,
+          origin: editorStyleOrigin(
+            computed.origin,
+            model,
+            document.originsBySheet,
+            document.source,
+            nodes,
+          ),
+        },
+      candidates: explainProperty(model, node, property, options).map((candidate) => editorCandidate(
         candidate,
         model,
         document.originsBySheet,
+        document.source,
+        nodes,
       )),
     };
   }

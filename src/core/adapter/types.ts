@@ -108,6 +108,7 @@ export type StyleExplanationOrigin =
     readonly kind: 'inline';
     readonly nodeId: EditorNodeId;
     readonly declarationIndex: number;
+    readonly source?: EditorSourceSpan;
   }
   | {
     readonly kind: 'rule';
@@ -142,9 +143,20 @@ export interface StyleCandidate {
   readonly winner: boolean;
 }
 
+export interface StyleExplanationOptions {
+  readonly activeStates?: ReadonlySet<string>;
+  readonly states?: Readonly<Record<string, readonly string[]>>;
+}
+
+export interface StyleComputedValue {
+  readonly value: string | null;
+  readonly origin: StyleExplanationOrigin;
+}
+
 export interface StyleExplanation {
   readonly nodeId: EditorNodeId;
   readonly property: string;
+  readonly computed: StyleComputedValue;
   readonly candidates: readonly StyleCandidate[];
 }
 
@@ -160,5 +172,6 @@ export interface UxmlPreviewPort {
     document: ParsedPreviewDocument,
     nodeId: EditorNodeId,
     property: string,
+    options?: StyleExplanationOptions,
   ): StyleExplanation | null;
 }

@@ -87,3 +87,27 @@ avoid relying on behavior outside jsdom's declared range.
 Task 3 can add source patches and reparse the authoritative buffers after each
 transaction. `DocumentSession` remains the sole source of truth for later
 editor state; rendered and component state must stay derived and replaceable.
+
+## Task 2 Fix Round 1
+
+- Red: `npm test -- src/core/adapter/UxmlPreviewAdapter.test.ts` first exited 1
+  because the prior expectation treated a nested relative import as a direct
+  input-map lookup. A second focused red run caught the import-boundary scan's
+  overly broad multiline regex; it did not recognize the adapter's multiline
+  static import after self-scan false positives were removed.
+- Green: the focused command exited 0 with 1 test file and 11 tests. Nested
+  relative imports now always use their parent resolver context; direct and
+  root-fixed input-map sources retain exact canonical buffers for fresh
+  serialization maps. Tests cover two same-named nested imports resolving to
+  separate paths, root-fixed/duplicate resolution, unresolved provenance,
+  render supersession, computed style explanations, and unconditional reverse
+  lookup assertions.
+- Browser-only test inputs use Vite `?raw` fixture imports and
+  `import.meta.glob` raw module sources. The statement-bounded scan covers
+  side-effect, static `from`, dynamic, and re-export imports; `@types/node` is
+  absent from both manifest dependency sections and the lockfile, and
+  `tsconfig.json` no longer enables Node globals.
+- Final verification: `npm test` exited 0 with 3 test files and 16 tests;
+  `npm run build` exited 0 after `tsc --noEmit` and Vite bundling. The final
+  production source scan found `uxml-preview` only in
+  `src/core/adapter/UxmlPreviewAdapter.ts`.
