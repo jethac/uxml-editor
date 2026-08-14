@@ -84,9 +84,36 @@ avoid relying on behavior outside jsdom's declared range.
 
 ## Next Action
 
-Task 3 can add source patches and reparse the authoritative buffers after each
-transaction. `DocumentSession` remains the sole source of truth for later
-editor state; rendered and component state must stay derived and replaceable.
+Task 4 can pair exact `SourceBuffer` values with parsed documents and build
+transactions/history on the deterministic patch engine. `DocumentSession` must
+remain the sole source of truth; rendered and component state stay derived and
+replaceable.
+
+## Task 3 Source Patch Engine
+
+- Red: `npm test -- src/core/commands/SourcePatch.test.ts` exited 1 because
+  `./SourcePatch` did not exist; Vite import analysis identified the missing
+  module at the test import. This established the test-first contract before
+  either production module existed.
+- Green: the focused command exited 0 with 1 test file and 17 tests after the
+  immutable source-patch engine and `SourceBuffer` were added.
+- SourcePatch offsets are JavaScript UTF-16 code-unit indices, matching pinned
+  upstream string spans. Validation rejects non-integer, negative, reversed,
+  out-of-range, overlap, ambiguous same-start, and surrogate-splitting spans;
+  `applyPatches` and `invertPatches` throw the owned
+  `SourcePatchValidationError` for those invalid sets.
+- Validation normalizes a frozen copy in ascending source order, while apply
+  runs from highest offset to lowest. Adjacent disjoint edits and insertion at
+  either source boundary are valid; insertion immediately after a replacement
+  is valid, while any same-start pairing is rejected as ambiguous.
+- Inverse patches are addressed to the transformed output. Adjacent source
+  changes that collapse to one output boundary are coalesced so undo remains a
+  valid deterministic patch set. Exhaustive small-source loops cover these
+  round-trip invariants alongside CRLF, entities, quotes, unusual whitespace,
+  emoji, insertions, deletions, replacements, and no-op sets.
+- `SourceBuffer` is a frozen path-plus-exact-text value object. Its `apply`
+  method returns a new buffer, leaving the original untouched; it observes
+  `none`, LF, CRLF, or mixed newline style without making encoding promises.
 
 ## Task 2 Fix Round 1
 
