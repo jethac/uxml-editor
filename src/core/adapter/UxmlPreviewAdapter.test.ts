@@ -113,10 +113,14 @@ function importsPreview(source: string): boolean {
     ) {
       return true;
     }
+    if (value.type === 'TSImportType' && isPreviewSpecifier(value.source)) {
+      return true;
+    }
     if (
       value.type === 'CallExpression'
       && isAstNode(value.callee)
-      && value.callee.type === 'Import'
+      && (value.callee.type === 'Import'
+        || (value.callee.type === 'Identifier' && value.callee.name === 'require'))
       && Array.isArray(value.arguments)
       && isPreviewSpecifier(value.arguments[0])
     ) {
@@ -515,6 +519,10 @@ describe('UxmlPreviewAdapter', () => {
     expect(importsPreview(`export {\n  parse,\n} from '${previewPackage}'`)).toBe(true);
     expect(importsPreview(`import data from '${previewPackage}' with { type: 'json' }`)).toBe(true);
     expect(importsPreview(`import preview = require('${previewPackage}');`)).toBe(true);
+    expect(importsPreview(`type T = import('${previewPackage}').T;`)).toBe(true);
+    expect(importsPreview(`const p = require('${previewPackage}');`)).toBe(true);
+    expect(importsPreview(`const p = require(packageName);`)).toBe(false);
+    expect(importsPreview(`const p = require('other-package');`)).toBe(false);
     expect(importsPreview(`// import '${previewPackage}'\nconst value = '${previewPackage}';\nconst template = \`import '${previewPackage}'\`;`)).toBe(false);
     expect(packageJson.dependencies['uxml-preview']).toBe('0.4.0');
     expect(packageJson.dependencies).not.toHaveProperty('@types/node');
