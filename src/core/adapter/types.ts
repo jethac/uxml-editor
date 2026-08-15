@@ -206,6 +206,7 @@ export interface UssSourcePort {
 }
 
 export interface UxmlPreviewPort {
+  supportedControlNames(): readonly string[];
   parseProject(input: ProjectParseInput): ParsedPreviewDocument;
   serializeEntry(document: ParsedPreviewDocument): SerializedProject;
   render(

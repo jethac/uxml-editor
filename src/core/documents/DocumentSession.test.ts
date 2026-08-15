@@ -392,6 +392,8 @@ function walk(root: EditorElement): EditorElement[] {
 class TestAdapter implements UxmlPreviewPort {
   readonly inputs: ProjectParseInput[] = [];
 
+  supportedControlNames(): readonly string[] { return Object.freeze([]); }
+
   parseProject(input: ProjectParseInput): ParsedPreviewDocument {
     const source = { ...input, stylesheets: new Map(input.stylesheets) };
     this.inputs.push(source);

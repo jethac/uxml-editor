@@ -5,6 +5,7 @@ import {
   render as renderPreview,
   resolveStyles,
   serialize,
+  supportedControlNames as previewSupportedControlNames,
 } from 'uxml-preview';
 import type {
   Candidate,
@@ -224,6 +225,10 @@ export class RenderSupersededError extends Error {
 export class UxmlPreviewAdapter implements UxmlPreviewPort, UssSourcePort {
   private activeFrame: PreviewFrame | undefined;
   private renderGeneration = 0;
+
+  supportedControlNames(): readonly string[] {
+    return Object.freeze([...previewSupportedControlNames()]);
+  }
 
   parseStylesheet(path: string, source: string): EditorStylesheet {
     return editorStylesheetFromParsed(path, parse(EMPTY_UXML, source).sheets[0]);

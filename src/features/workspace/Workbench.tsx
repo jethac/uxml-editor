@@ -7,6 +7,8 @@ import {
   WORKBENCH_SEPARATOR_SIZE,
 } from '../../core/store/EditorLayoutStorage';
 import type { EditorPanel, EditorSnapshot, EditorStore } from '../../core/store/EditorStore';
+import { HierarchyPanel } from '../hierarchy/HierarchyPanel';
+import { PalettePanel } from '../palette/PalettePanel';
 import { CommandBar } from './CommandBar';
 import { PaneResizer } from './PaneResizer';
 import '../../styles/workbench.css';
@@ -84,6 +86,7 @@ function DesktopWorkspace({ store, snapshot, setPaneRef }: DesktopWorkspaceProps
     <>
       <ToolPane
         kind="hierarchy"
+        store={store}
         snapshot={snapshot}
         compact={false}
         paneRef={(element) => setPaneRef('hierarchy', element)}
@@ -121,12 +124,14 @@ function DesktopWorkspace({ store, snapshot, setPaneRef }: DesktopWorkspaceProps
       />
       <ToolPane
         kind="inspector"
+        store={store}
         snapshot={snapshot}
         compact={false}
         paneRef={(element) => setPaneRef('inspector', element)}
       />
       <ToolPane
         kind="diagnostics"
+        store={store}
         snapshot={snapshot}
         compact={false}
         paneRef={(element) => setPaneRef('diagnostics', element)}
@@ -178,6 +183,7 @@ function CompactWorkspace({ store, snapshot }: WorkspaceProps) {
           <ToolPane
             key={panel}
             kind={panel}
+            store={store}
             snapshot={snapshot}
             compact
             hidden={snapshot.activePanel !== panel}
@@ -190,13 +196,14 @@ function CompactWorkspace({ store, snapshot }: WorkspaceProps) {
 
 interface ToolPaneProps {
   readonly kind: EditorPanel;
+  readonly store: EditorStore;
   readonly snapshot: EditorSnapshot;
   readonly compact: boolean;
   readonly hidden?: boolean;
   readonly paneRef?: Ref<HTMLElement>;
 }
 
-function ToolPane({ kind, snapshot, compact, hidden = false, paneRef }: ToolPaneProps) {
+function ToolPane({ kind, store, snapshot, compact, hidden = false, paneRef }: ToolPaneProps) {
   const headingId = `${compact ? 'compact-' : ''}${kind}-heading`;
   const panelId = compact ? `compact-${kind}-panel` : undefined;
   const labelId = compact ? `compact-${kind}-tab` : headingId;
@@ -217,7 +224,16 @@ function ToolPane({ kind, snapshot, compact, hidden = false, paneRef }: ToolPane
     >
       <h2 id={headingId}>{panelLabel(kind)}</h2>
       <div className="workspace-pane-body">
-        {kind === 'hierarchy' && <span className="pane-empty">{snapshot.session === null ? 'No document' : snapshot.session.entryPath}</span>}
+        {kind === 'hierarchy' && (
+          snapshot.session === null
+            ? <span className="pane-empty">No document</span>
+            : (
+                <div className="authoring-surface">
+                  <PalettePanel store={store} snapshot={snapshot} />
+                  <HierarchyPanel store={store} snapshot={snapshot} />
+                </div>
+              )
+        )}
         {kind === 'inspector' && <span className="pane-empty">{snapshot.selection.length === 0 ? 'Nothing selected' : `${snapshot.selection.length} selected`}</span>}
         {kind === 'diagnostics' && (
           snapshot.diagnostics.length === 0

@@ -10,6 +10,8 @@ import { DocumentSession } from '../documents/DocumentSession';
 export class PersistenceTestAdapter implements UxmlPreviewPort {
   failWhenSourceIncludes: string | undefined;
 
+  supportedControlNames(): readonly string[] { return Object.freeze([]); }
+
   parseProject(input: ProjectParseInput): ParsedPreviewDocument {
     if (this.failWhenSourceIncludes !== undefined && input.uxml.includes(this.failWhenSourceIncludes)) {
       throw new Error('Injected persistence parse failure.');

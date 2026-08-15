@@ -243,6 +243,8 @@ function edit(id: string, label: string, patchesByFile: ReadonlyMap<string, read
 class SimpleAdapter implements UxmlPreviewPort {
   failWhenSourceIncludes: string | undefined;
 
+  supportedControlNames(): readonly string[] { return Object.freeze([]); }
+
   parseProject(input: ProjectParseInput): ParsedPreviewDocument {
     if (this.failWhenSourceIncludes !== undefined && input.uxml.includes(this.failWhenSourceIncludes)) {
       throw new Error('Parse failed for history direction.');
