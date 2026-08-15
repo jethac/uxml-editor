@@ -3,6 +3,25 @@
 This application is Apache-2.0 licensed. The following notices cover runtime
 components redistributed in its browser and desktop build output.
 
+## Tauri desktop host
+
+The desktop shell uses the following pinned Tauri and Rust components:
+
+- `@tauri-apps/api` 2.11.1 (`sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==`), Apache-2.0 OR MIT
+- `tauri` 2.11.5, Apache-2.0 OR MIT
+- `tauri-plugin-dialog` 2.7.1, Apache-2.0 OR MIT
+- `tauri-plugin-fs` 2.5.1 (transitive type dependency of the dialog plugin; not initialized or capability-granted), Apache-2.0 OR MIT
+- `notify` 6.1.1, CC0-1.0
+- `sha2` 0.10.9, MIT OR Apache-2.0
+- `serde` 1.0.229 and `serde_json` 1.0.151, MIT OR Apache-2.0
+- `windows-sys` 0.61.2 (Windows builds), MIT OR Apache-2.0
+
+Sources: https://github.com/tauri-apps/tauri,
+https://github.com/tauri-apps/plugins-workspace,
+https://github.com/notify-rs/notify,
+https://github.com/RustCrypto/hashes,
+https://github.com/serde-rs, and https://github.com/microsoft/windows-rs.
+
 ## uxml-preview
 
 - Package: [uxml-preview](https://www.npmjs.com/package/uxml-preview)

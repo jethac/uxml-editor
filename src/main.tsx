@@ -1,7 +1,8 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './app/App';
-import { createBrowserEditorStore } from './app/createBrowserEditorStore';
+import { createProductionTauriRuntime } from './app/createProductionTauriRuntime';
+import { createRuntimeEditorStore } from './app/createRuntimeEditorStore';
 
 const root = document.getElementById('root');
 
@@ -9,10 +10,11 @@ if (!root) {
   throw new Error('Root element was not found');
 }
 
-const store = createBrowserEditorStore();
+const runtime = createProductionTauriRuntime();
+const store = createRuntimeEditorStore({ tauriPorts: runtime?.hostPorts });
 
 createRoot(root).render(
   <StrictMode>
-    <App store={store} />
+    <App store={store} desktop={runtime?.desktop} />
   </StrictMode>,
 );
