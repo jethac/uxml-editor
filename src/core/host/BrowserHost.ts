@@ -151,8 +151,9 @@ export class BrowserHost implements HostPort {
     const grant = this.grantedRoots.get(root.id);
     if (!grant) throw new HostError('root-not-granted', `Project root is not granted: ${root.id}`);
     const relativePaths: string[] = [];
+    const seenPaths = new Set<string>();
     try {
-      if (!await collectBrowserFiles(grant.handle, '', relativePaths)) {
+      if (!await collectBrowserFiles(grant.handle, '', relativePaths, seenPaths)) {
         return Object.freeze({ status: 'unsupported' });
       }
       const files = Object.freeze(relativePaths
@@ -373,17 +374,23 @@ async function collectBrowserFiles(
   directory: BrowserDirectoryHandle,
   parentPath: string,
   relativePaths: string[],
+  seenPaths: Set<string>,
 ): Promise<boolean> {
   if (typeof directory.entries !== 'function') return false;
   for await (const [name, handle] of directory.entries()) {
-    if (normalizeRelativePath(name) !== name || handle.name !== name) {
+    if (name.includes('/') || name.includes('\\')
+      || normalizeRelativePath(name) !== name || handle.name !== name) {
       throw new HostError('invalid-path', `Directory enumeration returned an invalid entry name: ${name}`);
     }
     const relativePath = parentPath.length === 0 ? name : `${parentPath}/${name}`;
+    if (seenPaths.has(relativePath)) {
+      throw new HostError('read-failed', `Directory enumeration returned a duplicate project path: ${relativePath}`);
+    }
+    seenPaths.add(relativePath);
     if (isFileHandle(handle)) {
       relativePaths.push(relativePath);
     } else if (isDirectoryHandle(handle)) {
-      if (!await collectBrowserFiles(handle, relativePath, relativePaths)) return false;
+      if (!await collectBrowserFiles(handle, relativePath, relativePaths, seenPaths)) return false;
     } else {
       throw new HostError('read-failed', `Directory enumeration returned an invalid handle: ${relativePath}`);
     }

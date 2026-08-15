@@ -1,10 +1,15 @@
 import { HostError, projectPath } from '../host/HostPort';
 import type { ResolvedText } from '../adapter/types';
 import type { ProjectIndex } from './ProjectIndex';
-import { decodeProjectReference, type ProjectReferenceDecodeResult } from './ProjectReferenceDecoder';
+import {
+  decodeParsedProjectReference,
+  decodeProjectReference,
+  type ProjectReferenceDecodeResult,
+} from './ProjectReferenceDecoder';
 
 export type ResolutionDiagnosticCode =
   | 'ambiguous-resource'
+  | 'ambiguous-parent'
   | 'case-mismatch'
   | 'malformed-reference'
   | 'missing-file'
@@ -45,22 +50,30 @@ export class PathResolver {
   }
 
   resolveImport(reference: string, from: string | null): ResolutionOutcome {
-    return this.resolveProjectFile(reference, from, true);
+    return this.resolveProjectFile(reference, from, true, 'raw');
   }
 
   resolveAsset(reference: string, from: string | null): ResolutionOutcome {
-    return this.resolveProjectFile(reference, from, false);
+    return this.resolveProjectFile(reference, from, false, 'raw');
   }
 
-  resolveResource(reference: string): ResolutionOutcome {
-    const decoded = decodeReference(reference, null);
+  resolveResource(reference: string, from: string | null = null): ResolutionOutcome {
+    return this.resolveResourceReference(reference, from, 'raw');
+  }
+
+  private resolveResourceReference(
+    reference: string,
+    from: string | null,
+    input: 'parsed' | 'raw',
+  ): ResolutionOutcome {
+    const decoded = decodeReference(reference, from, input);
     if (decoded.status === 'unresolved') return decoded;
     let logicalName: string;
     try {
       logicalName = projectPath(this.index.root, decoded.value).relativePath;
     } catch (error) {
       if (error instanceof HostError && error.code === 'invalid-path') {
-        return unresolved('root-escape', reference, null, [], error.message);
+        return unresolved('root-escape', reference, from, [], error.message);
       }
       throw error;
     }
@@ -71,7 +84,7 @@ export class PathResolver {
       return unresolved(
         'ambiguous-resource',
         reference,
-        null,
+        from,
         candidates,
         `Resource name is ambiguous: ${candidates.join(', ')}`,
       );
@@ -82,19 +95,19 @@ export class PathResolver {
       return unresolved(
         'case-mismatch',
         reference,
-        null,
+        from,
         candidates,
         `Resource name casing differs from the reference: ${candidates.join(', ')}`,
       );
     }
-    return unresolved('missing-resource', reference, null, [], `Resource does not exist: ${logicalName}`);
+    return unresolved('missing-resource', reference, from, [], `Resource does not exist: ${logicalName}`);
   }
 
   createAssetHook(from: string | null, reportDiagnostic: ResolutionDiagnosticReporter): AssetResolverHook {
     return Object.freeze((path: string, form: 'url' | 'resource'): string | null => {
       const outcome = form === 'url'
-        ? this.resolveAsset(path, from)
-        : this.resolveResource(path);
+        ? this.resolveProjectFile(path, from, false, 'parsed')
+        : this.resolveResourceReference(path, from, 'parsed');
       if (outcome.status === 'unresolved') {
         reportDiagnostic(outcome.diagnostic);
         return null;
@@ -107,8 +120,9 @@ export class PathResolver {
     reference: string,
     from: string | null,
     requireText: boolean,
+    input: 'parsed' | 'raw',
   ): ResolutionOutcome {
-    const decodedReference = decodeReference(reference, from);
+    const decodedReference = decodeReference(reference, from, input);
     if (decodedReference.status === 'unresolved') return decodedReference;
     const decoded = decodedReference.value;
     let normalized: ReturnType<typeof projectPath>;
@@ -144,24 +158,71 @@ export class PathResolver {
     );
   }
 
-  createImportHook(reportDiagnostic: ResolutionDiagnosticReporter): ImportResolverHook {
+  createImportHook(entryPath: string, reportDiagnostic: ResolutionDiagnosticReporter): ImportResolverHook {
+    const canonicalParents = new Map<string, Set<string>>();
     return Object.freeze((url: string, from: string | null): ResolvedText | null => {
-      const outcome = this.resolveImport(url, from);
+      const canonicalParent = this.canonicalImportParent(url, from, entryPath, canonicalParents);
+      if (typeof canonicalParent !== 'string') {
+        reportDiagnostic(canonicalParent.diagnostic);
+        return null;
+      }
+      const outcome = this.resolveProjectFile(url, canonicalParent, true, 'parsed');
       if (outcome.status === 'unresolved') {
         reportDiagnostic(outcome.diagnostic);
         return null;
       }
       if (outcome.text === null) return null;
+      rememberCanonicalParent(canonicalParents, url, outcome.path);
       return Object.freeze({ path: outcome.path, text: outcome.text });
     });
   }
+
+  private canonicalImportParent(
+    reference: string,
+    authoredFrom: string | null,
+    entryPath: string,
+    canonicalParents: ReadonlyMap<string, ReadonlySet<string>>,
+  ): string | UnresolvedResolutionOutcome {
+    if (authoredFrom === null) return entryPath;
+    const mappedParents = canonicalParents.get(authoredFrom);
+    if (mappedParents !== undefined) {
+      const candidates = [...mappedParents].sort();
+      if (candidates.length === 1) return candidates[0]!;
+      if (candidates.length > 1) {
+        return unresolved(
+          'ambiguous-parent',
+          reference,
+          authoredFrom,
+          candidates,
+          `Authored import parent maps to multiple project files: ${candidates.join(', ')}`,
+        );
+      }
+    }
+    const exactParent = this.index.file(authoredFrom);
+    if (exactParent !== null && exactParent.text !== null) return exactParent.path;
+    const resolvedParent = this.resolveProjectFile(authoredFrom, entryPath, true, 'parsed');
+    return resolvedParent.status === 'resolved' ? resolvedParent.path : resolvedParent;
+  }
+}
+
+function rememberCanonicalParent(
+  canonicalParents: Map<string, Set<string>>,
+  authoredUrl: string,
+  canonicalPath: string,
+): void {
+  const paths = canonicalParents.get(authoredUrl) ?? new Set<string>();
+  paths.add(canonicalPath);
+  canonicalParents.set(authoredUrl, paths);
 }
 
 function decodeReference(
   reference: string,
   from: string | null,
+  input: 'parsed' | 'raw' = 'raw',
 ): Extract<ProjectReferenceDecodeResult, { readonly status: 'decoded' }> | UnresolvedResolutionOutcome {
-  const decoded = decodeProjectReference(reference);
+  const decoded = input === 'raw'
+    ? decodeProjectReference(reference)
+    : decodeParsedProjectReference(reference);
   if (decoded.status === 'decoded') return decoded;
   const malformedForm = decoded.reason === 'xml-entity' ? 'XML entities' : 'percent encoding';
   return unresolved(

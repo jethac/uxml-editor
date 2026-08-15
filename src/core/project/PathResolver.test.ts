@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { UxmlPreviewAdapter } from '../adapter/UxmlPreviewAdapter';
 import { MemoryHost } from '../host/MemoryHost';
 import { PathResolver } from './PathResolver';
 import { ProjectIndex } from './ProjectIndex';
@@ -47,7 +48,10 @@ describe('PathResolver', () => {
       'Assets/Cycle/c.uss': 'VisualElement {}',
     });
     const diagnostics: unknown[] = [];
-    const resolveImport = cycleResolver.createImportHook((diagnostic) => diagnostics.push(diagnostic));
+    const resolveImport = cycleResolver.createImportHook(
+      'Assets/Cycle/entry.uxml',
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
 
     expect(resolveImport('b.uss', 'Assets/Cycle/a.uss')?.path).toBe('Assets/Cycle/b.uss');
     expect(resolveImport('a.uss', 'Assets/Cycle/b.uss')?.path).toBe('Assets/Cycle/a.uss');
@@ -63,7 +67,10 @@ describe('PathResolver', () => {
       'Assets/B/entry.uss': '@import url("shared.uss");',
     });
     const diagnostics: unknown[] = [];
-    const resolveImport = parentResolver.createImportHook((diagnostic) => diagnostics.push(diagnostic));
+    const resolveImport = parentResolver.createImportHook(
+      'Assets/entry.uxml',
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
 
     expect(resolveImport('shared.uss', 'Assets/A/entry.uss')?.path).toBe('Assets/A/shared.uss');
     expect(resolveImport('shared.uss', 'Assets/B/entry.uss')).toBeNull();
@@ -193,6 +200,32 @@ describe('PathResolver', () => {
     expect(diagnostics).toMatchObject([{ code: 'missing-file', reference: 'UI/icon' }]);
   });
 
+  it('accepts parsed ampersands in asset hooks while preserving raw direct resolution', async () => {
+    const sourcePath = 'Assets/UI/screen.uxml';
+    const assetResolver = await resolverFor({
+      [sourcePath]: '<ui:UXML />',
+      'Assets/UI/icon&hover.png': 'relative icon',
+      'Assets/Resources/UI/icon&hover.png': 'resource icon',
+    });
+    const diagnostics: unknown[] = [];
+    const resolveAsset = assetResolver.createAssetHook(
+      sourcePath,
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
+
+    expect(resolveAsset('icon&hover.png', 'url')).toBe('Assets/UI/icon&hover.png');
+    expect(resolveAsset('UI/icon&hover', 'resource')).toBe('Assets/Resources/UI/icon&hover.png');
+    expect(assetResolver.resolveAsset('icon&amp;hover.png', sourcePath)).toMatchObject({
+      status: 'resolved',
+      path: 'Assets/UI/icon&hover.png',
+    });
+    expect(assetResolver.resolveResource('UI/icon&amp;hover', sourcePath)).toMatchObject({
+      status: 'resolved',
+      path: 'Assets/Resources/UI/icon&hover.png',
+    });
+    expect(diagnostics).toEqual([]);
+  });
+
   it('diagnoses duplicate Resources logical names instead of choosing by sort order', async () => {
     const duplicateResolver = await resolverFor({
       'Assets/A/Resources/UI/icon.png': 'first',
@@ -212,6 +245,146 @@ describe('PathResolver', () => {
         ],
       },
     });
+  });
+
+  const resourceDiagnosticCases: readonly {
+    readonly name: string;
+    readonly files: Readonly<Record<string, string>>;
+    readonly reference: string;
+    readonly code: string;
+  }[] = [
+    {
+      name: 'missing',
+      files: {},
+      reference: 'UI/missing',
+      code: 'missing-resource',
+    },
+    {
+      name: 'case-mismatched',
+      files: { 'Assets/Resources/UI/Icon.png': 'icon' },
+      reference: 'UI/icon',
+      code: 'case-mismatch',
+    },
+    {
+      name: 'ambiguous',
+      files: {
+        'Assets/A/Resources/UI/icon.png': 'first',
+        'Assets/B/Resources/UI/icon.jpg': 'second',
+      },
+      reference: 'UI/icon',
+      code: 'ambiguous-resource',
+    },
+  ];
+
+  it.each(resourceDiagnosticCases)(
+    'preserves the bound source on $name resource diagnostics through the asset hook',
+    async ({
+      files,
+      reference,
+      code,
+    }) => {
+      const sourcePath = 'Assets/UI/theme.uss';
+      const assetResolver = await resolverFor({
+        [sourcePath]: '.screen {}',
+        ...files,
+      });
+      const diagnostics: unknown[] = [];
+      const resolveAsset = assetResolver.createAssetHook(
+        sourcePath,
+        (diagnostic) => diagnostics.push(diagnostic),
+      );
+
+      expect(resolveAsset(reference, 'resource')).toBeNull();
+      expect(diagnostics).toMatchObject([{ code, reference, from: sourcePath }]);
+    },
+  );
+
+  it('maps adapter-authored entry and nested import parents to canonical project paths', async () => {
+    const uxmlPath = 'Assets/UI/screen.uxml';
+    const uxml = '<ui:UXML xmlns:ui="UnityEngine.UIElements"><Style src="base.uss" /></ui:UXML>\n';
+    const base = '@import "nested/theme.uss";\n.screen { color: red; }\n';
+    const nested = '.screen { width: 10px; }\n';
+    const adapterResolver = await resolverFor({
+      [uxmlPath]: uxml,
+      'Assets/UI/base.uss': base,
+      'Assets/UI/nested/theme.uss': nested,
+    });
+    const resolverDiagnostics: unknown[] = [];
+
+    const parsed = new UxmlPreviewAdapter().parseProject({
+      uxmlPath,
+      uxml,
+      stylesheets: new Map(),
+      resolveImport: adapterResolver.createImportHook(
+        uxmlPath,
+        (diagnostic) => resolverDiagnostics.push(diagnostic),
+      ),
+    });
+
+    expect(parsed.originsBySheet).toEqual([
+      'Assets/UI/base.uss',
+      'Assets/UI/nested/theme.uss',
+    ]);
+    expect(parsed.source.stylesheets.get('Assets/UI/base.uss')).toBe(base);
+    expect(parsed.source.stylesheets.get('Assets/UI/nested/theme.uss')).toBe(nested);
+    expect(parsed.diagnostics.filter((diagnostic) => diagnostic.kind === 'import-unresolved')).toEqual([]);
+    expect(resolverDiagnostics).toEqual([]);
+  });
+
+  it('resolves an XML-decoded ampersand received from the actual adapter hook', async () => {
+    const uxmlPath = 'Assets/UI/screen.uxml';
+    const uxml = '<ui:UXML xmlns:ui="UnityEngine.UIElements"><Style src="base&amp;theme.uss" /></ui:UXML>\n';
+    const stylesheet = '.screen { color: blue; }\n';
+    const adapterResolver = await resolverFor({
+      [uxmlPath]: uxml,
+      'Assets/UI/base&theme.uss': stylesheet,
+    });
+    const resolverDiagnostics: unknown[] = [];
+
+    const parsed = new UxmlPreviewAdapter().parseProject({
+      uxmlPath,
+      uxml,
+      stylesheets: new Map(),
+      resolveImport: adapterResolver.createImportHook(
+        uxmlPath,
+        (diagnostic) => resolverDiagnostics.push(diagnostic),
+      ),
+    });
+
+    expect(parsed.originsBySheet).toEqual(['Assets/UI/base&theme.uss']);
+    expect(parsed.source.stylesheets.get('Assets/UI/base&theme.uss')).toBe(stylesheet);
+    expect(parsed.diagnostics.filter((diagnostic) => diagnostic.kind === 'import-unresolved')).toEqual([]);
+    expect(resolverDiagnostics).toEqual([]);
+  });
+
+  it('diagnoses an authored parent URL mapped to multiple canonical files', async () => {
+    const ambiguousResolver = await resolverFor({
+      'Assets/UI/screen.uxml': '<ui:UXML />',
+      'Assets/A/root.uss': 'root A',
+      'Assets/A/shared/parent.uss': '@import "child.uss";',
+      'Assets/B/root.uss': 'root B',
+      'Assets/B/shared/parent.uss': '@import "child.uss";',
+    });
+    const diagnostics: unknown[] = [];
+    const resolveImport = ambiguousResolver.createImportHook(
+      'Assets/UI/screen.uxml',
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
+
+    expect(resolveImport('shared/parent.uss', 'Assets/A/root.uss')?.path)
+      .toBe('Assets/A/shared/parent.uss');
+    expect(resolveImport('shared/parent.uss', 'Assets/B/root.uss')?.path)
+      .toBe('Assets/B/shared/parent.uss');
+    expect(resolveImport('child.uss', 'shared/parent.uss')).toBeNull();
+    expect(diagnostics).toMatchObject([{
+      code: 'ambiguous-parent',
+      reference: 'child.uss',
+      from: 'shared/parent.uss',
+      candidates: [
+        'Assets/A/shared/parent.uss',
+        'Assets/B/shared/parent.uss',
+      ],
+    }]);
   });
 });
 

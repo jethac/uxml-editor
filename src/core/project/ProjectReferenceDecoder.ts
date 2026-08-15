@@ -5,8 +5,12 @@ export type ProjectReferenceDecodeResult =
 export function decodeProjectReference(reference: string): ProjectReferenceDecodeResult {
   const entityDecoded = decodeXmlReference(reference);
   if (entityDecoded === null) return Object.freeze({ status: 'malformed', reason: 'xml-entity' });
+  return decodeParsedProjectReference(entityDecoded);
+}
+
+export function decodeParsedProjectReference(reference: string): ProjectReferenceDecodeResult {
   try {
-    return Object.freeze({ status: 'decoded', value: decodeURIComponent(entityDecoded) });
+    return Object.freeze({ status: 'decoded', value: decodeURIComponent(reference) });
   } catch (error) {
     if (error instanceof URIError) return Object.freeze({ status: 'malformed', reason: 'percent-encoding' });
     throw error;

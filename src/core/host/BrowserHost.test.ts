@@ -91,6 +91,66 @@ describe('BrowserHost', () => {
     }
   });
 
+  it.each(['file', 'directory'] as const)(
+    'rejects a duplicate yielded %s name before returning a supported enumeration',
+    async (kind) => {
+      const first = kind === 'file'
+        ? new FakeFileHandle('Duplicate.uss', 'first')
+        : new FakeDirectoryHandle('Duplicate', {});
+      const second = kind === 'file'
+        ? new FakeFileHandle('Duplicate.uss', 'second')
+        : new FakeDirectoryHandle('Duplicate', {});
+      const name = kind === 'file' ? 'Duplicate.uss' : 'Duplicate';
+      const assets = new FakeDirectoryHandle('Assets', {}, 'granted', [
+        [name, first],
+        [name, second],
+      ]);
+      const directory = new FakeDirectoryHandle('Chosen Project', { Assets: assets });
+      const host = new BrowserHost({
+        scope: { showDirectoryPicker: async () => directory },
+        identityStore: new FakeProjectIdentityStore(),
+      });
+      const root = (await host.chooseProject())!;
+
+      await expect(host.enumerateFiles(root)).rejects.toMatchObject({
+        code: 'read-failed',
+        message: `Directory enumeration returned a duplicate project path: Assets/${name}`,
+      });
+    },
+  );
+
+  it('rejects a yielded entry name containing path separators', async () => {
+    const malformed = new FakeFileHandle('nested/file.uss', 'source');
+    const directory = new FakeDirectoryHandle('Chosen Project', {}, 'granted', [
+      ['nested/file.uss', malformed],
+    ]);
+    const host = new BrowserHost({
+      scope: { showDirectoryPicker: async () => directory },
+      identityStore: new FakeProjectIdentityStore(),
+    });
+    const root = (await host.chooseProject())!;
+
+    await expect(host.enumerateFiles(root)).rejects.toMatchObject({ code: 'invalid-path' });
+  });
+
+  it('reports unsupported when a nested granted directory lacks async entries', async () => {
+    const assets = new FakeDirectoryHandle('Assets', {
+      'before.uss': new FakeFileHandle('before.uss', 'source'),
+    });
+    Object.defineProperty(assets, 'entries', { value: undefined });
+    const directory = new FakeDirectoryHandle('Chosen Project', { Assets: assets });
+    const host = new BrowserHost({
+      scope: { showDirectoryPicker: async () => directory },
+      identityStore: new FakeProjectIdentityStore(),
+    });
+    const root = (await host.chooseProject())!;
+
+    const result = await host.enumerateFiles(root);
+
+    expect(result).toEqual({ status: 'unsupported' });
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
   it('reports file enumeration as unsupported when the granted handle has no async entries API', async () => {
     const directory = new FakeDirectoryHandle('Chosen Project', {});
     Object.defineProperty(directory, 'entries', { value: undefined });
@@ -272,6 +332,7 @@ class FakeDirectoryHandle {
     readonly name: string,
     private readonly children: Record<string, FakeDirectoryHandle | FakeFileHandle>,
     private readonly queryResult: PermissionState = 'granted',
+    private readonly enumeratedEntries?: readonly (readonly [string, FakeDirectoryHandle | FakeFileHandle])[],
   ) {
     this.requestResult = queryResult;
   }
@@ -299,7 +360,7 @@ class FakeDirectoryHandle {
   }
 
   async *entries() {
-    for (const [name, handle] of Object.entries(this.children)) {
+    for (const [name, handle] of this.enumeratedEntries ?? Object.entries(this.children)) {
       yield [name, handle] as [string, FakeDirectoryHandle | FakeFileHandle];
     }
   }
