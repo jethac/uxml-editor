@@ -41,6 +41,7 @@ export interface TauriHostPorts {
     event: string,
     listener: (event: TauriEvent<unknown>) => void | Promise<void>,
   ) => Promise<() => void>;
+  readonly reportError?: (error: unknown) => void;
   readonly timers: TauriTimerPorts;
 }
 
@@ -48,24 +49,26 @@ export class TauriHost implements HostPort {
   readonly capabilities: HostCapabilities = Object.freeze({
     mode: 'tauri',
     projectSelection: 'directory-picker',
-    atomicReplace: 'guaranteed',
+    atomicReplace: 'best-effort-safe-write',
     watch: 'native-revision-aware',
     appData: 'app-data',
     dialogs: 'native',
   });
   private readonly grants = new Map<ProjectId, NativeGrant>();
   private readonly watches = new Set<ActiveNativeWatch>();
+  private invokingWatch: ActiveNativeWatch | undefined;
 
   constructor(private readonly ports: TauriHostPorts) {}
 
   async chooseProject(): Promise<ProjectRoot | null> {
+    const callerWatch = this.invokingWatch;
     const result = await this.invoke('host_choose_project', undefined, 'selection-failed');
     if (result === null) return null;
     if (!isExactRecord(result, ['projectId', 'displayName', 'grant'])
       || !isNativeProjectId(result.projectId)
       || !isNativeGrant(result.grant)
       || !isNonemptyString(result.displayName)) {
-      await Promise.all([...this.watches].map((watch) => watch.retire(true)));
+      await Promise.all([...this.watches].map((watch) => watch.retire(true, watch === callerWatch)));
       this.grants.clear();
       throw malformed('selection-failed', 'Project selection returned a malformed result.');
     }
@@ -73,7 +76,7 @@ export class TauriHost implements HostPort {
       { id: projectId(result.projectId), name: result.displayName },
       result.grant,
     );
-    await Promise.all([...this.watches].map((watch) => watch.retire(true)));
+    await Promise.all([...this.watches].map((watch) => watch.retire(true, watch === callerWatch)));
     this.grants.clear();
     this.grants.set(root.id, Object.freeze({ root, token: result.grant }));
     return snapshotProjectRoot(root);
@@ -153,59 +156,20 @@ export class TauriHost implements HostPort {
     const delivered = new Map<string, string>();
     let unlisten: (() => void) | undefined;
     let delivery = Promise.resolve();
-    const deliver = (payload: unknown): Promise<void> | undefined => {
-      if (!active) return undefined;
-      if (watchId === undefined) {
-        pendingPayloads.push(payload);
-        return undefined;
-      }
-      const event = parseWatchEvent(payload, watchId, grant);
-      if (event === null || !active) return undefined;
-      if (event.kind !== 'rescan-required') {
-        const prior = delivered.get(event.path.relativePath);
-        const token = event.kind === 'deleted' ? '<deleted>' : event.revision;
-        if (prior === token) return undefined;
-        delivered.set(event.path.relativePath, token);
-      }
-      delivery = delivery
-        .then(async () => {
-          if (active) await listener(event);
-        })
-        .catch(() => undefined);
-      return delivery;
-    };
-    try {
-      unlisten = await this.ports.listen('uxml://file-change', ({ payload }) => {
-        return deliver(payload);
-      });
-      const result = await this.invoke(
-        'host_start_watch',
-        request({ projectId: grant.root.id, grant: grant.token }),
-        'read-failed',
-      );
-      if (!isExactRecord(result, ['watchId']) || !isNativeWatchId(result.watchId)) {
-        throw malformed('read-failed', 'File watch returned a malformed id.');
-      }
-      watchId = result.watchId;
-      for (const payload of pendingPayloads.splice(0)) deliver(payload);
-      await delivery;
-    } catch (error) {
-      active = false;
-      unlisten?.();
-      if (error instanceof HostError) throw error;
-      throw mapNativeError(error, 'read-failed');
-    }
     let resolveCompletion!: (outcome: DisposalOutcome) => void;
     const completion = new Promise<DisposalOutcome>((resolve) => { resolveCompletion = resolve; });
     let retirement: Promise<DisposalOutcome> | undefined;
+    let retiredByReplacement = false;
+    let deliveryFailure: HostError | undefined;
     const activeWatch: ActiveNativeWatch = {
-      retire: (nativeAlreadyStopped) => {
+      retire: (nativeAlreadyStopped, skipOwnDelivery = false) => {
         if (retirement !== undefined) return retirement;
+        retiredByReplacement = nativeAlreadyStopped;
         active = false;
         pendingPayloads.length = 0;
         unlisten?.();
         retirement = (async () => {
-          await delivery;
+          if (!skipOwnDelivery) await delivery;
           try {
             if (!nativeAlreadyStopped && watchId !== undefined) {
               await this.invokeVoid(
@@ -213,6 +177,9 @@ export class TauriHost implements HostPort {
                 request({ projectId: grant.root.id, grant: grant.token, watchId }),
                 'read-failed',
               );
+            }
+            if (deliveryFailure !== undefined) {
+              return Object.freeze({ status: 'failed' as const, error: deliveryFailure });
             }
             return Object.freeze({ status: 'disposed' as const });
           } catch (error) {
@@ -229,6 +196,72 @@ export class TauriHost implements HostPort {
       },
     };
     this.watches.add(activeWatch);
+    const deliver = (payload: unknown): Promise<void> | undefined => {
+      if (!active) return undefined;
+      if (watchId === undefined) {
+        pendingPayloads.push(payload);
+        return undefined;
+      }
+      const event = parseWatchEvent(payload, watchId, grant);
+      if (event === null || !active) return undefined;
+      if (event.kind !== 'rescan-required') {
+        const prior = delivered.get(event.path.relativePath);
+        const token = event.kind === 'deleted' ? '<deleted>' : event.revision;
+        if (prior === token) return undefined;
+        delivered.set(event.path.relativePath, token);
+      }
+      delivery = delivery
+        .then(async () => {
+          if (!active) return;
+          const previous = this.invokingWatch;
+          this.invokingWatch = activeWatch;
+          let result: void | Promise<void>;
+          try {
+            result = listener(event);
+          } finally {
+            this.invokingWatch = previous;
+          }
+          await result;
+        })
+        .catch((error) => {
+          const failure = error instanceof HostError
+            ? error
+            : new HostError('read-failed', 'Native watch listener failed.', error);
+          deliveryFailure ??= failure;
+          this.reportError(failure);
+        });
+      return delivery;
+    };
+    try {
+      unlisten = await this.ports.listen('uxml://file-change', ({ payload }) => {
+        return deliver(payload);
+      });
+      const result = await this.invoke(
+        'host_start_watch',
+        request({ projectId: grant.root.id, grant: grant.token }),
+        'read-failed',
+      );
+      if (!isExactRecord(result, ['watchId']) || !isNativeWatchId(result.watchId)) {
+        throw malformed('read-failed', 'File watch returned a malformed id.');
+      }
+      watchId = result.watchId;
+      if (!active) {
+        throw new HostError(
+          'root-not-granted',
+          retiredByReplacement
+            ? 'File watch grant was replaced during startup.'
+            : 'File watch was disposed during startup.',
+        );
+      }
+      for (const payload of pendingPayloads.splice(0)) deliver(payload);
+      await delivery;
+    } catch (error) {
+      active = false;
+      unlisten?.();
+      this.watches.delete(activeWatch);
+      if (error instanceof HostError) throw error;
+      throw mapNativeError(error, 'read-failed');
+    }
     return Object.freeze({
       dispose: () => { void activeWatch.retire(false); },
       completion,
@@ -311,8 +344,40 @@ export class TauriHost implements HostPort {
   }
 
   schedule(delayMs: number, callback: ScheduledCallback): Disposable {
-    const handle = this.ports.timers.setTimeout(callback, delayMs);
-    return Object.freeze({ dispose: () => this.ports.timers.clearTimeout(handle) });
+    let active = true;
+    let resolveCompletion!: (outcome: DisposalOutcome) => void;
+    const completion = new Promise<DisposalOutcome>((resolve) => { resolveCompletion = resolve; });
+    const handle = this.ports.timers.setTimeout(async () => {
+      if (!active) return;
+      active = false;
+      try {
+        await callback();
+        resolveCompletion(Object.freeze({ status: 'disposed' }));
+      } catch (error) {
+        const failure = error instanceof HostError
+          ? error
+          : new HostError('read-failed', 'Scheduled desktop callback failed.', error);
+        this.reportError(failure);
+        resolveCompletion(Object.freeze({ status: 'failed', error: failure }));
+      }
+    }, delayMs);
+    return Object.freeze({
+      dispose: () => {
+        if (!active) return;
+        active = false;
+        this.ports.timers.clearTimeout(handle);
+        resolveCompletion(Object.freeze({ status: 'disposed' }));
+      },
+      completion,
+    });
+  }
+
+  private reportError(error: unknown): void {
+    try {
+      this.ports.reportError?.(error);
+    } catch {
+      // Async adapters contain error-sink failures to prevent unhandled callbacks.
+    }
   }
 
   private requireRoot(candidate: ProjectRoot): NativeGrant {
@@ -484,7 +549,7 @@ interface NativeGrant {
 }
 
 interface ActiveNativeWatch {
-  retire(nativeAlreadyStopped: boolean): Promise<DisposalOutcome>;
+  retire(nativeAlreadyStopped: boolean, skipOwnDelivery?: boolean): Promise<DisposalOutcome>;
 }
 
 function isFiniteTimestamp(value: unknown): value is number {

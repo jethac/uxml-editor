@@ -10,10 +10,12 @@ import {
   type CloseChoice,
   type CloseLease,
   type CloseResolution,
+  type DocumentStateLease,
   type DirtyState,
   type SaveBeforeCloseResult,
 } from '../core/desktop/DesktopLifecycleController';
 import { EditorStore } from '../core/store/EditorStore';
+import type { Disposable } from '../core/host/HostPort';
 import { Workbench } from '../features/workspace/Workbench';
 import './app.css';
 
@@ -26,14 +28,19 @@ export interface AppProps {
 export interface AppDesktopPorts {
   readonly events: DesktopEventPort;
   readonly confirm: { confirmClose(): CloseChoice | Promise<CloseChoice> };
-  readonly window: { resolveClose(lease: CloseLease, resolution: CloseResolution): void | Promise<void> };
+  readonly window: {
+    setLifecycleReady(ready: boolean): void | Promise<void>;
+    resolveClose(lease: CloseLease, resolution: CloseResolution): void | Promise<void>;
+  };
   readonly menu: { setFileWorkflowEnabled(enabled: boolean): void | Promise<void> };
   readonly errors: { report(error: unknown): void };
 }
 
 export interface Task16FileLifecyclePort extends Task16FileCommandPort {
-  getDirtyState(lease: CloseLease): DirtyState | Promise<DirtyState>;
-  saveBeforeClose(lease: CloseLease): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult>;
+  acquireCloseState(lease: CloseLease): DocumentStateLease | Promise<DocumentStateLease>;
+  finalValidateCloseState(lease: DocumentStateLease): boolean | Promise<boolean>;
+  releaseCloseState(lease: DocumentStateLease): void | Promise<void>;
+  saveBeforeClose(lease: DocumentStateLease): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult>;
 }
 
 export function App({ store, desktop, task16FileLifecycle }: AppProps) {
@@ -49,36 +56,67 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
   useEffect(() => {
     if (desktop === undefined) return;
     let active = true;
-    const disposables: Array<{ dispose(): void }> = [];
+    const disposables: Disposable[] = [];
     const currentFileLifecycle = task16FileLifecycle ?? unboundTask16FileLifecycle(store);
     const commandBridge = new DesktopCommandBridge(
       desktop.events,
       new EditorDesktopCommandController(store, task16FileLifecycle),
+      desktop.errors,
     );
     const lifecycle = new DesktopLifecycleController({
       events: desktop.events,
-      dirty: { getDirtyState: (lease) => currentFileLifecycle.getDirtyState(lease) },
+      state: {
+        acquire: (lease) => currentFileLifecycle.acquireCloseState(lease),
+        finalValidate: (lease) => currentFileLifecycle.finalValidateCloseState(lease),
+        release: (lease) => currentFileLifecycle.releaseCloseState(lease),
+      },
       confirm: desktop.confirm,
       save: { saveBeforeClose: (lease) => currentFileLifecycle.saveBeforeClose(lease) },
       window: desktop.window,
     });
+    const disposeStarted = () => {
+      for (const disposable of disposables.splice(0)) {
+        disposable.dispose();
+        if (disposable.completion !== undefined) {
+          void disposable.completion.then((outcome) => {
+            if (outcome.status === 'failed') desktop.errors.report(outcome.error);
+          });
+        }
+      }
+    };
+    const disableFileWorkflow = async () => {
+      try {
+        await desktop.menu.setFileWorkflowEnabled(false);
+      } catch (error) {
+        desktop.errors.report(error);
+      }
+    };
     void (async () => {
       try {
-        await desktop.menu.setFileWorkflowEnabled(task16FileLifecycle !== undefined);
-        const commandDisposable = await commandBridge.start();
-        if (!active) return commandDisposable.dispose();
-        disposables.push(commandDisposable);
         const lifecycleDisposable = await lifecycle.start();
-        if (!active) return lifecycleDisposable.dispose();
+        if (!active) {
+          lifecycleDisposable.dispose();
+          return;
+        }
         disposables.push(lifecycleDisposable);
+        const commandDisposable = await commandBridge.start();
+        if (!active) {
+          commandDisposable.dispose();
+          return;
+        }
+        disposables.push(commandDisposable);
+        await desktop.menu.setFileWorkflowEnabled(task16FileLifecycle !== undefined);
+        if (!active) await disableFileWorkflow();
       } catch (error) {
-        for (const disposable of disposables.splice(0)) disposable.dispose();
+        disposeStarted();
+        await disableFileWorkflow();
         desktop.errors.report(error);
       }
     })();
     return () => {
       active = false;
-      for (const disposable of disposables.splice(0)) disposable.dispose();
+      disposeStarted();
+      void disableFileWorkflow();
     };
   }, [desktop, store, task16FileLifecycle]);
 
@@ -86,8 +124,29 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
 }
 
 function unboundTask16FileLifecycle(store: EditorStore): Task16FileLifecyclePort {
+  const held = new WeakMap<DocumentStateLease, Readonly<{
+    session: ReturnType<EditorStore['getSnapshot']>['session'];
+    generation: number;
+  }>>();
   return Object.freeze({
-    getDirtyState: () => store.getSnapshot().session === null ? 'clean' : 'unknown',
+    acquireCloseState: () => {
+      const session = store.getSnapshot().session;
+      const generation = session?.generation ?? 0;
+      const lease = Object.freeze({
+        generation,
+        dirtyState: (session === null ? 'clean' : 'unknown') as DirtyState,
+      });
+      held.set(lease, Object.freeze({ session, generation }));
+      return lease;
+    },
+    finalValidateCloseState: (lease: DocumentStateLease) => {
+      const expected = held.get(lease);
+      const session = store.getSnapshot().session;
+      return expected !== undefined
+        && expected.session === session
+        && expected.generation === (session?.generation ?? 0);
+    },
+    releaseCloseState: (lease: DocumentStateLease) => { held.delete(lease); },
     saveBeforeClose: async (): Promise<SaveBeforeCloseResult> => 'cancelled',
     save: async () => undefined,
     saveAll: async () => undefined,

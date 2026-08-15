@@ -14,7 +14,7 @@ use commands::{
 };
 use desktop::{
     CloseGateDecision, CloseRequestPayload, CloseResolutionRequest, FileWorkflowEnabledRequest,
-    MenuCommandPayload,
+    LifecycleReadyRequest, MenuCommandPayload,
 };
 use error::HostError;
 use scoped_fs::{ProjectRootDto, ReadTextDto};
@@ -267,6 +267,14 @@ fn desktop_set_file_workflow_enabled(
     })
 }
 
+#[tauri::command]
+fn desktop_set_lifecycle_ready(
+    state: State<'_, HostState>,
+    request: LifecycleReadyRequest,
+) -> Result<(), HostError> {
+    state.close_gate.set_ready(request.ready)
+}
+
 fn validate_dialog_text(value: &str, field: &str, max_length: usize) -> Result<(), HostError> {
     if value.trim().is_empty() || value.len() > max_length {
         return Err(HostError::new(
@@ -326,6 +334,7 @@ pub fn run() {
             desktop_confirm_close,
             desktop_resolve_close,
             desktop_set_file_workflow_enabled,
+            desktop_set_lifecycle_ready,
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -336,12 +345,24 @@ pub fn run() {
                     api.prevent_close();
                     return;
                 };
-                match state.close_gate.request() {
+                match state.close_gate.request_for_delivery(|lease| {
+                    window
+                        .emit(
+                            "uxml://close-requested",
+                            CloseRequestPayload {
+                                lease: lease.to_string(),
+                            },
+                        )
+                        .map_err(|error| {
+                            HostError::new(
+                                "read-failed",
+                                format!("Could not deliver native close request: {error}"),
+                            )
+                        })
+                }) {
                     Ok(CloseGateDecision::Prevent) | Err(_) => api.prevent_close(),
-                    Ok(CloseGateDecision::Emit(lease)) => {
+                    Ok(CloseGateDecision::Emit(_)) => {
                         api.prevent_close();
-                        let _ =
-                            window.emit("uxml://close-requested", CloseRequestPayload { lease });
                     }
                 }
             }

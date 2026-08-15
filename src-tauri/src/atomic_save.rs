@@ -18,6 +18,7 @@ use std::fs::File;
 
 static REPLACE_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+static NEXT_BACKUP: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 pub fn content_revision(path: &Path) -> Result<String, HostError> {
@@ -115,7 +116,7 @@ fn replace_text_atomically_impl(
             "Replacement target does not exist.",
         ));
     }
-    let (mut temporary, temporary_guard) = create_unique_cap_sibling(parent, target_name)?;
+    let (mut temporary, mut temporary_guard) = create_unique_cap_sibling(parent, target_name)?;
     temporary.write_all(text.as_bytes()).map_err(|error| {
         HostError::io(
             "replace-failed",
@@ -149,11 +150,6 @@ fn replace_text_atomically_impl(
         ));
     }
 
-    #[cfg(test)]
-    if let Some(hook) = before_commit {
-        let _ = hook();
-    }
-
     let mut commit_target = open_checked_target(parent, target_name)?;
     let commit_revision = content_revision_from_cap_file(&mut commit_target)?;
     if commit_revision != expected_revision {
@@ -171,16 +167,47 @@ fn replace_text_atomically_impl(
         ));
     }
 
-    parent
-        .rename(temporary_guard.path(), parent, target_name)
-        .map_err(|error| {
-            HostError::io(
-                "replace-failed",
-                "Could not atomically replace the capability-relative destination",
-                &error,
-            )
-        })?;
-    flush_cap_parent_directory(parent)?;
+    let mut backup_guard = quarantine_target(parent, target_name)?;
+
+    #[cfg(test)]
+    if let Some(hook) = before_commit {
+        let _ = hook();
+    }
+
+    let mut quarantined_target = open_checked_target(parent, backup_guard.path())?;
+    let quarantined_revision = content_revision_from_cap_file(&mut quarantined_target)?;
+    if quarantined_revision != expected_revision {
+        return Err(restore_or_retain_quarantine(
+            parent,
+            target_name,
+            &mut backup_guard,
+            "File changed in the final replacement interval.",
+            true,
+        ));
+    }
+
+    if let Err(error) = parent.hard_link(temporary_guard.path(), parent, target_name) {
+        let conflict = error.kind() == std::io::ErrorKind::AlreadyExists;
+        let rollback = restore_or_retain_quarantine(
+            parent,
+            target_name,
+            &mut backup_guard,
+            if conflict {
+                "Another writer installed the destination during replacement."
+            } else {
+                "Could not install the capability-relative replacement."
+            },
+            false,
+        );
+        if conflict {
+            return Err(rollback);
+        }
+        return Err(HostError::io(
+            "replace-failed",
+            "Could not install the capability-relative replacement",
+            &error,
+        ));
+    }
     let mut resulting_file = open_checked_target(parent, target_name)?;
     let resulting_revision = content_revision_from_cap_file(&mut resulting_file)?;
     let expected_result = revision_for_bytes(text.as_bytes());
@@ -190,7 +217,98 @@ fn replace_text_atomically_impl(
             "Atomic replacement did not preserve the requested exact bytes.",
         ));
     }
+    backup_guard.remove()?;
+    temporary_guard.remove()?;
+    flush_cap_parent_directory(parent)?;
     Ok(resulting_revision)
+}
+
+fn quarantine_target<'a>(
+    parent: &'a Dir,
+    target_name: &Path,
+) -> Result<CapBackupGuard<'a>, HostError> {
+    let file_name = target_name
+        .file_name()
+        .ok_or_else(|| HostError::new("invalid-path", "Replacement target has no file name."))?;
+    for _ in 0..64 {
+        let mut backup_name = OsString::from(".");
+        backup_name.push(file_name);
+        backup_name.push(format!(
+            ".uxml-editor-{}-{}.bak",
+            std::process::id(),
+            NEXT_BACKUP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = PathBuf::from(backup_name);
+        let mut options = CapOpenOptions::new();
+        options.write(true).create_new(true);
+        let placeholder = match parent.open_with(&path, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(HostError::io(
+                    "replace-failed",
+                    "Could not reserve a capability-relative quarantine file",
+                    &error,
+                ));
+            }
+        };
+        drop(placeholder);
+        if let Err(error) = parent.rename(target_name, parent, &path) {
+            let _ = parent.remove_file(&path);
+            return Err(HostError::io(
+                "replace-failed",
+                "Could not quarantine the checked project file",
+                &error,
+            ));
+        }
+        return Ok(CapBackupGuard {
+            parent,
+            path,
+            active: true,
+        });
+    }
+    Err(HostError::new(
+        "replace-failed",
+        "Could not allocate a unique quarantine file.",
+    ))
+}
+
+fn restore_or_retain_quarantine(
+    parent: &Dir,
+    target_name: &Path,
+    backup: &mut CapBackupGuard<'_>,
+    message: &str,
+    retain_when_target_exists: bool,
+) -> HostError {
+    match parent.hard_link(backup.path(), parent, target_name) {
+        Ok(()) => {
+            let _ = backup.remove();
+            HostError::new("stale-revision", message)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if retain_when_target_exists {
+                backup.retain();
+                HostError::new(
+                    "stale-revision",
+                    format!(
+                        "{message} Competing bytes were retained in editor conflict artifact {}.",
+                        backup.path().display()
+                    ),
+                )
+            } else {
+                let _ = backup.remove();
+                HostError::new("stale-revision", message)
+            }
+        }
+        Err(error) => {
+            backup.retain();
+            HostError::io(
+                "replace-failed",
+                "Could not restore quarantined project bytes; the conflict artifact was retained",
+                &error,
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -221,7 +339,16 @@ fn create_unique_cap_sibling<'a>(
         let mut options = CapOpenOptions::new();
         options.write(true).create_new(true);
         match parent.open_with(&path, &options) {
-            Ok(file) => return Ok((file, CapTempGuard { parent, path })),
+            Ok(file) => {
+                return Ok((
+                    file,
+                    CapTempGuard {
+                        parent,
+                        path,
+                        active: true,
+                    },
+                ))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(HostError::io(
@@ -358,17 +485,74 @@ pub(crate) fn flush_parent_directory(_parent: &Path) -> Result<(), HostError> {
 struct CapTempGuard<'a> {
     parent: &'a Dir,
     path: PathBuf,
+    active: bool,
+}
+
+struct CapBackupGuard<'a> {
+    parent: &'a Dir,
+    path: PathBuf,
+    active: bool,
+}
+
+impl CapBackupGuard<'_> {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn remove(&mut self) -> Result<(), HostError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.parent.remove_file(&self.path).map_err(|error| {
+            HostError::io(
+                "replace-failed",
+                "Could not clean the capability-relative quarantine file",
+                &error,
+            )
+        })?;
+        self.active = false;
+        Ok(())
+    }
+
+    fn retain(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for CapBackupGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.parent.remove_file(&self.path);
+        }
+    }
 }
 
 impl CapTempGuard<'_> {
     fn path(&self) -> &Path {
         &self.path
     }
+
+    fn remove(&mut self) -> Result<(), HostError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.parent.remove_file(&self.path).map_err(|error| {
+            HostError::io(
+                "replace-failed",
+                "Could not clean the capability-relative replacement file",
+                &error,
+            )
+        })?;
+        self.active = false;
+        Ok(())
+    }
 }
 
 impl Drop for CapTempGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.parent.remove_file(&self.path);
+        if self.active {
+            let _ = self.parent.remove_file(&self.path);
+        }
     }
 }
 
@@ -382,6 +566,7 @@ mod tests {
     use cap_std::{ambient_authority, fs::Dir};
     use std::{
         fs,
+        io::{Seek, SeekFrom, Write},
         path::PathBuf,
         sync::{
             atomic::{AtomicU64, Ordering},
@@ -540,6 +725,68 @@ mod tests {
             replacement.unwrap();
             assert_eq!(fs::read(&target).unwrap(), b"editor-replacement");
         }
+        fixture.assert_no_artifacts();
+    }
+
+    #[test]
+    fn external_path_replacement_in_the_final_commit_interval_is_never_overwritten() {
+        let fixture = Fixture::new();
+        let target = fixture.write("Main.uxml", b"original");
+        let displaced = fixture.root.join("displaced-original.uxml");
+        let observed = content_revision(&target).unwrap();
+        let mut external_replace = || {
+            if target.exists() {
+                fs::rename(&target, &displaced)?;
+            }
+            fs::write(&target, b"external-final-writer")
+        };
+
+        let (replacement, external) = replace_text_atomically_with_commit_hook(
+            &target,
+            &observed,
+            "editor-replacement",
+            &mut external_replace,
+        );
+
+        external.unwrap().unwrap();
+        assert!(
+            replacement.is_err(),
+            "the editor committed over an external path entry"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"external-final-writer");
+    }
+
+    #[test]
+    fn existing_external_writer_is_excluded_or_its_bytes_are_restored() {
+        let fixture = Fixture::new();
+        let target = fixture.write("Main.uxml", b"original");
+        let observed = content_revision(&target).unwrap();
+        let mut writer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .unwrap();
+        let mut external_write = || {
+            writer.seek(SeekFrom::Start(0))?;
+            writer.write_all(b"external-existing")?;
+            writer.set_len(b"external-existing".len() as u64)?;
+            writer.sync_all()
+        };
+
+        let (replacement, hook) = replace_text_atomically_with_commit_hook(
+            &target,
+            &observed,
+            "editor-replacement",
+            &mut external_write,
+        );
+
+        if let Some(hook_result) = hook {
+            hook_result.unwrap();
+        } else {
+            external_write().unwrap();
+        }
+        assert!(replacement.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"external-existing");
         fixture.assert_no_artifacts();
     }
 

@@ -33,6 +33,10 @@ export interface DesktopCommandExecutor {
   execute(command: DesktopCommandId): void | Promise<void>;
 }
 
+export interface DesktopErrorPort {
+  report(error: unknown): void;
+}
+
 export interface Task16FileCommandPort {
   save(): void | Promise<void>;
   saveAll(): void | Promise<void>;
@@ -43,13 +47,22 @@ export class DesktopCommandBridge {
   constructor(
     private readonly events: DesktopEventPort,
     private readonly executor: DesktopCommandExecutor,
+    private readonly errors: DesktopErrorPort = { report: () => undefined },
   ) {}
 
   async start(): Promise<Disposable> {
     let active = true;
     const unlisten = await this.events.listen('uxml://menu-command', async ({ payload }) => {
       if (!active || !isDesktopCommandPayload(payload)) return;
-      await this.executor.execute(payload.commandId);
+      try {
+        await this.executor.execute(payload.commandId);
+      } catch (error) {
+        try {
+          this.errors.report(error);
+        } catch {
+          // Native event callbacks must not leak application error-reporting failures.
+        }
+      }
     });
     return Object.freeze({
       dispose: () => {

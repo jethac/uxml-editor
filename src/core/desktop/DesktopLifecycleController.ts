@@ -1,10 +1,15 @@
-import type { Disposable } from '../host/HostPort';
+import { HostError, type Disposable, type DisposalOutcome } from '../host/HostPort';
 
 export type DirtyState = 'clean' | 'dirty' | 'unknown';
 export type CloseChoice = 'save' | 'discard' | 'cancel';
 export type SaveBeforeCloseResult = 'saved' | 'cancelled' | 'failed';
 export type CloseLease = string;
 export type CloseResolution = 'close' | 'cancel';
+
+export interface DocumentStateLease {
+  readonly generation: number;
+  readonly dirtyState: DirtyState;
+}
 
 export interface DesktopEvent<T> {
   readonly payload: T;
@@ -17,10 +22,17 @@ export interface DesktopLifecyclePorts {
       listener: (event: DesktopEvent<unknown>) => void | Promise<void>,
     ): Promise<() => void>;
   };
-  readonly dirty: { getDirtyState(lease: CloseLease): DirtyState | Promise<DirtyState> };
+  readonly state: {
+    acquire(lease: CloseLease): DocumentStateLease | Promise<DocumentStateLease>;
+    finalValidate(lease: DocumentStateLease): boolean | Promise<boolean>;
+    release(lease: DocumentStateLease): void | Promise<void>;
+  };
   readonly confirm: { confirmClose(lease: CloseLease): CloseChoice | Promise<CloseChoice> };
-  readonly save: { saveBeforeClose(lease: CloseLease): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult> };
-  readonly window: { resolveClose(lease: CloseLease, resolution: CloseResolution): void | Promise<void> };
+  readonly save: { saveBeforeClose(lease: DocumentStateLease): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult> };
+  readonly window: {
+    setLifecycleReady(ready: boolean): void | Promise<void>;
+    resolveClose(lease: CloseLease, resolution: CloseResolution): void | Promise<void>;
+  };
 }
 
 export class DesktopLifecycleController {
@@ -39,15 +51,29 @@ export class DesktopLifecycleController {
         const lease = parseCloseLease(payload);
         if (lease !== null) return this.requestClose(lease);
       });
+      await this.ports.window.setLifecycleReady(true);
     } catch (error) {
       this.active = false;
+      unlisten?.();
       throw error;
     }
+    let retirement: Promise<DisposalOutcome> | undefined;
     return Object.freeze({
       dispose: () => {
         if (!this.active) return;
         this.active = false;
         unlisten?.();
+        retirement = Promise.resolve(this.ports.window.setLifecycleReady(false))
+          .then(() => Object.freeze({ status: 'disposed' as const }))
+          .catch((error) => Object.freeze({
+            status: 'failed' as const,
+            error: error instanceof HostError
+              ? error
+              : new HostError('read-failed', 'Could not withdraw desktop lifecycle readiness.', error),
+          }));
+      },
+      get completion() {
+        return retirement ?? Promise.resolve(Object.freeze({ status: 'disposed' as const }));
       },
     });
   }
@@ -63,39 +89,68 @@ export class DesktopLifecycleController {
   }
 
   private async evaluateClose(lease: CloseLease): Promise<void> {
-    let dirty: DirtyState;
+    let stateLease: DocumentStateLease;
     try {
-      dirty = await this.ports.dirty.getDirtyState(lease);
+      stateLease = await this.ports.state.acquire(lease);
     } catch {
       return this.resolveOnce(lease, 'cancel');
     }
-    if (!isDirtyState(dirty) || dirty === 'unknown') return this.resolveOnce(lease, 'cancel');
-    if (dirty === 'clean') return this.resolveOnce(lease, 'close');
+    try {
+      if (!isDocumentStateLease(stateLease) || stateLease.dirtyState === 'unknown') {
+        await this.resolveOnce(lease, 'cancel');
+        return;
+      }
+      if (stateLease.dirtyState === 'clean') {
+        await this.resolveValidated(lease, stateLease);
+        return;
+      }
 
-    let choice: CloseChoice;
-    try {
-      choice = await this.ports.confirm.confirmClose(lease);
-    } catch {
-      return this.resolveOnce(lease, 'cancel');
-    }
-    if (!isCloseChoice(choice) || choice === 'cancel') return this.resolveOnce(lease, 'cancel');
-    if (choice === 'discard') return this.resolveOnce(lease, 'close');
+      let choice: CloseChoice;
+      try {
+        choice = await this.ports.confirm.confirmClose(lease);
+      } catch {
+        await this.resolveOnce(lease, 'cancel');
+        return;
+      }
+      if (!isCloseChoice(choice) || choice === 'cancel') {
+        await this.resolveOnce(lease, 'cancel');
+        return;
+      }
+      if (choice === 'discard') {
+        await this.resolveValidated(lease, stateLease);
+        return;
+      }
 
-    let saved: SaveBeforeCloseResult;
-    try {
-      saved = await this.ports.save.saveBeforeClose(lease);
-    } catch {
-      return this.resolveOnce(lease, 'cancel');
+      let saved: SaveBeforeCloseResult;
+      try {
+        saved = await this.ports.save.saveBeforeClose(stateLease);
+      } catch {
+        await this.resolveOnce(lease, 'cancel');
+        return;
+      }
+      if (saved !== 'saved') {
+        await this.resolveOnce(lease, 'cancel');
+        return;
+      }
+      await this.resolveValidated(lease, stateLease);
+    } finally {
+      try {
+        await this.ports.state.release(stateLease);
+      } catch {
+        await this.resolveOnce(lease, 'cancel');
+      }
     }
-    if (saved !== 'saved') return this.resolveOnce(lease, 'cancel');
+  }
+
+  private async resolveValidated(lease: CloseLease, stateLease: DocumentStateLease): Promise<void> {
     try {
-      if (await this.ports.dirty.getDirtyState(lease) !== 'clean') {
-        return this.resolveOnce(lease, 'cancel');
+      if (await this.ports.state.finalValidate(stateLease)) {
+        return this.resolveOnce(lease, 'close');
       }
     } catch {
-      return this.resolveOnce(lease, 'cancel');
+      // Validation errors fail closed through the native cancellation below.
     }
-    await this.resolveOnce(lease, 'close');
+    await this.resolveOnce(lease, 'cancel');
   }
 
   private async resolveOnce(lease: CloseLease, resolution: CloseResolution): Promise<void> {
@@ -118,6 +173,15 @@ function parseCloseLease(payload: unknown): CloseLease | null {
 
 function isDirtyState(value: unknown): value is DirtyState {
   return value === 'clean' || value === 'dirty' || value === 'unknown';
+}
+
+function isDocumentStateLease(value: unknown): value is DocumentStateLease {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const lease = value as Partial<DocumentStateLease>;
+  return Number.isSafeInteger(lease.generation)
+    && typeof lease.generation === 'number'
+    && lease.generation >= 0
+    && isDirtyState(lease.dirtyState);
 }
 
 function isCloseChoice(value: unknown): value is CloseChoice {

@@ -4,6 +4,37 @@
 
 Implemented on `agent/uxml-editor` from base `a139972`. The desktop runtime now uses a real `TauriHost`; the browser runtime continues to use `BrowserHost`. Rust is the sole filesystem authority, native operations are limited to the current directory-picker grant, and desktop menu/close events terminate in typed, tested frontend controllers.
 
+## Fix Round 2 Addendum (2026-08-16)
+
+This addendum records the accepted fixes from `task-15-fix-1-review.md` after commit `1537863`. It supersedes conflicting statements below and in the fix-round-1 addendum about selected-root acquisition order, overwrite-rename replacement, Tauri atomic-replace capability, Task 16 dirty hooks, close-listener startup, watch startup retirement, menu transactionality, and dropped asynchronous failures. Full RED/GREEN evidence is in `task-15-fix-2-report.md`.
+
+### Authority and replacement
+
+- Selected-root authority is acquired first as `cap_std::fs::Dir`. Type is validated from that handle; ambient canonical display/project-ID work is accepted only after Unix device/inode or Windows handle-path identity matches the opened object. A selection-time root replacement cannot redirect authority.
+- Replacement moves the checked target into a capability-relative same-directory quarantine, revalidates it in the final interval, and installs the editor temporary with capability-relative no-replace hard-link semantics. A competing target entry is preserved and causes conflict. Existing-writer bytes are excluded or restored in deterministic platform tests.
+- Ordinary temp/quarantine artifacts are removed before the final metadata flush. If competing bytes cannot be automatically restored because another target exists, the `.bak` conflict artifact is retained and identified in the relative typed error; native watch filtering ignores it.
+- Tauri now reports `atomicReplace: "best-effort-safe-write"`. No portable linearizable hash-CAS is claimed for an adversarial non-Windows writer mutating an already-open quarantined inode after final revalidation.
+
+### Close, watch, and menu lifecycle
+
+- `Task16FileLifecyclePort` is now an explicit document-state generation lease: acquire `{ generation, dirtyState }`, final-validate, release, and save under that lease. The controller holds it through native close/cancel resolution. Edits after clean, Discard, or post-save decisions invalidate close.
+- Rust close delivery starts not ready. `desktop_set_lifecycle_ready({ ready })` is published only after the frontend close listener exists. Early close creates no lease; failed native emit cancels its exact lease; disposal withdraws readiness.
+- Pending watch startup joins the frontend retirement set before any await. Successful grant replacement invalidates pending/established watches and queued old events. A listener-originated `chooseProject()` skips only its own delivery drain, preventing self-deadlock while unrelated replacement still drains.
+- App enables Save/Save All/Close Project only after lifecycle and command listeners are ready, and restores disabled state on startup failure/disposal. Rejected Task 16 commands reach `desktop.errors.report` without escaping native callbacks.
+- Tauri timers/watch listeners and `ExternalChangeCoordinator` contain async failures. Listener, debounce, read, rescan, and native stop failures are observable through the production error sink or preserved `Disposable.completion` through `SaveCoordinator.watch()`.
+
+### Corrected verification totals
+
+- `npm test`: 40 files / 585 tests.
+- `npm run build`: passed, 1,889 modules transformed.
+- `npm run test:e2e`: 13 passed.
+- `cargo fmt --check`, `cargo check`, and strict `cargo clippy`: passed.
+- `cargo test`: 52 passed; doc tests passed.
+- `npx tauri build --no-bundle`: passed; rebuilt executable stayed live with title `UXML Editor` in smoke.
+- `npm audit --omit=dev`: 0 vulnerabilities. Exact capability/license/forbidden-surface audits and `git diff --check` passed.
+
+No dependency, lockfile, notice, CSP, capability permission, exact ID/DTO validation, browser fallback, or one-host ownership changed in fix round 2. The accepted review artifact is included unchanged with SHA-256 `149098D60B8CBA93453A89760EFD71202845265665B358666530F24AFF2B4277`.
+
 ## Fix Round 1 Addendum (2026-08-16)
 
 This addendum records the accepted review fixes implemented after commit `c1d68cc`. It supersedes conflicting statements below about ambient canonical-path enforcement, request/event schemas, close authorization, menu defaults, runtime host construction, capability count, test totals, and portable atomic-CAS guarantees. The complete evidence is also recorded in `task-15-fix-1-report.md`.

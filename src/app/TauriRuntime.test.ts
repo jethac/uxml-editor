@@ -20,13 +20,18 @@ describe('createTauriRuntimeBindings', () => {
 
     await (runtime.desktop.window as unknown as {
       resolveClose(lease: string, action: string): Promise<void>;
+      setLifecycleReady(ready: boolean): Promise<void>;
     }).resolveClose(lease, 'close');
+    await (runtime.desktop.window as unknown as {
+      setLifecycleReady(ready: boolean): Promise<void>;
+    }).setLifecycleReady(true);
     await (runtime.desktop as unknown as {
       menu: { setFileWorkflowEnabled(enabled: boolean): Promise<void> };
     }).menu.setFileWorkflowEnabled(true);
 
     expect(calls).toEqual([
       { command: 'desktop_resolve_close', payload: { request: { lease, action: 'close' } } },
+      { command: 'desktop_set_lifecycle_ready', payload: { request: { ready: true } } },
       { command: 'desktop_set_file_workflow_enabled', payload: { request: { enabled: true } } },
     ]);
   });

@@ -125,6 +125,12 @@ pub struct FileWorkflowEnabledRequest {
     pub enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifecycleReadyRequest {
+    pub ready: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CloseResolution {
@@ -158,13 +164,23 @@ pub struct CloseGate {
 
 #[derive(Default)]
 struct CloseState {
+    ready: bool,
     pending: Option<String>,
 }
 
 impl CloseGate {
+    pub fn set_ready(&self, ready: bool) -> Result<(), HostError> {
+        let mut state = self.lock()?;
+        state.ready = ready;
+        if !ready {
+            state.pending = None;
+        }
+        Ok(())
+    }
+
     pub fn request(&self) -> Result<CloseGateDecision, HostError> {
         let mut state = self.lock()?;
-        if state.pending.is_some() {
+        if !state.ready || state.pending.is_some() {
             return Ok(CloseGateDecision::Prevent);
         }
         let lease = format!(
@@ -173,6 +189,23 @@ impl CloseGate {
         );
         state.pending = Some(lease.clone());
         Ok(CloseGateDecision::Emit(lease))
+    }
+
+    pub fn request_for_delivery(
+        &self,
+        emit: impl FnOnce(&str) -> Result<(), HostError>,
+    ) -> Result<CloseGateDecision, HostError> {
+        let decision = self.request()?;
+        if let CloseGateDecision::Emit(lease) = &decision {
+            if let Err(error) = emit(lease) {
+                let mut state = self.lock()?;
+                if state.pending.as_deref() == Some(lease) {
+                    state.pending = None;
+                }
+                return Err(error);
+            }
+        }
+        Ok(decision)
     }
 
     pub fn resolve(&self, lease: &str, resolution: CloseResolution) -> Result<bool, HostError> {
@@ -273,6 +306,7 @@ mod tests {
         close_choice, is_desktop_command, CloseGate, CloseGateDecision, CloseResolution,
         CloseResolutionRequest, MenuSection, MENU_COMMANDS,
     };
+    use crate::error::HostError;
     use tauri_plugin_dialog::MessageDialogResult;
 
     #[test]
@@ -347,6 +381,7 @@ mod tests {
     #[test]
     fn close_lease_is_single_use_and_duplicate_native_requests_are_coalesced() {
         let gate = CloseGate::default();
+        gate.set_ready(true).unwrap();
         let CloseGateDecision::Emit(lease) = gate.request().unwrap() else {
             panic!("first request must emit");
         };
@@ -359,8 +394,32 @@ mod tests {
     }
 
     #[test]
+    fn close_before_frontend_readiness_does_not_create_a_pending_lease() {
+        let gate = CloseGate::default();
+
+        assert_eq!(gate.request().unwrap(), CloseGateDecision::Prevent);
+        assert_eq!(gate.request().unwrap(), CloseGateDecision::Prevent);
+    }
+
+    #[test]
+    fn failed_close_event_delivery_cancels_the_exact_pending_lease() {
+        let gate = CloseGate::default();
+        gate.set_ready(true).unwrap();
+
+        let delivery = gate
+            .request_for_delivery(|_| Err(HostError::new("read-failed", "injected emit failure")));
+
+        assert!(delivery.is_err());
+        assert!(matches!(
+            gate.request().unwrap(),
+            CloseGateDecision::Emit(_)
+        ));
+    }
+
+    #[test]
     fn cancelled_failed_and_stale_close_leases_fail_closed() {
         let gate = CloseGate::default();
+        gate.set_ready(true).unwrap();
         let CloseGateDecision::Emit(cancelled) = gate.request().unwrap() else {
             panic!("request must emit");
         };

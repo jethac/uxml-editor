@@ -89,6 +89,49 @@ impl ScopedProjects {
     }
 
     pub fn prepare_selected(&self, root: &Path) -> Result<PreparedGrant, HostError> {
+        self.prepare_selected_impl(root, None)
+    }
+
+    #[cfg(test)]
+    fn prepare_selected_after_validation_hook(
+        &self,
+        root: &Path,
+        hook: impl FnOnce(),
+    ) -> Result<PreparedGrant, HostError> {
+        self.prepare_selected_impl(root, Some(Box::new(hook)))
+    }
+
+    fn prepare_selected_impl(
+        &self,
+        root: &Path,
+        #[cfg_attr(not(test), allow(unused_variables))] after_validation: Option<
+            Box<dyn FnOnce() + '_>,
+        >,
+    ) -> Result<PreparedGrant, HostError> {
+        let authority = Dir::open_ambient_dir(root, ambient_authority()).map_err(|error| {
+            HostError::io(
+                "selection-failed",
+                "Could not open the selected project capability",
+                &error,
+            )
+        })?;
+        let authority_metadata = authority.dir_metadata().map_err(|error| {
+            HostError::io(
+                "selection-failed",
+                "Could not inspect the selected project capability",
+                &error,
+            )
+        })?;
+        if !authority_metadata.is_dir() {
+            return Err(HostError::new(
+                "selection-failed",
+                "The selected project root is not a directory.",
+            ));
+        }
+        #[cfg(test)]
+        if let Some(hook) = after_validation {
+            hook();
+        }
         let canonical = fs::canonicalize(root).map_err(|error| {
             HostError::io(
                 "selection-failed",
@@ -103,20 +146,14 @@ impl ScopedProjects {
                 &error,
             )
         })?;
-        if !metadata.is_dir() {
+        if !metadata.is_dir()
+            || !same_directory_identity(&authority, &authority_metadata, &canonical, &metadata)
+        {
             return Err(HostError::new(
                 "selection-failed",
-                "The selected project root is not a directory.",
+                "The selected project directory changed while it was being granted.",
             ));
         }
-        let authority =
-            Dir::open_ambient_dir(&canonical, ambient_authority()).map_err(|error| {
-                HostError::io(
-                    "selection-failed",
-                    "Could not open the selected project capability",
-                    &error,
-                )
-            })?;
         let display_name = canonical
             .file_name()
             .and_then(|name| name.to_str())
@@ -280,6 +317,68 @@ impl ScopedProjects {
             })?;
         operation(grant)
     }
+}
+
+#[cfg(unix)]
+fn same_directory_identity(
+    _authority: &Dir,
+    capability: &cap_std::fs::Metadata,
+    _canonical: &Path,
+    ambient: &std::fs::Metadata,
+) -> bool {
+    use cap_std::fs::MetadataExt as CapMetadataExt;
+    use std::os::unix::fs::MetadataExt as StdMetadataExt;
+
+    capability.dev() == ambient.dev() && capability.ino() == ambient.ino()
+}
+
+#[cfg(windows)]
+fn same_directory_identity(
+    authority: &Dir,
+    _capability: &cap_std::fs::Metadata,
+    canonical: &Path,
+    _ambient: &std::fs::Metadata,
+) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+    };
+
+    let handle = authority.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    // SAFETY: `handle` remains owned by `authority`, and the first call only queries the size.
+    let required = unsafe {
+        GetFinalPathNameByHandleW(
+            handle,
+            std::ptr::null_mut(),
+            0,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    };
+    if required == 0 {
+        return false;
+    }
+    let mut buffer = vec![0_u16; required as usize + 1];
+    // SAFETY: `buffer` is writable for the advertised capacity and `handle` stays valid.
+    let written = unsafe {
+        GetFinalPathNameByHandleW(
+            handle,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    };
+    if written == 0 || written as usize >= buffer.len() {
+        return false;
+    }
+    let acquired = String::from_utf16_lossy(&buffer[..written as usize]);
+    normalize_windows_identity_path(&acquired)
+        == normalize_windows_identity_path(canonical.to_string_lossy().as_ref())
+}
+
+#[cfg(windows)]
+fn normalize_windows_identity_path(path: &str) -> String {
+    let without_prefix = path.strip_prefix(r"\\?\").unwrap_or(path);
+    without_prefix.replace('/', r"\").to_lowercase()
 }
 
 fn next_grant_token() -> String {
@@ -626,6 +725,39 @@ mod tests {
             fs::rename(&original_assets, &assets).unwrap();
             if let Ok(read) = result {
                 assert_ne!(read.text, "outside");
+            }
+        }
+    }
+
+    #[test]
+    fn selected_root_capability_cannot_be_redirected_after_validation() {
+        let parent = Fixture::new();
+        let selected = parent.root.join("selected");
+        let original = parent.root.join("selected-original");
+        fs::create_dir_all(&selected).unwrap();
+        fs::write(selected.join("Main.uxml"), "inside").unwrap();
+        let projects = ScopedProjects::default();
+        let swapped = std::cell::Cell::new(false);
+
+        let prepared = projects.prepare_selected_after_validation_hook(&selected, || {
+            if fs::rename(&selected, &original).is_ok() {
+                fs::create_dir_all(&selected).unwrap();
+                fs::write(selected.join("Main.uxml"), "outside").unwrap();
+                swapped.set(true);
+            }
+        });
+
+        match prepared {
+            Ok(prepared) => {
+                let root = projects.install_selected(prepared).unwrap();
+                let read = projects
+                    .read_text(&root.project_id, &root.grant, "Main.uxml")
+                    .unwrap();
+                assert_eq!(read.text, "inside", "the swapped root gained authority");
+            }
+            Err(error) => {
+                assert!(swapped.get(), "selection failed without a successful swap");
+                assert_eq!(error.code, "selection-failed");
             }
         }
     }

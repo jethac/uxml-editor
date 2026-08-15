@@ -3,6 +3,7 @@ import {
   HostError,
   projectPath,
   type Disposable,
+  type DisposalOutcome,
   type FileReadResult,
   type HostPort,
   type ProjectRoot,
@@ -152,26 +153,52 @@ export class ExternalChangeCoordinator {
     let lifecycle = 0;
     let timer: Disposable | undefined;
     const pendingPaths = new Set<string>();
+    let settled = false;
+    let resolveCompletion!: (outcome: DisposalOutcome) => void;
+    const completion = new Promise<DisposalOutcome>((resolve) => { resolveCompletion = resolve; });
+    const settle = (outcome: DisposalOutcome) => {
+      if (settled) return;
+      settled = true;
+      resolveCompletion(outcome);
+    };
+    const fail = (error: unknown) => {
+      const failure = error instanceof HostError
+        ? error
+        : new HostError('read-failed', 'External-change watch callback failed.', error);
+      settle(Object.freeze({ status: 'failed', error: failure }));
+    };
     const hostWatcher = await this.host.watch(this.root, (event) => {
-      if (disposed) return;
-      if (event.kind === 'rescan-required') {
-        for (const path of session().snapshot().files.keys()) {
-          if (this.saved.has(path)) pendingPaths.add(path);
-        }
-      } else {
-        if (!this.saved.has(event.path.relativePath)) return;
-        pendingPaths.add(event.path.relativePath);
-      }
-      timer?.dispose();
-      timer = this.host.schedule(debounceMs, async () => {
-        timer = undefined;
+      try {
         if (disposed) return;
-        const paths = [...pendingPaths];
-        pendingPaths.clear();
-        const token = lifecycle;
-        const outcomes = await this.processWhile(session(), paths, () => !disposed && lifecycle === token);
-        if (!disposed && lifecycle === token) await listener(outcomes);
-      });
+        if (event.kind === 'rescan-required') {
+          for (const path of session().snapshot().files.keys()) {
+            if (this.saved.has(path)) pendingPaths.add(path);
+          }
+        } else {
+          if (!this.saved.has(event.path.relativePath)) return;
+          pendingPaths.add(event.path.relativePath);
+        }
+        timer?.dispose();
+        timer = this.host.schedule(debounceMs, async () => {
+          timer = undefined;
+          if (disposed) return;
+          const paths = [...pendingPaths];
+          pendingPaths.clear();
+          const token = lifecycle;
+          try {
+            const outcomes = await this.processWhile(
+              session(),
+              paths,
+              () => !disposed && lifecycle === token,
+            );
+            if (!disposed && lifecycle === token) await listener(outcomes);
+          } catch (error) {
+            fail(error);
+          }
+        });
+      } catch (error) {
+        fail(error);
+      }
     });
     return Object.freeze({
       dispose: () => {
@@ -182,7 +209,16 @@ export class ExternalChangeCoordinator {
         timer?.dispose();
         timer = undefined;
         hostWatcher.dispose();
+        if (hostWatcher.completion === undefined) {
+          settle(Object.freeze({ status: 'disposed' }));
+        } else {
+          void hostWatcher.completion.then(
+            (outcome) => settle(outcome),
+            (error) => fail(error),
+          );
+        }
       },
+      completion,
     });
   }
 

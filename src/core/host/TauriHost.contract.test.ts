@@ -290,6 +290,58 @@ describe('TauriHost IPC validation and serialization', () => {
     });
   });
 
+  it('reports rejected watch listeners and exposes the failure through disposal completion', async () => {
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    const errors: unknown[] = [];
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
+        }
+        if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
+        if (command === 'host_stop_watch') return null;
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      reportError: (error) => { errors.push(error); },
+      timers: new FakeTimers(0),
+    });
+    const root = (await host.chooseProject())!;
+    const failure = new Error('listener failed');
+    const watch = await host.watch(root, async () => { throw failure; });
+
+    await expect(nativeListener!({ payload: {
+      watchId: NATIVE_WATCH_A,
+      projectId: NATIVE_PROJECT_A,
+      grant: NATIVE_GRANT_A,
+      kind: 'rescan-required',
+    } })).resolves.toBeUndefined();
+    watch.dispose();
+
+    await expect(watch.completion).resolves.toMatchObject({ status: 'failed', error: { code: 'read-failed' } });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('observes rejected scheduled callbacks without rejecting the timer adapter', async () => {
+    const errors: unknown[] = [];
+    const timers = new FakeTimers(0);
+    const host = new TauriHost({
+      invoke: async () => null,
+      listen: async () => () => undefined,
+      reportError: (error) => { errors.push(error); },
+      timers,
+    });
+    const timer = host.schedule(5, async () => { throw new Error('debounce failed'); });
+
+    await expect(timers.advance(5)).resolves.toBeUndefined();
+
+    await expect(timer.completion).resolves.toMatchObject({ status: 'failed', error: { code: 'read-failed' } });
+    expect(errors).toHaveLength(1);
+  });
+
   it('drains old grant delivery before publishing a successful replacement and preserves it on failure', async () => {
     let selection = 0;
     let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
@@ -338,6 +390,99 @@ describe('TauriHost IPC validation and serialization', () => {
     await expect(host.enumerateFiles(second!)).resolves.toMatchObject({ status: 'supported' });
   });
 
+  it('invalidates an in-flight watch startup and its queued old-grant events before publishing replacement', async () => {
+    let selection = 0;
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    let resolveStart!: (value: { watchId: string }) => void;
+    let markStartInvoked!: () => void;
+    const startInvoked = new Promise<void>((resolve) => { markStartInvoked = resolve; });
+    const startResult = new Promise<{ watchId: string }>((resolve) => { resolveStart = resolve; });
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          return selection === 1
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B };
+        }
+        if (command === 'host_start_watch') {
+          markStartInvoked();
+          return startResult;
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      timers: new FakeTimers(0),
+    });
+    const first = (await host.chooseProject())!;
+    const delivered: FileChangeEvent[] = [];
+    const startingWatch = host.watch(first, (event) => { delivered.push(event); });
+    await startInvoked;
+
+    await nativeListener?.({ payload: {
+      watchId: NATIVE_WATCH_A,
+      projectId: NATIVE_PROJECT_A,
+      grant: NATIVE_GRANT_A,
+      kind: 'changed',
+      relativePath: 'Main.uxml',
+      revision: NATIVE_REVISION_A,
+    } });
+    const second = await host.chooseProject();
+    resolveStart({ watchId: NATIVE_WATCH_A });
+
+    await expect(startingWatch).rejects.toMatchObject({ code: 'root-not-granted' });
+    expect(delivered).toEqual([]);
+    await expect(host.enumerateFiles(first)).rejects.toMatchObject({ code: 'root-not-granted' });
+    expect(second?.id).toBe(NATIVE_PROJECT_B);
+  });
+
+  it('does not self-deadlock when a watch listener awaits project replacement', async () => {
+    let selection = 0;
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    let listenerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { listenerStarted = resolve; });
+    let replacementSettled = false;
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          return selection === 1
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B };
+        }
+        if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      timers: new FakeTimers(0),
+    });
+    const first = (await host.chooseProject())!;
+    await host.watch(first, async () => {
+      listenerStarted();
+      await host.chooseProject();
+      replacementSettled = true;
+    });
+
+    void nativeListener?.({ payload: {
+      watchId: NATIVE_WATCH_A,
+      projectId: NATIVE_PROJECT_A,
+      grant: NATIVE_GRANT_A,
+      kind: 'changed',
+      relativePath: 'Main.uxml',
+      revision: NATIVE_REVISION_A,
+    } });
+    await started;
+    for (let attempt = 0; attempt < 5 && !replacementSettled; attempt += 1) await Promise.resolve();
+
+    expect(replacementSettled).toBe(true);
+  });
+
   it('invalidates an old frontend root when the same stable project is selected with a new grant', async () => {
     let selection = 0;
     const host = new TauriHost({
@@ -372,7 +517,7 @@ describe('TauriHost IPC validation and serialization', () => {
     expect(host.capabilities).toEqual({
       mode: 'tauri',
       projectSelection: 'directory-picker',
-      atomicReplace: 'guaranteed',
+      atomicReplace: 'best-effort-safe-write',
       watch: 'native-revision-aware',
       appData: 'app-data',
       dialogs: 'native',

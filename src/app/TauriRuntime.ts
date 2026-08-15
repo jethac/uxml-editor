@@ -31,6 +31,11 @@ export function createTauriRuntimeBindings(raw: RawTauriRuntimePorts): TauriRunt
         },
       }),
       window: Object.freeze({
+        setLifecycleReady: (ready: boolean) => invokeVoid(
+          raw,
+          'desktop_set_lifecycle_ready',
+          { request: { ready } },
+        ),
         resolveClose: async (lease: string, action: 'close' | 'cancel') => {
           if (!/^close:v1:[0-9a-f]{16}$/.test(lease)
             || (action !== 'close' && action !== 'cancel')) {

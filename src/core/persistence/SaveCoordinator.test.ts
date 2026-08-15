@@ -1189,6 +1189,75 @@ describe('SaveCoordinator', () => {
     watcher.dispose();
   });
 
+  it('preserves native watcher stop completion through SaveCoordinator', async () => {
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': '<UXML />' } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', initial.text]]));
+    const stop = deferred<Readonly<{ status: 'failed'; error: HostError }>>();
+    host.watch = async () => Object.freeze({
+      dispose: () => undefined,
+      completion: stop.promise,
+    });
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const watcher = await coordinator.watch(() => session, () => undefined);
+
+    watcher.dispose();
+    stop.resolve(Object.freeze({
+      status: 'failed',
+      error: new HostError('read-failed', 'native stop failed'),
+    }));
+
+    await expect(watcher.completion).resolves.toMatchObject({ status: 'failed', error: { code: 'read-failed' } });
+  });
+
+  it('reports debounced rescan read failures through watch completion without rejecting timers', async () => {
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': '<UXML />' } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', initial.text]]));
+    let nativeListener: ((event: never) => void | Promise<void>) | undefined;
+    host.watch = async (_root, listener) => {
+      nativeListener = listener as (event: never) => void | Promise<void>;
+      return Object.freeze({ dispose: () => undefined });
+    };
+    host.readText = async () => { throw new HostError('read-failed', 'injected rescan read failure'); };
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const watcher = await coordinator.watch(() => session, () => undefined, 10);
+
+    await nativeListener!({ kind: 'rescan-required', root } as never);
+    await expect(host.advanceTime(10)).resolves.toBeUndefined();
+
+    await expect(watcher.completion).resolves.toMatchObject({ status: 'failed', error: { code: 'read-failed' } });
+  });
+
+  it('reports rejected external-change listeners through watch completion without rejecting timers', async () => {
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': '<UXML />' } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', initial.text]]));
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const watcher = await coordinator.watch(
+      () => session,
+      async () => { throw new Error('consumer failed'); },
+      10,
+    );
+
+    await host.externalWrite(path, '<UXML><External /></UXML>');
+    await expect(host.advanceTime(10)).resolves.toBeUndefined();
+
+    await expect(watcher.completion).resolves.toMatchObject({ status: 'failed', error: { code: 'read-failed' } });
+  });
+
   it('does not mutate the session when disposal occurs during a debounced external read', async () => {
     const original = '<UXML />';
     const external = '<UXML><External /></UXML>';

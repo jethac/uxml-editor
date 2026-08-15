@@ -29,6 +29,26 @@ describe('DesktopCommandBridge', () => {
     expect(source.listenerCount('uxml://menu-command')).toBe(0);
   });
 
+  it('reports rejected command promises without rejecting the native event callback', async () => {
+    const source = new FakeDesktopEvents();
+    const failure = new Error('save failed');
+    const errors: unknown[] = [];
+    const BridgeWithErrors = DesktopCommandBridge as unknown as new (
+      events: FakeDesktopEvents,
+      executor: { execute(command: DesktopCommandId): Promise<void> },
+      errors: { report(error: unknown): void },
+    ) => DesktopCommandBridge;
+    const bridge = new BridgeWithErrors(
+      source,
+      { execute: async () => { throw failure; } },
+      { report: (error) => { errors.push(error); } },
+    );
+    await bridge.start();
+
+    await expect(source.emit('uxml://menu-command', { commandId: 'file.save' })).resolves.toBeUndefined();
+    expect(errors).toEqual([failure]);
+  });
+
   it('routes open, undo, redo, zoom, and pane commands through current store semantics', async () => {
     const host = new MemoryHost({
       projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': '<UXML />' } }],
