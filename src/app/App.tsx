@@ -1,34 +1,39 @@
+import { useEffect, useRef } from 'react';
+import { createBrowserLayoutStorage } from '../core/store/EditorLayoutStorage';
+import { EditorStore } from '../core/store/EditorStore';
+import { Workbench } from '../features/workspace/Workbench';
 import './app.css';
 
-export function App() {
-  return (
-    <div className="workbench" role="application" aria-label="UXML Editor">
-      <header className="command-bar" aria-label="Command bar">
-        <strong>UXML Editor</strong>
-        <span>No project open</span>
-      </header>
+export interface AppProps {
+  readonly store?: EditorStore;
+}
 
-      <main className="workspace">
-        <section className="pane hierarchy" aria-labelledby="hierarchy-heading">
-          <h2 id="hierarchy-heading">Hierarchy</h2>
-          <div className="pane-body" />
-        </section>
+export function App({ store: providedStore }: AppProps = {}) {
+  const storeRef = useRef<EditorStore | null>(null);
+  if (providedStore === undefined && storeRef.current === null) {
+    storeRef.current = new EditorStore({
+      storage: createBrowserLayoutStorage(),
+      viewport: readBrowserViewport(),
+    });
+  }
+  const store = providedStore ?? storeRef.current!;
 
-        <section className="pane canvas" aria-labelledby="canvas-heading">
-          <h2 id="canvas-heading">Canvas</h2>
-          <div className="pane-body" />
-        </section>
+  useEffect(() => {
+    const updateViewport = () => {
+      const viewport = readBrowserViewport();
+      store.dispatch({ type: 'viewport/set', width: viewport.width, height: viewport.height });
+    };
+    window.addEventListener('resize', updateViewport);
+    return () => window.removeEventListener('resize', updateViewport);
+  }, [store]);
 
-        <section className="pane inspector" aria-labelledby="inspector-heading">
-          <h2 id="inspector-heading">Inspector</h2>
-          <div className="pane-body" />
-        </section>
+  return <Workbench store={store} />;
+}
 
-        <section className="pane diagnostics" aria-labelledby="diagnostics-heading">
-          <h2 id="diagnostics-heading">Diagnostics</h2>
-          <div className="pane-body" />
-        </section>
-      </main>
-    </div>
-  );
+function readBrowserViewport(): Readonly<{ width: number; height: number }> {
+  if (typeof window === 'undefined') return Object.freeze({ width: 1366, height: 768 });
+  return Object.freeze({
+    width: Math.max(1, window.innerWidth),
+    height: Math.max(1, window.innerHeight),
+  });
 }

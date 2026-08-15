@@ -1,0 +1,352 @@
+.editor-workbench {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  background: var(--color-canvas-field);
+  font-size: 12px;
+}
+
+.editor-workbench--desktop {
+  grid-template-columns:
+    var(--workbench-left-pane)
+    var(--workbench-separator)
+    minmax(0, 1fr)
+    var(--workbench-separator)
+    var(--workbench-right-pane);
+  grid-template-rows:
+    var(--workbench-commandbar)
+    minmax(0, 1fr)
+    var(--workbench-separator)
+    var(--workbench-bottom-pane);
+  grid-template-areas:
+    "commandbar commandbar commandbar commandbar commandbar"
+    "left left-resizer canvas right-resizer right"
+    "bottom-resizer bottom-resizer bottom-resizer bottom-resizer bottom-resizer"
+    "bottom bottom bottom bottom bottom";
+}
+
+.editor-workbench--compact {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--workbench-commandbar) minmax(0, 1fr) var(--workbench-bottom-pane);
+  grid-template-areas:
+    "commandbar"
+    "canvas"
+    "tools";
+}
+
+.commandbar {
+  grid-area: commandbar;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--color-commandbar-border);
+  color: var(--color-commandbar-text);
+  background: var(--color-commandbar);
+}
+
+.commandbar-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  max-width: 290px;
+  flex: 1 1 210px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.commandbar-brand strong {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.commandbar-brand span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-commandbar-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.commandbar-toolbar,
+.command-group {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.commandbar-toolbar {
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.command-group {
+  gap: 2px;
+}
+
+.icon-command {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--color-commandbar-text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.icon-command:hover:not(:disabled) {
+  border-color: var(--color-commandbar-border);
+  background: var(--color-command-hover);
+}
+
+.icon-command[aria-pressed='true'] {
+  border-color: var(--color-primary);
+  color: #ffffff;
+  background: var(--color-primary-strong);
+}
+
+.icon-command:disabled {
+  color: #7f8582;
+  cursor: default;
+  opacity: 0.58;
+}
+
+.icon-command:focus-visible,
+.pane-resizer:focus-visible,
+.compact-tabs button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.segmented-control {
+  gap: 0;
+  border: 1px solid var(--color-commandbar-border);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+
+.segmented-control .icon-command {
+  border: 0;
+  border-radius: 0;
+}
+
+.segmented-control .icon-command + .icon-command {
+  border-left: 1px solid var(--color-commandbar-border);
+}
+
+.command-group--zoom output {
+  width: 42px;
+  color: var(--color-commandbar-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.workspace-pane {
+  display: grid;
+  grid-template-rows: 30px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--color-tool-pane);
+}
+
+.workspace-pane--hierarchy {
+  grid-area: left;
+}
+
+.workspace-pane--inspector {
+  grid-area: right;
+}
+
+.workspace-pane--diagnostics {
+  grid-area: bottom;
+}
+
+.workspace-pane--canvas {
+  grid-area: canvas;
+  background: var(--color-canvas-field);
+}
+
+.workspace-pane h2 {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0 10px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--color-tool-border);
+  color: var(--color-text);
+  background: var(--color-tool-pane-raised);
+  font-size: 11px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.workspace-pane-body {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pane-empty {
+  display: block;
+  min-width: 0;
+  padding: 10px;
+  overflow: hidden;
+  color: var(--color-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-field {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 18px;
+  overflow: auto;
+}
+
+.canvas-surface {
+  width: min(720px, 82%);
+  min-width: 220px;
+  aspect-ratio: 16 / 10;
+  border: 1px solid #555c59;
+  border-radius: var(--radius-surface);
+  background: var(--color-canvas-surface);
+  box-shadow: 0 1px 4px rgb(31 35 33 / 24%);
+}
+
+.diagnostic-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diagnostic-list li {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--color-tool-border);
+}
+
+.diagnostic-marker {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-diagnostic);
+}
+
+.pane-resizer {
+  position: relative;
+  z-index: 2;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-tool-border);
+  touch-action: none;
+}
+
+.pane-resizer:hover,
+.pane-resizer:focus-visible {
+  background: var(--color-primary);
+}
+
+.pane-resizer--vertical {
+  cursor: col-resize;
+}
+
+.pane-resizer--horizontal {
+  cursor: row-resize;
+}
+
+[data-testid='left-resizer'] {
+  grid-area: left-resizer;
+}
+
+[data-testid='right-resizer'] {
+  grid-area: right-resizer;
+}
+
+[data-testid='bottom-resizer'] {
+  grid-area: bottom-resizer;
+}
+
+.compact-tools {
+  grid-area: tools;
+  display: grid;
+  grid-template-rows: 32px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--color-tool-border);
+  background: var(--color-tool-pane);
+}
+
+.compact-tabs {
+  display: flex;
+  min-width: 0;
+  border-bottom: 1px solid var(--color-tool-border);
+  background: var(--color-tool-pane-raised);
+}
+
+.compact-tabs button {
+  min-width: 0;
+  min-height: 31px;
+  padding: 0 12px;
+  overflow: hidden;
+  border: 0;
+  border-right: 1px solid var(--color-tool-border);
+  border-radius: 0;
+  color: var(--color-muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-tabs button[aria-selected='true'] {
+  color: var(--color-primary-strong);
+  background: #ffffff;
+  box-shadow: inset 0 -2px 0 var(--color-primary);
+}
+
+.compact-tools .workspace-pane {
+  grid-area: 2 / 1;
+}
+
+.editor-workbench--compact .commandbar-brand {
+  flex: 1 1 auto;
+  max-width: 98px;
+}
+
+.editor-workbench--compact .commandbar-brand span,
+.editor-workbench--compact .command-group--panels {
+  display: none;
+}
+
+.editor-workbench--compact .commandbar-toolbar {
+  gap: 5px;
+}
