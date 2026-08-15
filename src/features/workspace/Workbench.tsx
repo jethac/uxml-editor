@@ -10,10 +10,12 @@ import type { EditorPanel, EditorSnapshot, EditorStore } from '../../core/store/
 import { PreviewCanvas } from '../canvas/PreviewCanvas';
 import { HierarchyPanel } from '../hierarchy/HierarchyPanel';
 import { PalettePanel } from '../palette/PalettePanel';
+import { InspectorPanel } from '../inspector/InspectorPanel';
 import { CommandBar } from './CommandBar';
 import { PaneResizer } from './PaneResizer';
 import '../../styles/workbench.css';
 import '../../styles/canvas.css';
+import '../../styles/inspector.css';
 
 export interface WorkbenchProps {
   readonly store: EditorStore;
@@ -236,7 +238,7 @@ function ToolPane({ kind, store, snapshot, compact, hidden = false, paneRef }: T
                 </div>
               )
         )}
-        {kind === 'inspector' && <span className="pane-empty">{snapshot.selection.length === 0 ? 'Nothing selected' : `${snapshot.selection.length} selected`}</span>}
+        {kind === 'inspector' && (!compact || !hidden) && <InspectorPanel store={store} snapshot={snapshot} />}
         {kind === 'diagnostics' && (
           snapshot.diagnostics.length === 0
             ? <span className="pane-empty">No diagnostics</span>

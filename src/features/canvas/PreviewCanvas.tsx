@@ -38,8 +38,14 @@ import type {
   TextMeasurementContext,
 } from '../../core/adapter/types';
 import type { EditorStore } from '../../core/store/EditorStore';
+import {
+  EDITOR_PSEUDO_STATES,
+  equalActiveStateLocator,
+  type EditorActiveStateEntry,
+  type EditorPseudoState,
+} from '../../core/store/EditorStoreContracts';
 import type { DocumentSession } from '../../core/documents/DocumentSession';
-import type { ElementLocator } from '../../core/documents/ElementLocator';
+import { resolveElementLocator } from '../../core/documents/ElementLocator';
 import type { ClipboardPort } from '../../core/commands/ClipboardService';
 import {
   layoutCommands,
@@ -63,20 +69,6 @@ export interface PreviewCanvasProps {
 
 const DEFAULT_PANEL_SIZE = Object.freeze({ width: 640, height: 480 });
 const FIT_PADDING = 24;
-const PSEUDO_STATES = Object.freeze([
-  'hover', 'active', 'focus', 'disabled', 'checked', 'selected', 'inactive',
-] as const);
-type PseudoState = typeof PSEUDO_STATES[number];
-interface PseudoStateEntry {
-  readonly locator: ElementLocator;
-  readonly states: ReadonlySet<PseudoState>;
-}
-
-interface PseudoStateStore {
-  readonly session: DocumentSession;
-  readonly entries: ReadonlyMap<string, PseudoStateEntry>;
-}
-
 const PRESETS = Object.freeze({
   desktop: { width: 1280, height: 720 },
   tablet: { width: 768, height: 1024 },
@@ -111,7 +103,6 @@ export function PreviewCanvas({
   const [renderError, setRenderError] = useState<string | null>(null);
   const [interactionDiagnostic, setInteractionDiagnostic] = useState<string | null>(null);
   const [snapGuides, setSnapGuides] = useState<readonly SnapGuide[]>(Object.freeze([]));
-  const [pseudoStateStore, setPseudoStateStore] = useState<PseudoStateStore | null>(null);
 
   const selectedNodeId = snapshot.selection[0] ?? null;
   const selectedNodes = sessionDocument === null
@@ -124,16 +115,15 @@ export function PreviewCanvas({
     ? null
     : parentNodeId(sessionDocument.root, selectedNodeId);
   const selectedLocator = session === null || selectedNodeId === null ? null : session.locatorFor(selectedNodeId);
-  const selectedStateKey = selectedLocator === null ? null : locatorKey(selectedLocator);
-  const selectedStates = pseudoStateStore?.session === session && selectedStateKey !== null
-    ? pseudoStateStore.entries.get(selectedStateKey)?.states
-    : undefined;
+  const selectedStates = selectedLocator === null
+    ? undefined
+    : snapshot.activeStates.find((entry) => equalActiveStateLocator(entry.locator, selectedLocator))?.states;
   const selectedSelector = sessionDocument === null || selectedNodeId === null
     ? null
     : narrowStateSelector(sessionDocument.root, selectedNodeId);
   const renderStates = useMemo(
-    () => session === null || sessionDocument === null ? undefined : stateOptions(session, sessionDocument.root, pseudoStateStore),
-    [pseudoStateStore, session, sessionDocument],
+    () => session === null || sessionDocument === null ? undefined : stateOptions(sessionDocument.root, snapshot.activeStates),
+    [session, sessionDocument, snapshot.activeStates],
   );
   const stateControlDescription = selectedNodeId !== null && selectedSelector === null
     ? 'A unique authored name is required for pseudo states.'
@@ -159,7 +149,6 @@ export function PreviewCanvas({
     setSnapGuides(Object.freeze([]));
     setInteractionDiagnostic(null);
     stateSessionRef.current = session;
-    setPseudoStateStore(null);
   }, [session]);
 
   useEffect(() => {
@@ -375,17 +364,9 @@ export function PreviewCanvas({
     executeLayout(layoutCommands.order(session, selectedNodes, destination));
   };
 
-  const toggleState = (state: PseudoState) => {
-    if (session === null || selectedLocator === null || selectedStateKey === null || selectedSelector === null) return;
-    setPseudoStateStore((current) => {
-      const entries = new Map(current?.session === session ? current.entries : []);
-      const states = new Set(entries.get(selectedStateKey)?.states ?? []);
-      if (states.has(state)) states.delete(state);
-      else states.add(state);
-      if (states.size === 0) entries.delete(selectedStateKey);
-      else entries.set(selectedStateKey, { locator: selectedLocator, states });
-      return { session, entries };
-    });
+  const toggleState = (state: EditorPseudoState) => {
+    if (session === null || selectedLocator === null || selectedSelector === null) return;
+    store.dispatch({ type: 'active-states/toggle', locator: selectedLocator, state });
   };
 
   return (
@@ -441,9 +422,9 @@ export function PreviewCanvas({
         </label>
         <fieldset className="canvas-states" disabled={selectedSelector === null} aria-describedby={stateControlDescription === null ? undefined : 'canvas-state-description'}>
           <legend>Element states</legend>
-          {PSEUDO_STATES.map((state) => (
+          {EDITOR_PSEUDO_STATES.map((state) => (
             <label key={state} className="canvas-check">
-              <input type="checkbox" checked={selectedStates?.has(state) ?? false} onChange={() => toggleState(state)} />
+              <input type="checkbox" checked={selectedStates?.includes(state) ?? false} onChange={() => toggleState(state)} />
               <span>{state[0].toUpperCase() + state.slice(1)}</span>
             </label>
           ))}
@@ -604,16 +585,15 @@ function narrowStateSelector(root: EditorElement, target: EditorNodeId): string 
   return matches.length === 1 ? `#${escapeSelectorIdentifier(authoredName)}` : null;
 }
 
-function stateOptions(session: DocumentSession, root: EditorElement, store: PseudoStateStore | null): Readonly<Record<string, readonly string[]>> | undefined {
-  if (store?.session !== session) return undefined;
+function stateOptions(root: EditorElement, entries: readonly EditorActiveStateEntry[]): Readonly<Record<string, readonly string[]>> | undefined {
   const options: Record<string, readonly string[]> = {};
-  const elements = listElements(root);
-  for (const { locator, states } of store.entries.values()) {
-    const matches = elements.filter((element) => sameLocator(session.locatorFor(element.id), locator));
-    if (matches.length !== 1) continue;
-    const nodeId = matches[0].id;
+  for (const { locator, states } of entries) {
+    const nodeId = resolveElementLocator(root, locator);
+    if (nodeId === null) continue;
     const selector = narrowStateSelector(root, nodeId);
-    if (selector !== null && states.size > 0) options[selector] = PSEUDO_STATES.filter((state) => states.has(state));
+    if (selector !== null && states.length > 0) {
+      options[selector] = EDITOR_PSEUDO_STATES.filter((state) => states.includes(state));
+    }
   }
   return Object.keys(options).length === 0 ? undefined : options;
 }
@@ -651,14 +631,6 @@ function escapeSelectorIdentifier(value: string): string {
     }
   }
   return escaped;
-}
-
-function locatorKey(locator: ElementLocator): string {
-  return JSON.stringify(locator);
-}
-
-function sameLocator(left: ElementLocator | null, right: ElementLocator): boolean {
-  return left !== null && locatorKey(left) === locatorKey(right);
 }
 
 function positiveFinite(value: number): boolean {

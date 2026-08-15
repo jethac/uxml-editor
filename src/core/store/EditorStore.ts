@@ -1,5 +1,6 @@
 import type { DocumentSession } from '../documents/DocumentSession';
 import type { HostPort } from '../host/HostPort';
+import { resolveElementLocator } from '../documents/ElementLocator';
 import {
   DEFAULT_VIEWPORT,
   clampPaneDimension,
@@ -10,16 +11,20 @@ import {
 } from './EditorLayoutStorage';
 import {
   copyEditorDiagnostics,
+  copyEditorActiveStates,
   copyEditorSelection,
+  emptyEditorActiveStates,
   emptyEditorDiagnostics,
   emptyEditorSelection,
   equalEditorDiagnostics,
   equalEditorSelection,
+  equalActiveStateLocator,
   normalizeEditorAction,
   normalizeEditorViewport,
   validateEditorContext,
   EditorStoreError,
   type EditorAction,
+  type EditorActiveStateEntry,
   type EditorCommandAvailability,
   type EditorSnapshot,
   type EditorStoreOptions,
@@ -56,8 +61,10 @@ export class EditorStore {
     this.storage = options.storage ?? null;
     this.snapshot = createSnapshot({
       session,
+      sessionGeneration: session?.generation ?? 0,
       host,
       selection: session === null ? emptyEditorSelection() : copyEditorSelection(session.selectedNodeIds),
+      activeStates: emptyEditorActiveStates(),
       diagnostics: session === null ? emptyEditorDiagnostics() : copyEditorDiagnostics(session.diagnostics),
       viewport,
       panes: restorePaneDimensions(this.storage),
@@ -119,6 +126,8 @@ export class EditorStore {
         return equalEditorSelection(this.snapshot.selection, action.selection)
           ? this.snapshot
           : this.replace({ selection: action.selection });
+      case 'active-states/toggle':
+        return this.toggleActiveState(action.locator, action.state);
       case 'diagnostics/set':
         return equalEditorDiagnostics(this.snapshot.diagnostics, action.diagnostics)
           ? this.snapshot
@@ -152,15 +161,24 @@ export class EditorStore {
   private withContext(session: DocumentSession | null, host: HostPort | null): EditorSnapshot {
     const selection = session === null ? emptyEditorSelection() : copyEditorSelection(session.selectedNodeIds);
     const diagnostics = session === null ? emptyEditorDiagnostics() : copyEditorDiagnostics(session.diagnostics);
+    const sessionGeneration = session?.generation ?? 0;
     if (
       session === this.snapshot.session
       && host === this.snapshot.host
+      && sessionGeneration === this.snapshot.sessionGeneration
       && equalEditorSelection(selection, this.snapshot.selection)
       && equalEditorDiagnostics(diagnostics, this.snapshot.diagnostics)
     ) {
       return this.snapshot;
     }
-    return this.replace({ session, host, selection, diagnostics });
+    return this.replace({
+      session,
+      sessionGeneration,
+      host,
+      selection,
+      diagnostics,
+      ...(session === this.snapshot.session ? {} : { activeStates: emptyEditorActiveStates() }),
+    });
   }
 
   private syncSession(): EditorSnapshot {
@@ -168,15 +186,19 @@ export class EditorStore {
     if (session === null) return this.snapshot;
     const selection = copyEditorSelection(session.selectedNodeIds);
     const diagnostics = copyEditorDiagnostics(session.diagnostics);
+    const sessionGeneration = session.generation;
+    const activeStates = reconcileActiveStates(session, this.snapshot.activeStates);
     const commands = commandAvailability(this.snapshot.host, session, this.snapshot.zoom);
     if (
       equalEditorSelection(selection, this.snapshot.selection)
       && equalEditorDiagnostics(diagnostics, this.snapshot.diagnostics)
+      && sessionGeneration === this.snapshot.sessionGeneration
+      && activeStates === this.snapshot.activeStates
       && equalCommands(commands, this.snapshot.commands)
     ) {
       return this.snapshot;
     }
-    return createSnapshot({ ...this.snapshot, selection, diagnostics });
+    return createSnapshot({ ...this.snapshot, sessionGeneration, selection, diagnostics, activeStates });
   }
 
   private withViewport(width: number, height: number): EditorSnapshot {
@@ -205,6 +227,22 @@ export class EditorStore {
     return zoom === this.snapshot.zoom ? this.snapshot : this.replace({ zoom });
   }
 
+  private toggleActiveState(locator: EditorActiveStateEntry['locator'], state: EditorActiveStateEntry['states'][number]): EditorSnapshot {
+    const session = this.snapshot.session;
+    if (session === null || resolveActiveStateLocator(session, locator) === null) return this.snapshot;
+    const entries = this.snapshot.activeStates.map((entry) => ({ locator: entry.locator, states: [...entry.states] }));
+    const index = entries.findIndex((entry) => equalActiveStateLocator(entry.locator, locator));
+    if (index === -1) entries.push({ locator, states: [state] });
+    else {
+      const states = entries[index].states;
+      const stateIndex = states.indexOf(state);
+      if (stateIndex === -1) states.push(state);
+      else states.splice(stateIndex, 1);
+      if (states.length === 0) entries.splice(index, 1);
+    }
+    return this.replace({ activeStates: copyEditorActiveStates(entries) });
+  }
+
   private replace(changes: Partial<EditorSnapshot>): EditorSnapshot {
     return createSnapshot({ ...this.snapshot, ...changes });
   }
@@ -223,8 +261,10 @@ export class EditorStore {
 function createSnapshot(state: Omit<EditorSnapshot, 'commands'> | EditorSnapshot): EditorSnapshot {
   return Object.freeze({
     session: state.session,
+    sessionGeneration: state.sessionGeneration,
     host: state.host,
     selection: state.selection,
+    activeStates: state.activeStates,
     diagnostics: state.diagnostics,
     viewport: state.viewport,
     panes: state.panes,
@@ -234,6 +274,33 @@ function createSnapshot(state: Omit<EditorSnapshot, 'commands'> | EditorSnapshot
     previewState: state.previewState,
     commands: commandAvailability(state.host, state.session, state.zoom),
   });
+}
+
+function reconcileActiveStates(
+  session: DocumentSession,
+  entries: readonly EditorActiveStateEntry[],
+): readonly EditorActiveStateEntry[] {
+  const valid = entries.filter((entry) => resolveActiveStateLocator(session, entry.locator) !== null);
+  return valid.length === entries.length ? entries : copyEditorActiveStates(valid);
+}
+
+function resolveActiveStateLocator(
+  session: DocumentSession,
+  locator: EditorActiveStateEntry['locator'],
+): string | null {
+  const nodeId = resolveElementLocator(session.document.root, locator);
+  if (nodeId === null || locator.authoredName === undefined) return nodeId;
+  const pending = [session.document.root];
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    if (current.id === nodeId) {
+      return current.attributes.some((attribute) => attribute.name === 'name' && attribute.value === locator.authoredName)
+        ? nodeId
+        : null;
+    }
+    pending.push(...current.children);
+  }
+  return null;
 }
 
 function commandAvailability(

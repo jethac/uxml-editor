@@ -1,5 +1,6 @@
 import type { EditorDiagnostic, EditorDiagnosticKind, EditorNodeId } from '../adapter/types';
 import type { DocumentSession } from '../documents/DocumentSession';
+import type { ElementLocator } from '../documents/ElementLocator';
 import type { HostPort } from '../host/HostPort';
 import type {
   EditorLayoutStorage,
@@ -11,6 +12,15 @@ import type {
 export type EditorTool = 'select' | 'pan';
 export type EditorPanel = 'hierarchy' | 'inspector' | 'diagnostics';
 export type PreviewState = 'edit' | 'preview';
+export const EDITOR_PSEUDO_STATES = Object.freeze([
+  'hover', 'active', 'focus', 'disabled', 'checked', 'selected', 'inactive',
+] as const);
+export type EditorPseudoState = typeof EDITOR_PSEUDO_STATES[number];
+
+export interface EditorActiveStateEntry {
+  readonly locator: ElementLocator;
+  readonly states: readonly EditorPseudoState[];
+}
 
 export interface EditorCommandAvailability {
   readonly openProject: boolean;
@@ -22,8 +32,10 @@ export interface EditorCommandAvailability {
 
 export interface EditorSnapshot {
   readonly session: DocumentSession | null;
+  readonly sessionGeneration: number;
   readonly host: HostPort | null;
   readonly selection: readonly EditorNodeId[];
+  readonly activeStates: readonly EditorActiveStateEntry[];
   readonly diagnostics: readonly EditorDiagnostic[];
   readonly viewport: EditorViewport;
   readonly panes: PaneDimensions;
@@ -38,6 +50,7 @@ export type EditorAction =
   | Readonly<{ type: 'context/set'; session: DocumentSession | null; host: HostPort | null }>
   | Readonly<{ type: 'session/sync' }>
   | Readonly<{ type: 'selection/set'; selection: readonly EditorNodeId[] }>
+  | Readonly<{ type: 'active-states/toggle'; locator: ElementLocator; state: EditorPseudoState }>
   | Readonly<{ type: 'diagnostics/set'; diagnostics: readonly EditorDiagnostic[] }>
   | Readonly<{ type: 'viewport/set'; width: number; height: number }>
   | Readonly<{ type: 'panes/resize'; pane: PaneName; size: number; persist: boolean }>
@@ -86,6 +99,13 @@ export function normalizeEditorAction(candidate: EditorAction): EditorAction {
         return Object.freeze({ type: candidate.type });
       case 'selection/set':
         return Object.freeze({ type: candidate.type, selection: copyEditorSelection(candidate.selection) });
+      case 'active-states/toggle':
+        if (!EDITOR_PSEUDO_STATES.includes(candidate.state)) return invalidAction();
+        return Object.freeze({
+          type: candidate.type,
+          locator: copyElementLocator(candidate.locator),
+          state: candidate.state,
+        });
       case 'diagnostics/set':
         return Object.freeze({ type: candidate.type, diagnostics: copyEditorDiagnostics(candidate.diagnostics) });
       case 'viewport/set': {
@@ -164,6 +184,73 @@ export function emptyEditorSelection(): readonly EditorNodeId[] {
 
 export function emptyEditorDiagnostics(): readonly EditorDiagnostic[] {
   return Object.freeze([]);
+}
+
+export function emptyEditorActiveStates(): readonly EditorActiveStateEntry[] {
+  return Object.freeze([]);
+}
+
+export function copyEditorActiveStates(candidate: readonly EditorActiveStateEntry[]): readonly EditorActiveStateEntry[] {
+  try {
+    return Object.freeze(candidate.map((entry) => {
+      if (typeof entry !== 'object' || entry === null || !Array.isArray(entry.states)) throw new TypeError();
+      const states = [...entry.states];
+      if (states.some((state) => !EDITOR_PSEUDO_STATES.includes(state)) || new Set(states).size !== states.length) {
+        throw new TypeError();
+      }
+      return Object.freeze({ locator: copyElementLocator(entry.locator), states: Object.freeze(states) });
+    }));
+  } catch (error) {
+    throw new EditorStoreError('invalid-action', 'Editor active states are malformed.', error);
+  }
+}
+
+export function equalElementLocator(left: ElementLocator, right: ElementLocator): boolean {
+  return left.qualifiedTag === right.qualifiedTag
+    && left.authoredName === right.authoredName
+    && equalArray(left.childPath, right.childPath)
+    && equalArray(left.ancestorTags, right.ancestorTags)
+    && left.attributeHints.length === right.attributeHints.length
+    && left.attributeHints.every((hint, index) =>
+      hint.name === right.attributeHints[index].name && hint.value === right.attributeHints[index].value
+    );
+}
+
+export function equalActiveStateLocator(left: ElementLocator, right: ElementLocator): boolean {
+  if (left.authoredName !== undefined || right.authoredName !== undefined) {
+    return left.authoredName !== undefined
+      && left.authoredName === right.authoredName
+      && left.qualifiedTag === right.qualifiedTag;
+  }
+  return equalElementLocator(left, right);
+}
+
+function copyElementLocator(candidate: unknown): ElementLocator {
+  if (typeof candidate !== 'object' || candidate === null) return invalidAction('Element locator is malformed.');
+  const locator = candidate as Partial<ElementLocator>;
+  if (
+    typeof locator.qualifiedTag !== 'string'
+    || locator.qualifiedTag.length === 0
+    || (locator.authoredName !== undefined && typeof locator.authoredName !== 'string')
+    || !Array.isArray(locator.childPath)
+    || locator.childPath.some((index) => !Number.isInteger(index) || index < 0)
+    || !Array.isArray(locator.ancestorTags)
+    || locator.ancestorTags.some((tag) => typeof tag !== 'string' || tag.length === 0)
+    || !Array.isArray(locator.attributeHints)
+    || locator.attributeHints.some((hint) => typeof hint !== 'object' || hint === null
+      || typeof hint.name !== 'string' || typeof hint.value !== 'string')
+  ) return invalidAction('Element locator is malformed.');
+  return Object.freeze({
+    qualifiedTag: locator.qualifiedTag,
+    childPath: Object.freeze([...locator.childPath]),
+    ancestorTags: Object.freeze([...locator.ancestorTags]),
+    attributeHints: Object.freeze(locator.attributeHints.map((hint) => Object.freeze({ name: hint.name, value: hint.value }))),
+    ...(locator.authoredName === undefined ? {} : { authoredName: locator.authoredName }),
+  });
+}
+
+function equalArray<T>(left: readonly T[], right: readonly T[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 export function equalEditorSelection(left: readonly string[], right: readonly string[]): boolean {
