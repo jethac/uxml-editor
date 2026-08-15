@@ -54,6 +54,7 @@ export class DocumentSession {
   private parsed: ParsedPreviewDocument;
   private selectedLocators: readonly ElementLocator[] = Object.freeze([]);
   private resolvedSelection: readonly EditorNodeId[] = Object.freeze([]);
+  private sessionGeneration = 0;
   readonly history: CommandHistory;
 
   private constructor(
@@ -87,6 +88,7 @@ export class DocumentSession {
   get diagnostics(): readonly ParsedPreviewDocument['diagnostics'][number][] { return Object.freeze([...this.parsed.diagnostics]); }
   get selection(): readonly ElementLocator[] { return Object.freeze([...this.selectedLocators]); }
   get selectedNodeIds(): readonly EditorNodeId[] { return Object.freeze([...this.resolvedSelection]); }
+  get generation(): number { return this.sessionGeneration; }
 
   snapshot(): DocumentSnapshot {
     return Object.freeze({ entryPath: this.entryPath, files: new ImmutableMap(this.files) });
@@ -95,6 +97,7 @@ export class DocumentSession {
   setSelection(locators: readonly ElementLocator[]): void {
     this.selectedLocators = snapshotLocators(locators);
     this.resolvedSelection = resolveSelection(this.parsed, this.selectedLocators);
+    this.sessionGeneration += 1;
   }
 
   locatorFor(nodeId: EditorNodeId): ElementLocator | null {
@@ -146,6 +149,7 @@ export class DocumentSession {
       this.parsed = parsed;
       this.selectedLocators = selection;
       this.resolvedSelection = nodeIds;
+      this.sessionGeneration += 1;
       const after = this.snapshot();
       return Object.freeze({
         forward,
@@ -168,6 +172,7 @@ export class DocumentSession {
       parsed: this.parsed,
       selectedLocators: this.selectedLocators,
       resolvedSelection: this.resolvedSelection,
+      sessionGeneration: this.sessionGeneration,
     };
     try {
       return Object.freeze(transactions.map((transaction) => this.commit(transaction)));
@@ -176,6 +181,7 @@ export class DocumentSession {
       this.parsed = checkpoint.parsed;
       this.selectedLocators = checkpoint.selectedLocators;
       this.resolvedSelection = checkpoint.resolvedSelection;
+      this.sessionGeneration = checkpoint.sessionGeneration;
       throw error;
     }
   }

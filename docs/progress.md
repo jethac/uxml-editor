@@ -2,9 +2,10 @@
 
 ## Current Status
 
-Task 1 is complete: the repository has an executable browser-first React shell,
-a thin Tauri 2 host, focused shell coverage, and measured architecture evidence.
-No editor behavior, project I/O, or native permissions have been added.
+Tasks 1 through 7 are complete. The editor core now includes exact source
+sessions and history, UXML/USS commands, browser-testable host contracts,
+revision-aware persistence, deterministic watching, and bounded app-data
+recovery. Task 7 does not add the Task 8 desktop/Tauri host implementation.
 
 ## Verified Evidence
 
@@ -452,3 +453,61 @@ replaceable.
   semicolons, and nontrivia rejection. Focused Task 6 plus adapter verification
   passes 54 tests; the full suite passes 13 files and 179 tests; and the
   TypeScript/Vite build passes with 16 transformed modules.
+
+## Task 7 Host Boundary, Persistence, And Recovery
+
+- `HostPort` owns frozen branded roots, scoped paths, exact text/revision reads,
+  compare-before-replace writes, watching/disposal, app-data recovery, recent
+  projects, dialogs, time, and deterministic scheduling. It imports no Tauri or
+  network API. Path normalization rejects absolute, scheme, NUL, root-only, and
+  escaping paths.
+- `MemoryHost` is the production deterministic conformance host: exact text,
+  monotonic revisions, atomic staged replacement, before/during failure
+  injection, external writes/deletes, deterministic watcher delivery and
+  disposal, controllable time, app-data, recent-project ordering/deduplication,
+  and queued dialog outcomes.
+- `BrowserHost` requests `{ mode: 'readwrite' }`, verifies read/write permission,
+  owns cancellation/denial errors, and rejects paths outside granted roots. A
+  structured-clone handle registry persists stable distinct project identities
+  through IndexedDB; tests inject a deterministic registry. Browser globals are
+  feature-detected at runtime, app-data is enabled only with durable identity,
+  and the explicit fallback is a no-network demo `MemoryHost`.
+- `SaveCoordinator` preflights exact revisions, rechecks `DocumentSession`
+  generation and source after every asynchronous boundary, and never publishes
+  stale local state as clean. Save-all is canonical and stops on first failure;
+  partial outcomes expose frozen written/pending paths and retain a pre-write
+  checkpoint. External changes distinguish clean reload, dirty conflict,
+  deletion, same-content rewrite, converged text, and reload/overwrite/cancel.
+  Reloads are typed history transactions with coherent undo/redo. Watch bursts
+  are deterministic and exact-session scoped.
+- Recovery cleanup is stateful: only confirmed fully clean saves clear the
+  journal. Cleanup failure remains pending and is retried by a no-op or explicit
+  API without rewriting files. Local edits racing cleanup recreate or refresh
+  recovery before publication.
+- `RecoveryJournal` validates version, exact object fields, canonical safe paths,
+  every patch, locator, sequence, checkpoint, and after-snapshot before replay.
+  Entry sequence is independent of transaction ID, so edit/undo/redo duplicates
+  replay in exact order. Replay is atomic through `DocumentSession.history`,
+  including selection and generation rollback. Mixed partial-save disk states
+  replay only missing file patches.
+- Journal limits default to 128 entries and 4 MiB of deterministic UTF-8 JSON.
+  Crossing a limit compacts to one validated full-state transaction with the
+  effective selection and undo/redo state; an irreducibly oversized record is
+  rejected before app-data replacement.
+
+## Task 7 TDD And Verification
+
+- Original red/green cycles covered missing host modules, path escape, stale and
+  failed replacement, watcher timing/disposal, recovery/recent/dialog storage,
+  browser fallback/FSA scoping, save/no-op/save-all outcomes, external decisions,
+  corruption/schema/patch/locator validation, stale bases, replay rollback, and
+  cleanup failure. The initial focused implementation reached 58 passing tests.
+- Resumed review reds reproduced missing browser read/write mode, project ID
+  collision, stale local reads, history corruption after reload, duplicate undo
+  IDs, mixed-disk `stale-base`, unknown watcher rejection, lost cleanup retry,
+  false converged conflicts, and unbounded journals. Additional reds covered
+  checkpoint/replacement/cleanup generation races and explicit partial paths.
+- Final focused command `npm test -- src/core/host src/core/persistence` passed 4
+  files and 80 tests. `npx tsc --noEmit` passed. Full `npm test` passed 17 files
+  and 259 tests. `npm run build` passed TypeScript and Vite; Vite transformed 16
+  modules and emitted the browser bundle successfully.
