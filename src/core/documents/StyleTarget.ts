@@ -2,10 +2,10 @@ import type {
   EditorElement,
   EditorNodeId,
   EditorSourceSpan,
-  StyleExplanationOrigin,
+  EditorStylesheet,
   UssSourcePort,
 } from '../adapter/types';
-import type { DocumentSession } from './DocumentSession';
+import type { DocumentSession, DocumentSnapshot } from './DocumentSession';
 import { createElementLocator, type ElementLocator } from './ElementLocator';
 import {
   freezeInlineTarget,
@@ -13,6 +13,18 @@ import {
   freezeRuleTarget,
   snapshotStyleTargetIdentity,
 } from './styleTargetIdentity';
+import {
+  authoredInlineOrigin,
+  authoredRuleOrigin,
+  collectStyleCandidates,
+  isAuthoredSourceFor,
+} from './styleCascadeCandidates';
+import { genericInlineTarget, inlineTargetFor } from './styleInlineTarget';
+
+export interface StyleSessionSource {
+  readonly path: string;
+  readonly text: string;
+}
 
 interface StyleTargetBase {
   readonly id: string;
@@ -20,26 +32,39 @@ interface StyleTargetBase {
   readonly property: string;
   readonly state: readonly string[];
   readonly sourceSnapshot: string;
+  readonly nodeId: EditorNodeId;
+  readonly locator: ElementLocator;
+  readonly sessionSources: readonly StyleSessionSource[];
 }
 
 export interface RuleStyleTarget extends StyleTargetBase {
   readonly kind: 'rule';
   readonly sheetIndex: number;
   readonly itemIndex: number;
-  readonly declarationIndex: number;
+  readonly declarationIndex: number | null;
   readonly ruleSource: EditorSourceSpan;
   readonly selectorSource: EditorSourceSpan;
-  readonly declarationSource: EditorSourceSpan;
-  readonly value: string;
+  readonly declarationSource: EditorSourceSpan | null;
+  readonly value: string | null;
+  readonly authoredProperty: string;
+  readonly originDeclarationIndex: number;
+  readonly originDeclarationSource: EditorSourceSpan;
+  readonly originValue: string;
   readonly winner: boolean;
 }
 
 export interface InlineStyleTarget extends StyleTargetBase {
   readonly kind: 'inline';
-  readonly nodeId: EditorNodeId;
-  readonly locator: ElementLocator;
+  readonly authoredNodeId: EditorNodeId;
+  readonly authoredLocator: ElementLocator;
   readonly attributeSource: EditorSourceSpan | null;
   readonly declarationIndex: number | null;
+  readonly declarationSource: EditorSourceSpan | null;
+  readonly value: string | null;
+  readonly authoredProperty: string | null;
+  readonly originDeclarationIndex: number | null;
+  readonly originDeclarationSource: EditorSourceSpan | null;
+  readonly originValue: string | null;
 }
 
 export interface NewRuleStyleTarget extends StyleTargetBase {
@@ -52,6 +77,7 @@ export type StyleTarget = RuleStyleTarget | InlineStyleTarget | NewRuleStyleTarg
 
 export type StyleTargetErrorCode =
   | 'invalid-state'
+  | 'ambiguous-state'
   | 'invalid-target'
   | 'invalid-property'
   | 'invalid-node';
@@ -107,17 +133,17 @@ export function styleTargetsFor(
   }
   const locator = createElementLocator(session.document.root, currentNode.id);
   if (locator === null) return Object.freeze([]);
+
+  const snapshot = session.snapshot();
+  const sessionSources = sessionSourcesFor(snapshot);
   const sourcePort = asUssSourcePort(session.adapter);
-  const explanation = session.adapter.explain(
-    session.document,
-    currentNode.id,
-    property,
-    explanationOptions(session.document.root, currentNode, requestedState),
-  );
+  const options = explanationOptions(session.document.root, currentNode, requestedState);
+  const explanation = session.adapter.explain(session.document, currentNode.id, property, options);
+  const candidates = collectStyleCandidates(session, currentNode, property, options, explanation);
+  const parsedSheets = new Map<string, EditorStylesheet>();
+  const common = { nodeId: currentNode.id, locator, property, state: requestedState, sessionSources };
   const result: StyleTarget[] = [];
   const seen = new Set<string>();
-  const candidates = [...(explanation?.candidates ?? [])]
-    .sort((left, right) => Number(right.winner) - Number(left.winner) || right.order - left.order);
 
   for (const candidate of candidates) {
     const origin = authoredRuleOrigin(candidate.origin);
@@ -128,30 +154,36 @@ export function styleTargetsFor(
       || !equalState(origin.states ?? [], requestedState)
       || sourcePort === null
     ) continue;
-    const buffer = session.snapshot().files.get(origin.sheetPath);
+    const buffer = snapshot.files.get(origin.sheetPath);
     if (buffer === undefined || origin.source.path !== origin.sheetPath) continue;
-    const parsed = sourcePort.parseStylesheet(origin.sheetPath, buffer.text);
+    const parsed = parsedSheets.get(origin.sheetPath)
+      ?? sourcePort.parseStylesheet(origin.sheetPath, buffer.text);
+    parsedSheets.set(origin.sheetPath, parsed);
     const rule = parsed.rules.find((item) => item.itemIndex === origin.itemIndex);
     const declaration = rule?.declarations.find((item) => item.declarationIndex === origin.declarationIndex);
     if (
       rule === undefined
       || declaration === undefined
-      || declaration.property !== property
+      || !isAuthoredSourceFor(property, declaration.property)
       || !equalSpan(declaration.source, origin.source)
     ) continue;
+    const exact = declaration.property === property;
     const target = freezeRuleTarget({
       kind: 'rule',
+      ...common,
       path: origin.sheetPath,
       sheetIndex: origin.sheetIndex,
       itemIndex: origin.itemIndex,
-      declarationIndex: origin.declarationIndex,
-      property,
-      state: requestedState,
+      declarationIndex: exact ? origin.declarationIndex : null,
       sourceSnapshot: buffer.text,
       ruleSource: rule.source,
       selectorSource: rule.selectorSource,
-      declarationSource: declaration.source,
-      value: declaration.value,
+      declarationSource: exact ? declaration.source : null,
+      value: exact ? declaration.value : null,
+      authoredProperty: declaration.property,
+      originDeclarationIndex: origin.declarationIndex,
+      originDeclarationSource: declaration.source,
+      originValue: declaration.value,
       winner: candidate.winner,
     });
     if (!seen.has(target.id)) {
@@ -160,135 +192,74 @@ export function styleTargetsFor(
     }
   }
 
-  const computedRule = explanation === null
-    ? null
-    : authoredRuleOrigin(explanation.computed.origin);
-  if (
-    computedRule !== null
-    && computedRule.source !== undefined
-    && computedRule.sheetPath !== null
-    && equalState(computedRule.states ?? [], requestedState)
-    && sourcePort !== null
-  ) {
-    const buffer = session.snapshot().files.get(computedRule.sheetPath);
-    const parsed = buffer === undefined
-      ? null
-      : sourcePort.parseStylesheet(computedRule.sheetPath, buffer.text);
-    const rule = parsed?.rules.find((item) => item.itemIndex === computedRule.itemIndex);
-    const declaration = rule?.declarations.find((item) => item.declarationIndex === computedRule.declarationIndex);
-    if (
-      buffer !== undefined
-      && rule !== undefined
-      && declaration !== undefined
-      && declaration.property === property
-      && equalSpan(declaration.source, computedRule.source)
-    ) {
-      const target = freezeRuleTarget({
-        kind: 'rule',
-        path: computedRule.sheetPath,
-        sheetIndex: computedRule.sheetIndex,
-        itemIndex: computedRule.itemIndex,
-        declarationIndex: computedRule.declarationIndex,
-        property,
-        state: requestedState,
-        sourceSnapshot: buffer.text,
-        ruleSource: rule.source,
-        selectorSource: rule.selectorSource,
-        declarationSource: declaration.source,
-        value: declaration.value,
-        winner: true,
-      });
-      if (!seen.has(target.id)) {
-        seen.add(target.id);
-        result.unshift(target);
+  if (requestedState.length === 0 && explanation !== null) {
+    const inheritedInline = authoredInlineOrigin(explanation.computed.origin);
+    if (inheritedInline !== null && inheritedInline.nodeId !== currentNode.id && sourcePort !== null) {
+      const inherited = inlineTargetFor(
+        session,
+        snapshot,
+        sourcePort,
+        common,
+        inheritedInline.nodeId,
+        inheritedInline,
+      );
+      if (inherited !== null && !seen.has(inherited.id)) {
+        seen.add(inherited.id);
+        result.push(inherited);
       }
     }
   }
 
-  const inheritedInline = explanation === null
-    ? null
-    : authoredInlineOrigin(explanation.computed.origin);
-  if (requestedState.length === 0 && inheritedInline !== null && inheritedInline.nodeId !== currentNode.id) {
-    const inheritedNode = findElement(session.document.root, inheritedInline.nodeId);
-    const inheritedLocator = inheritedNode === null
-      ? null
-      : createElementLocator(session.document.root, inheritedNode.id);
-    const inheritedAttributes = inheritedNode?.attributes.filter((attribute) => attribute.name === 'style') ?? [];
-    const entry = session.snapshot().files.get(session.entryPath);
-    if (inheritedLocator !== null && inheritedAttributes.length === 1 && entry !== undefined) {
-      result.push(freezeInlineTarget({
-        kind: 'inline',
-        path: session.entryPath,
-        nodeId: inheritedNode!.id,
-        locator: inheritedLocator,
-        property,
-        state: requestedState,
-        sourceSnapshot: entry.text,
-        attributeSource: inheritedAttributes[0].source,
-        declarationIndex: inheritedInline.declarationIndex,
-      }));
-    }
-  }
-
-  const entry = session.snapshot().files.get(session.entryPath);
+  const entry = snapshot.files.get(session.entryPath);
   const styleAttributes = currentNode.attributes.filter((attribute) => attribute.name === 'style');
   if (entry !== undefined && styleAttributes.length <= 1 && requestedState.length === 0) {
     const inlineOrigin = candidates
       .map((candidate) => authoredInlineOrigin(candidate.origin))
-      .find((origin) => origin?.nodeId === currentNode.id);
-    result.push(freezeInlineTarget({
-      kind: 'inline',
-      path: session.entryPath,
-      nodeId: currentNode.id,
-      locator,
-      property,
-      state: requestedState,
-      sourceSnapshot: entry.text,
-      attributeSource: styleAttributes[0]?.source ?? null,
-      declarationIndex: inlineOrigin?.declarationIndex ?? null,
-    }));
+      .find((origin) => origin?.nodeId === currentNode.id) ?? null;
+    const target = sourcePort === null
+      ? genericInlineTarget(session, common, currentNode, locator, styleAttributes[0]?.source ?? null, entry.text)
+      : inlineTargetFor(session, snapshot, sourcePort, common, currentNode.id, inlineOrigin)
+        ?? genericInlineTarget(session, common, currentNode, locator, styleAttributes[0]?.source ?? null, entry.text);
+    if (!seen.has(target.id)) {
+      seen.add(target.id);
+      result.push(target);
+    }
   }
 
   const selector = selectorFor(session.document.root, currentNode, requestedState);
   if (selector !== null && sourcePort !== null) {
     const paths = new Set<string>();
-    const localIndices = session.document.localStyleSheetIndices ?? [];
-    localIndices.forEach((sheetIndex) => {
+    for (const sheetIndex of session.document.localStyleSheetIndices ?? []) {
       const path = session.document.originsBySheet[sheetIndex];
-      if (path === null || path === undefined || paths.has(path)) return;
-      const buffer = session.snapshot().files.get(path);
-      if (buffer === undefined) return;
+      if (path === null || path === undefined || paths.has(path)) continue;
+      const buffer = snapshot.files.get(path);
+      if (buffer === undefined) continue;
       paths.add(path);
       result.push(freezeNewRuleTarget({
         kind: 'new-rule',
+        ...common,
         path,
         sheetIndex,
         selector,
-        property,
-        state: requestedState,
         sourceSnapshot: buffer.text,
       }));
-    });
+    }
   }
 
   return Object.freeze(result);
 }
 
-function authoredRuleOrigin(origin: StyleExplanationOrigin): Extract<StyleExplanationOrigin, { kind: 'rule' }> | null {
-  if (origin.kind === 'rule') return origin;
-  return origin.kind === 'inherited' ? authoredRuleOrigin(origin.origin) : null;
-}
-
-function authoredInlineOrigin(
-  origin: StyleExplanationOrigin,
-): Extract<StyleExplanationOrigin, { kind: 'inline' }> | null {
-  if (origin.kind === 'inline') return origin;
-  return origin.kind === 'inherited' ? authoredInlineOrigin(origin.origin) : null;
+function sessionSourcesFor(snapshot: DocumentSnapshot): readonly StyleSessionSource[] {
+  return Object.freeze([...snapshot.files]
+    .map(([path, buffer]) => Object.freeze({ path, text: buffer.text }))
+    .sort((left, right) => compareExactPath(left.path, right.path)));
 }
 
 function asUssSourcePort(adapter: unknown): UssSourcePort | null {
   const candidate = adapter as Partial<UssSourcePort> | null;
-  return candidate !== null && typeof candidate?.parseStylesheet === 'function'
+  return candidate !== null
+    && typeof candidate?.parseStylesheet === 'function'
+    && typeof candidate.parseDeclarationList === 'function'
     ? candidate as UssSourcePort
     : null;
 }
@@ -296,9 +267,13 @@ function asUssSourcePort(adapter: unknown): UssSourcePort | null {
 function explanationOptions(root: EditorElement, node: EditorElement, state: readonly string[]) {
   if (state.length === 0) return undefined;
   const name = node.attributes.find((attribute) => attribute.name === 'name')?.value;
-  return name !== undefined && isSelectorIdentifier(name) && authoredNameCount(root, name) === 1
-    ? { states: { [`#${name}`]: state } }
-    : { activeStates: new Set(state) };
+  if (name === undefined || !isSelectorIdentifier(name) || authoredNameCount(root, name) !== 1) {
+    throw new StyleTargetError(
+      'ambiguous-state',
+      'A pseudo-state write target requires one unique parser-safe authored name on the requested node.',
+    );
+  }
+  return { states: { [`#${name}`]: state } };
 }
 
 function selectorFor(root: EditorElement, node: EditorElement, state: readonly string[]): string | null {
@@ -312,9 +287,7 @@ function authoredNameCount(root: EditorElement, name: string): number {
   const pending = [root];
   while (pending.length > 0) {
     const current = pending.shift()!;
-    if (current.attributes.some((attribute) => attribute.name === 'name' && attribute.value === name)) {
-      count += 1;
-    }
+    if (current.attributes.some((attribute) => attribute.name === 'name' && attribute.value === name)) count += 1;
     pending.push(...current.children);
   }
   return count;
@@ -328,9 +301,7 @@ function snapshotState(state: readonly string[]): readonly string[] {
       copied.some((item) => typeof item !== 'string' || !isSelectorIdentifier(item))
       || copied.some((item) => !SUPPORTED_STATES.has(item))
       || new Set(copied).size !== copied.length
-    ) {
-      throw new TypeError('States must be unique USS pseudo-class identifiers.');
-    }
+    ) throw new TypeError('States must be unique USS pseudo-class identifiers.');
     return Object.freeze(copied.sort());
   } catch (error) {
     throw new StyleTargetError(
@@ -367,4 +338,8 @@ function equalState(left: readonly string[], right: readonly string[]): boolean 
 
 function equalSpan(left: EditorSourceSpan, right: EditorSourceSpan): boolean {
   return left.path === right.path && left.start === right.start && left.end === right.end;
+}
+
+function compareExactPath(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

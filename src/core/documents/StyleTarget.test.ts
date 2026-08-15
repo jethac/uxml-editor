@@ -67,6 +67,40 @@ describe('styleTargetsFor', () => {
     expect(() => (targets as unknown[]).push({})).toThrow();
   });
 
+  it('snapshots the requested node and every exact session source into each canonical target identity', () => {
+    const upperPath = 'Assets/UI/A.uss';
+    const lowerPath = 'Assets/UI/z.uss';
+    const session = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="z.uss" />\n  <Style src="A.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`,
+      [lowerPath]: '#save { width: 20px; }\n',
+      [upperPath]: '#save { width: 10px; }\n',
+    });
+    const button = nodeByName(session.document.root, 'save');
+
+    const targets = styleTargetsFor(session, button, 'width', []);
+
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target).toEqual(expect.objectContaining({
+        nodeId: button.id,
+        locator: expect.objectContaining({ authoredName: 'save' }),
+        sessionSources: [
+          { path: upperPath, text: '#save { width: 10px; }\n' },
+          { path: ENTRY_PATH, text: expect.stringContaining('<ui:Button name="save" />') },
+          { path: lowerPath, text: '#save { width: 20px; }\n' },
+        ],
+      }));
+      expect(target.id.startsWith('style-target:v2:')).toBe(true);
+      expect(target.id.length).toBeGreaterThan(100);
+      expect(Object.isFrozen(target.locator)).toBe(true);
+      expect(Object.isFrozen(target.sessionSources)).toBe(true);
+      expect(target.sessionSources.every(Object.isFrozen)).toBe(true);
+    }
+    expect(targets.map((target) => target.id)).toEqual(
+      styleTargetsFor(session, button, 'width', []).map((target) => target.id),
+    );
+  });
+
   it('uses only the exact requested pseudo-state and canonicalizes caller state order', () => {
     const session = openSession({
       [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" style="width: 5px" />\n</ui:UXML>\n`,
@@ -83,6 +117,76 @@ describe('styleTargetsFor', () => {
     expect(targets[1]).toEqual(expect.objectContaining({
       kind: 'new-rule', selector: '#save:active:hover', state: ['active', 'hover'],
     }));
+  });
+
+  it('rejects pseudo-state targeting without one unique parser-safe authored name', () => {
+    for (const entry of [
+      `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:VisualElement class="parent"><ui:Button class="child" /></ui:VisualElement>\n</ui:UXML>\n`,
+      `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:VisualElement class="parent"><ui:Button name="child" class="child" /></ui:VisualElement>\n  <ui:Button name="child" />\n</ui:UXML>\n`,
+    ]) {
+      const session = openSession({
+        [ENTRY_PATH]: entry,
+        [SHEET_PATH]: '.parent:hover .child { width: 90px; }\n',
+      });
+      const child = nodesByClass(session.document.root, 'child')[0];
+
+      expect(() => styleTargetsFor(session, child, 'width', ['hover'])).toThrowError(expect.objectContaining({
+        name: 'StyleTargetError',
+        code: 'ambiguous-state',
+      } satisfies Partial<StyleTargetError>));
+    }
+  });
+
+  it('offers local longhand overrides for shorthand origins without replacing sibling longhands', () => {
+    const session = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`,
+      [SHEET_PATH]: '#save { margin: 1px 2px; margin-left: 3px; margin: 4px; }\n',
+    });
+    const button = nodeByName(session.document.root, 'save');
+
+    const longhandRules = styleTargetsFor(session, button, 'margin-left', [])
+      .filter((target) => target.kind === 'rule');
+    const exactShorthand = styleTargetsFor(session, button, 'margin', [])
+      .filter((target) => target.kind === 'rule');
+    const inlineSession = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Button name="save" style="margin: 5px 6px" />\n</ui:UXML>\n`,
+    });
+    const inline = styleTargetsFor(
+      inlineSession,
+      nodeByName(inlineSession.document.root, 'save'),
+      'margin-right',
+      [],
+    ).find((target) => target.kind === 'inline');
+
+    expect(longhandRules).toEqual([
+      expect.objectContaining({
+        declarationIndex: null,
+        authoredProperty: 'margin',
+        originDeclarationIndex: 2,
+        winner: true,
+      }),
+      expect.objectContaining({
+        declarationIndex: 1,
+        authoredProperty: 'margin-left',
+        originDeclarationIndex: 1,
+        winner: false,
+      }),
+      expect.objectContaining({
+        declarationIndex: null,
+        authoredProperty: 'margin',
+        originDeclarationIndex: 0,
+        winner: false,
+      }),
+    ]);
+    expect(inline).toEqual(expect.objectContaining({
+      declarationIndex: null,
+      authoredProperty: 'margin',
+      originDeclarationIndex: 0,
+    }));
+    expect(exactShorthand).toEqual([
+      expect.objectContaining({ declarationIndex: 2, authoredProperty: 'margin', value: '4px' }),
+      expect.objectContaining({ declarationIndex: 0, authoredProperty: 'margin', value: '1px 2px' }),
+    ]);
   });
 
   it('points inherited values at the real authored inline origin without inventing builtin or default sources', () => {
@@ -102,10 +206,10 @@ describe('styleTargetsFor', () => {
 
     expect(inherited.map((target) => target.kind)).toEqual(['inline', 'inline', 'new-rule']);
     expect(inherited[0]).toEqual(expect.objectContaining({
-      kind: 'inline', nodeId: parent.id, declarationIndex: 0,
+      kind: 'inline', nodeId: child.id, authoredNodeId: parent.id, declarationIndex: 0,
     }));
     expect(inherited[1]).toEqual(expect.objectContaining({
-      kind: 'inline', nodeId: child.id, declarationIndex: null,
+      kind: 'inline', nodeId: child.id, authoredNodeId: child.id, declarationIndex: null,
     }));
     expect(inheritedRule[0]).toEqual(expect.objectContaining({
       kind: 'rule', path: SHEET_PATH, value: '18px', winner: true,
@@ -212,4 +316,17 @@ function nodeByName(root: EditorElement, name: string): EditorElement {
     pending.push(...current.children);
   }
   throw new Error(`Missing node ${name}.`);
+}
+
+function nodesByClass(root: EditorElement, className: string): readonly EditorElement[] {
+  const result: EditorElement[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    if (current.attributes.some((attribute) =>
+      attribute.name === 'class' && attribute.value.split(/\s+/).includes(className)
+    )) result.push(current);
+    pending.push(...current.children);
+  }
+  return result;
 }

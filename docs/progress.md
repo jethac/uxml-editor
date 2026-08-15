@@ -399,3 +399,34 @@ replaceable.
   formatting, inline preservation, stale identity, parser-valid values,
   malformed boundaries, caller mutation, and source-span trivia. Transactions
   are deterministic across execute, undo, redo, and replay.
+
+## Task 6 Review Fix Round 1
+
+- Every target now carries the requested node ID plus a frozen locator and a
+  path-sorted immutable snapshot of every exact `DocumentSession` source.
+  Command planning rejects any file change, resolves the requested locator to
+  the same current node, recomputes `styleTargetsFor`, and requires exact
+  current-target membership before standalone source validation.
+- Target IDs are the complete versioned canonical identity serialization, not
+  a 32-bit structural hash. The ID remains deterministic but is explicitly not
+  an authorization token; current-target membership is the provenance proof.
+  Runtime validation rejects malformed nullable provenance, unsafe numeric
+  indices, and negative zero before membership checks.
+- Rule and inline targets distinguish the requested property from the authored
+  declaration property. Longhands produced by supported aggregate shorthands
+  are explicit insertion targets with no fake declaration index; writes append
+  a local longhand override and removal rejects because no authored longhand
+  exists. Exact shorthand requests still patch only the shorthand value.
+- Nonempty pseudo-state requests require one unique parser-safe authored node
+  name and use only per-node `states`; the global `activeStates` fallback was
+  removed. Unnamed and duplicate-name nodes reject with `ambiguous-state`.
+- Inline insertion tokenizes only an optional terminator, CSS whitespace, and
+  complete block comments at the declaration tail. It inserts before trailing
+  comments with local LF/CRLF indentation, preserves the exact comment and
+  closing-trivia bytes, and rejects unterminated comments or nontrivia tails.
+- Red runs reproduced missing full-session provenance, accepted recomputed
+  forgeries, shorthand targets being discarded, global pseudo activation,
+  comments receiving declarations after them, malformed tails being accepted,
+  inconsistent nullable fields, and the `-0` canonicalization edge. Focused
+  Task 6 tests now pass 30 cases; adapter tests pass 15; the full suite passes
+  170 tests; and the TypeScript/Vite build passes.

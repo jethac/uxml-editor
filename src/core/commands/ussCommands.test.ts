@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { UxmlPreviewAdapter } from '../adapter/UxmlPreviewAdapter';
 import type { EditorElement } from '../adapter/types';
 import { DocumentSession } from '../documents/DocumentSession';
+import { styleTargetIdFor } from '../documents/styleTargetIdentity';
 import {
   styleTargetsFor,
   type InlineStyleTarget,
   type NewRuleStyleTarget,
   type RuleStyleTarget,
 } from '../documents/StyleTarget';
+import { normalizeEditorTransaction } from './EditorTransaction';
 import {
   insertRule,
   removeDeclaration,
@@ -163,7 +165,7 @@ describe('USS commands', () => {
 
     existingSession.history.execute(setInlineStyle(existingSession, existingTarget, '20px'));
     expect(existingSession.snapshot().files.get(ENTRY_PATH)?.text).toBe(
-      existing.replace("opacity: 0.5; /* tail */", "opacity: 0.5; /* tail */ width: 20px;"),
+      existing.replace("opacity: 0.5; /* tail */", "opacity: 0.5; width: 20px; /* tail */"),
     );
 
     const missing = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Button name='save' data-note="keep" />\n</ui:UXML>\n`;
@@ -227,6 +229,257 @@ describe('USS commands', () => {
     expect(session.snapshot().files.get(sheetPath)?.text).toBe(afterPriorEdit);
   });
 
+  it('rejects every operation when any exact session source changes', () => {
+    const sheetPath = 'Assets/UI/styles/screen.uss';
+    const overlayPath = 'Assets/UI/styles/overlay.uss';
+    const entry = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <Style src="styles/overlay.uss" />\n  <ui:Button name="save" style="opacity: 0.5" />\n</ui:UXML>\n`;
+    const source = '#save { width: 10px; }\n';
+    const overlay = '#save { width: 20px; }\n';
+    const session = openSession({
+      [ENTRY_PATH]: entry,
+      [sheetPath]: source,
+      [overlayPath]: overlay,
+    });
+    const targets = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'width', []);
+    const rule = targets.find((target): target is RuleStyleTarget =>
+      target.kind === 'rule' && target.path === sheetPath
+    )!;
+    const inline = targets.find((target): target is InlineStyleTarget => target.kind === 'inline')!;
+    const newRule = targets.find((target): target is NewRuleStyleTarget =>
+      target.kind === 'new-rule' && target.path === sheetPath
+    )!;
+
+    replaceSource(session, overlayPath, '20px', '30px', 'test:change-cascade');
+
+    expectRejectedWithoutMutation(session, () => setDeclaration(session, rule, '40px'));
+    expectRejectedWithoutMutation(session, () => setInlineStyle(session, inline, '40px'));
+    expectRejectedWithoutMutation(session, () => insertRule(session, newRule, '40px'));
+  });
+
+  it('rejects targets after UXML edits, node deletion or rename, and duplicate-name creation', () => {
+    const sheetPath = 'Assets/UI/styles/screen.uss';
+    const entry = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`;
+    const source = '#save { width: 10px; }\n';
+    const changes = [
+      { from: '</ui:UXML>', to: '  <!-- unrelated -->\n</ui:UXML>', id: 'test:uxml-change' },
+      { from: '  <ui:Button name="save" />\n', to: '', id: 'test:delete-node' },
+      { from: 'name="save"', to: 'name="renamed"', id: 'test:rename-node' },
+      {
+        from: '  <ui:Button name="save" />',
+        to: '  <ui:Button name="save" />\n  <ui:Button name="save" />',
+        id: 'test:duplicate-name',
+      },
+    ] as const;
+
+    for (const change of changes) {
+      const session = openSession({ [ENTRY_PATH]: entry, [sheetPath]: source });
+      const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'width', [])
+        .find((candidate): candidate is RuleStyleTarget => candidate.kind === 'rule')!;
+      replaceSource(session, ENTRY_PATH, change.from, change.to, change.id);
+
+      expectRejectedWithoutMutation(session, () => setDeclaration(session, target, '40px'));
+    }
+  });
+
+  it('rejects a forged target even when its collision-free canonical id is recomputed', () => {
+    const sheetPath = 'Assets/UI/styles/screen.uss';
+    const source = '#save { width: 10px; }\n';
+    const session = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`,
+      [sheetPath]: source,
+    });
+    const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'width', [])
+      .find((candidate): candidate is RuleStyleTarget => candidate.kind === 'rule')!;
+    const { id: _id, ...identity } = target;
+    const forgedIdentity = { ...identity, winner: !target.winner };
+    const forged = { ...forgedIdentity, id: styleTargetIdFor(forgedIdentity) };
+
+    expect(forged.id).not.toBe(target.id);
+    expectRejectedWithoutMutation(session, () => setDeclaration(session, forged, '40px'));
+
+    const malformedIdentity = {
+      ...identity,
+      declarationIndex: null,
+      declarationSource: target.declarationSource,
+      value: null,
+    };
+    const malformed = { ...malformedIdentity, id: styleTargetIdFor(malformedIdentity) };
+    const before = observableSessionState(session);
+    expect(() => setDeclaration(session, malformed, '40px')).toThrowError(expect.objectContaining({
+      name: 'UssCommandError',
+      code: 'invalid-target',
+    } satisfies Partial<UssCommandError>));
+    expect(observableSessionState(session)).toEqual(before);
+
+    const negativeZeroIdentity = { ...identity, sheetIndex: -0 };
+    const negativeZero = { ...negativeZeroIdentity, id: styleTargetIdFor(negativeZeroIdentity) };
+    expect(() => setDeclaration(session, negativeZero, '40px')).toThrowError(expect.objectContaining({
+      name: 'UssCommandError',
+      code: 'invalid-target',
+    } satisfies Partial<UssCommandError>));
+    expect(observableSessionState(session)).toEqual(before);
+  });
+
+  it('uses canonical target identities that remain distinct for a known FNV32 collision fixture', () => {
+    expect(oldFnv32('fixture-3pwu')).toBe(oldFnv32('fixture-a5fa'));
+
+    const sheetPath = 'Assets/UI/styles/screen.uss';
+    const session = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`,
+      [sheetPath]: '',
+    });
+    const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'width', [])
+      .find((candidate): candidate is NewRuleStyleTarget => candidate.kind === 'new-rule')!;
+    const { id: _id, ...identity } = target;
+    const left = { ...identity, selector: '#fixture-3pwu' };
+    const right = { ...identity, selector: '#fixture-a5fa' };
+
+    expect(styleTargetIdFor(left)).not.toBe(styleTargetIdFor(right));
+    expect(styleTargetIdFor(left)).toBe(`style-target:v2:${JSON.stringify([
+      left.kind,
+      left.path,
+      left.property,
+      left.state,
+      left.sourceSnapshot,
+      left.nodeId,
+      [
+        left.locator.authoredName ?? null,
+        left.locator.qualifiedTag,
+        left.locator.childPath,
+        left.locator.ancestorTags,
+        left.locator.attributeHints.map((hint) => [hint.name, hint.value]),
+      ],
+      left.sessionSources.map((sourceEntry) => [sourceEntry.path, sourceEntry.text]),
+      left.sheetIndex,
+      left.selector,
+    ])}`);
+  });
+
+  it('inserts a requested longhand into the authored shorthand rule and preserves undo, redo, and replay', () => {
+    const sheetPath = 'Assets/UI/styles/screen.uss';
+    const entry = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`;
+    const source = '#save {\n  margin: 1px 2px;\n  color: red;\n}\n';
+    const expected = '#save {\n  margin: 1px 2px;\n  color: red;\n  margin-left: 30px;\n}\n';
+    const session = openSession({ [ENTRY_PATH]: entry, [sheetPath]: source });
+    const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'margin-left', [])
+      .find((candidate): candidate is RuleStyleTarget =>
+        candidate.kind === 'rule' && candidate.authoredProperty === 'margin'
+      )!;
+
+    expect(target.declarationIndex).toBeNull();
+    const transaction = setDeclaration(session, target, '30px');
+    expect(transaction.patchesByFile.get(sheetPath)).toEqual([{
+      start: source.lastIndexOf('}'),
+      end: source.lastIndexOf('}'),
+      replacement: '  margin-left: 30px;\n',
+    }]);
+
+    session.history.execute(transaction);
+    expect(session.snapshot().files.get(sheetPath)?.text).toBe(expected);
+    session.history.undo();
+    expect(session.snapshot().files.get(sheetPath)?.text).toBe(source);
+    session.history.redo();
+    expect(session.snapshot().files.get(sheetPath)?.text).toBe(expected);
+
+    const replay = openSession({ [ENTRY_PATH]: entry, [sheetPath]: source });
+    replay.history.replay([transaction]);
+    expect(replay.snapshot().files.get(sheetPath)?.text).toBe(expected);
+  });
+
+  it('replaces an exact shorthand request but rejects removing a longhand override target', () => {
+    const sheetPath = 'Assets/UI/styles/screen.uss';
+    const source = '#save { margin: 1px 2px; color: red; }\n';
+    const session = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`,
+      [sheetPath]: source,
+    });
+    const button = nodeByName(session.document.root, 'save');
+    const shorthand = styleTargetsFor(session, button, 'margin', [])
+      .find((candidate): candidate is RuleStyleTarget => candidate.kind === 'rule')!;
+    const override = styleTargetsFor(session, button, 'margin-left', [])
+      .find((candidate): candidate is RuleStyleTarget =>
+        candidate.kind === 'rule' && candidate.authoredProperty === 'margin'
+      )!;
+
+    const transaction = setDeclaration(session, shorthand, '3px 4px');
+    expect(transaction.patchesByFile.get(sheetPath)).toEqual([{
+      start: source.indexOf('1px 2px'),
+      end: source.indexOf('1px 2px') + '1px 2px'.length,
+      replacement: '3px 4px',
+    }]);
+    expect(() => removeDeclaration(session, override)).toThrowError(expect.objectContaining({
+      name: 'UssCommandError',
+      code: 'invalid-target',
+    } satisfies Partial<UssCommandError>));
+    expect(session.snapshot().files.get(sheetPath)?.text).toBe(source);
+    expect(session.history.canUndo).toBe(false);
+  });
+
+  it('inserts inline longhand overrides before exact trailing comment trivia', () => {
+    const fixtures = [
+      {
+        name: 'single-line immediate comment',
+        style: 'margin: 1px 2px;/* tail */',
+        expected: 'margin: 1px 2px; margin-left: 30px;/* tail */',
+      },
+      {
+        name: 'LF multiline',
+        style: '\n    margin: 1px 2px;\n    /* tail */\n  ',
+        expected: '\n    margin: 1px 2px;\n    margin-left: 30px;\n    /* tail */\n  ',
+      },
+      {
+        name: 'CRLF multiline',
+        style: '\r\n\tmargin: 1px 2px;\r\n\t/* tail */\r\n  ',
+        expected: '\r\n\tmargin: 1px 2px;\r\n\tmargin-left: 30px;\r\n\t/* tail */\r\n  ',
+      },
+      {
+        name: 'no final semicolon',
+        style: 'margin: 1px 2px /* tail */',
+        expected: 'margin: 1px 2px; margin-left: 30px; /* tail */',
+      },
+      {
+        name: 'comments only',
+        style: '/* only */',
+        expected: 'margin-left: 30px; /* only */',
+      },
+      {
+        name: 'comments only multiline',
+        style: '\r\n    /* only */\r\n  ',
+        expected: '\r\n    margin-left: 30px;\r\n    /* only */\r\n  ',
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      const source = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Button name="save" style="${fixture.style}" data-note="keep" />\n</ui:UXML>\n`;
+      const session = openSession({ [ENTRY_PATH]: source });
+      const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'margin-left', [])
+        .find((candidate): candidate is InlineStyleTarget => candidate.kind === 'inline')!;
+
+      session.history.execute(setInlineStyle(session, target, '30px'));
+
+      expect(session.snapshot().files.get(ENTRY_PATH)?.text, fixture.name).toBe(
+        source.replace(fixture.style, fixture.expected),
+      );
+    }
+  });
+
+  it('rejects malformed inline declaration tails without changing source or history', () => {
+    for (const style of ['opacity: 0.5; /* unterminated', 'opacity: 0.5; stray /* tail */']) {
+      const source = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Button name="save" style="${style}" />\n</ui:UXML>\n`;
+      const session = openSession({ [ENTRY_PATH]: source });
+      const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'width', [])
+        .find((candidate): candidate is InlineStyleTarget => candidate.kind === 'inline')!;
+
+      expect(() => setInlineStyle(session, target, '20px')).toThrowError(expect.objectContaining({
+        name: 'UssCommandError',
+        code: 'unsafe-source',
+      } satisfies Partial<UssCommandError>));
+      expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(source);
+      expect(session.history.canUndo).toBe(false);
+      expect(session.history.canRedo).toBe(false);
+    }
+  });
+
   it('accepts parser-valid quoted semicolons and rejects unsafe stylesheet boundaries', () => {
     const validPath = 'Assets/UI/styles/valid.uss';
     const valid = '#save { background-image: url("old.png"); }\n';
@@ -278,13 +531,22 @@ describe('USS commands', () => {
       state: [...target.state],
       ruleSource: { ...target.ruleSource },
       selectorSource: { ...target.selectorSource },
-      declarationSource: { ...target.declarationSource },
+      declarationSource: { ...target.declarationSource! },
+      locator: {
+        ...target.locator,
+        childPath: [...target.locator.childPath],
+        ancestorTags: [...target.locator.ancestorTags],
+        attributeHints: target.locator.attributeHints.map((hint) => ({ ...hint })),
+      },
+      sessionSources: target.sessionSources.map((entry) => ({ ...entry })),
     };
     const transaction = setDeclaration(session, callerTarget, '40px');
 
     callerTarget.state.push('hover');
     callerTarget.declarationSource.start = 0;
     callerTarget.sourceSnapshot = 'mutated';
+    callerTarget.locator.childPath.push(999);
+    callerTarget.sessionSources[0].text = 'mutated';
 
     session.history.execute(transaction);
     expect(session.snapshot().files.get(sheetPath)?.text).toBe(source.replace('10px', '40px'));
@@ -376,4 +638,49 @@ function nodeByName(root: EditorElement, name: string): EditorElement {
     pending.push(...current.children);
   }
   throw new Error(`Missing node ${name}.`);
+}
+
+function replaceSource(
+  session: DocumentSession,
+  path: string,
+  from: string,
+  replacement: string,
+  id: string,
+): void {
+  const source = session.snapshot().files.get(path)?.text;
+  if (source === undefined) throw new Error(`Missing source ${path}.`);
+  const start = source.indexOf(from);
+  if (start === -1) throw new Error(`Missing fixture text in ${path}.`);
+  session.commit(normalizeEditorTransaction({
+    id,
+    label: id,
+    patchesByFile: new Map([[path, [{ start, end: start + from.length, replacement }]]]),
+  }));
+}
+
+function expectRejectedWithoutMutation(session: DocumentSession, operation: () => unknown): void {
+  const before = observableSessionState(session);
+  expect(operation).toThrowError(expect.objectContaining({
+    name: 'UssCommandError',
+    code: 'stale-target',
+  } satisfies Partial<UssCommandError>));
+  expect(observableSessionState(session)).toEqual(before);
+}
+
+function observableSessionState(session: DocumentSession) {
+  return {
+    files: [...session.snapshot().files].map(([path, buffer]) => [path, buffer.text]),
+    canUndo: session.history.canUndo,
+    canRedo: session.history.canRedo,
+    replayLog: session.history.replayLog,
+  };
+}
+
+function oldFnv32(value: string): string {
+  let result = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    result ^= value.charCodeAt(index);
+    result = Math.imul(result, 0x01000193);
+  }
+  return (result >>> 0).toString(16).padStart(8, '0');
 }

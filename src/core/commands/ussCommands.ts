@@ -1,16 +1,16 @@
 import type { DocumentSession } from '../documents/DocumentSession';
 import {
-  snapshotStyleTarget,
   type InlineStyleTarget,
   type NewRuleStyleTarget,
   type RuleStyleTarget,
-  type StyleTarget,
 } from '../documents/StyleTarget';
 import { resolveElementLocator } from '../documents/ElementLocator';
 import { normalizeEditorTransaction, type EditorTransaction } from './EditorTransaction';
+import { planInlineDeclarationInsertion, planRuleDeclarationInsertion } from './cssDeclarationInsertion';
 import { escapeXmlAttributeValue, readXmlAttributeLexeme } from './xmlFormatting';
 import { setAttribute } from './uxmlCommands';
 import { UssCommandError } from './ussCommandError';
+import { revalidateStyleTarget } from './styleTargetRevalidation';
 import {
   assertSafeStylesheetAppend,
   currentRuleTarget,
@@ -28,6 +28,16 @@ export function setDeclaration(
 ): EditorTransaction {
   const current = currentRuleTarget(session, target);
   requireValue(session, current.target.property, value);
+  if (current.declaration === null) {
+    const patch = planRuleDeclarationInsertion(
+      current.target.path,
+      current.source,
+      current.rule,
+      current.target.property,
+      value,
+    );
+    return transaction('set-declaration', `Set ${current.target.property}`, current.target.path, [patch]);
+  }
   const lexeme = readDeclarationLexeme(current.source, current.declaration);
   return transaction('set-declaration', `Set ${current.target.property}`, current.target.path, [{
     start: lexeme.valueStart,
@@ -41,6 +51,12 @@ export function removeDeclaration(
   target: RuleStyleTarget,
 ): EditorTransaction {
   const current = currentRuleTarget(session, target);
+  if (current.declaration === null) {
+    throw new UssCommandError(
+      'invalid-target',
+      `Cannot remove ${current.target.property} because this target represents a new longhand override.`,
+    );
+  }
   let terminator = current.declaration.source.end;
   while (/[\t\r\n ]/.test(current.source[terminator] ?? '')) terminator += 1;
   const end = current.source[terminator] === ';'
@@ -58,17 +74,8 @@ export function insertRule(
   target: NewRuleStyleTarget,
   value: string,
 ): EditorTransaction {
-  const snapshot = snapshotCommandTarget(target);
-  if (
-    snapshot.kind !== 'new-rule'
-    || typeof snapshot.path !== 'string'
-    || !Number.isInteger(snapshot.sheetIndex)
-    || typeof snapshot.selector !== 'string'
-    || typeof snapshot.property !== 'string'
-  ) {
-    throw new UssCommandError('invalid-target', 'insertRule requires a valid new-rule target.');
-  }
-  target = snapshot;
+  requireUssSourcePort(session);
+  target = revalidateStyleTarget(session, target, 'new-rule');
   requireValue(session, target.property, value);
   if (session.document.originsBySheet[target.sheetIndex] !== target.path) {
     throw new UssCommandError('stale-target', `Stylesheet ${target.path} is no longer mapped to sheet ${target.sheetIndex}.`);
@@ -104,23 +111,19 @@ export function setInlineStyle(
   target: InlineStyleTarget,
   value: string,
 ): EditorTransaction {
-  const snapshot = snapshotCommandTarget(target);
-  if (
-    snapshot.kind !== 'inline'
-    || snapshot.path !== session.entryPath
-    || snapshot.state.length !== 0
-  ) {
+  requireUssSourcePort(session);
+  target = revalidateStyleTarget(session, target, 'inline');
+  if (target.path !== session.entryPath || target.state.length !== 0) {
     throw new UssCommandError('invalid-target', 'setInlineStyle requires a base-state inline target.');
   }
-  target = snapshot;
   requireValue(session, target.property, value);
   let nodeId;
   try {
-    nodeId = resolveElementLocator(session.document.root, target.locator);
+    nodeId = resolveElementLocator(session.document.root, target.authoredLocator);
   } catch (error) {
     throw new UssCommandError('invalid-target', 'The inline target locator is malformed.', error);
   }
-  if (nodeId === null || nodeId !== target.nodeId) {
+  if (nodeId === null || nodeId !== target.authoredNodeId) {
     throw new UssCommandError('stale-target', 'The inline style target no longer resolves to the same element.');
   }
   const node = findElement(session.document.root, nodeId);
@@ -136,7 +139,7 @@ export function setInlineStyle(
     if (attributes.length !== 0) {
       throw new UssCommandError('stale-target', 'The target element now has an authored inline style attribute.');
     }
-    const planned = setAttribute(session, target.locator, 'style', `${target.property}: ${value};`);
+    const planned = setAttribute(session, target.authoredLocator, 'style', `${target.property}: ${value};`);
     return transaction(
       'set-inline-style',
       `Set inline ${target.property}`,
@@ -162,45 +165,32 @@ export function setInlineStyle(
     attribute.valueEnd,
   );
   if (target.declarationIndex === null) {
-    if (declarations.some((candidate) => candidate.property === target.property)) {
-      throw new UssCommandError('stale-target', `Inline declaration ${target.property} is now authored on the target element.`);
-    }
     let escaped: string;
     try {
       escaped = escapeXmlAttributeValue(value, attribute.quote);
     } catch (error) {
       throw new UssCommandError('invalid-value', `Inline value for ${target.property} is not valid XML 1.0 text.`, error);
     }
-    const raw = buffer.text.slice(attribute.valueStart, attribute.valueEnd);
-    const last = declarations[declarations.length - 1];
-    const suffix = last === undefined ? '' : buffer.text.slice(last.source.end, attribute.valueEnd);
-    const multiline = /^(;)?[\t ]*(\r\n|\r|\n)[\t ]*$/.exec(suffix);
-    if (last !== undefined && multiline !== null) {
-      const newline = multiline[2];
-      const newlineOffset = suffix.indexOf(newline);
-      const lineStart = Math.max(
-        buffer.text.lastIndexOf('\n', last.source.start - 1),
-        buffer.text.lastIndexOf('\r', last.source.start - 1),
-      ) + 1;
-      const indent = /^[\t ]*$/.test(buffer.text.slice(lineStart, last.source.start))
-        ? buffer.text.slice(lineStart, last.source.start)
-        : '  ';
-      return transaction('set-inline-style', `Set inline ${target.property}`, session.entryPath, [{
-        start: last.source.end + newlineOffset,
-        end: last.source.end + newlineOffset,
-        replacement: `${multiline[1] === undefined ? ';' : ''}${newline}${indent}${target.property}: ${escaped};`,
-      }]);
-    }
-    const terminator = last !== undefined && !suffix.includes(';') ? ';' : '';
-    const separator = raw.length === 0 || /[\t\r\n ]$/.test(raw) ? '' : ' ';
-    return transaction('set-inline-style', `Set inline ${target.property}`, session.entryPath, [{
-      start: attribute.valueEnd,
-      end: attribute.valueEnd,
-      replacement: `${terminator}${separator}${target.property}: ${escaped};`,
-    }]);
+    validateInlineOrigin(target, declarations);
+    const patch = planInlineDeclarationInsertion(
+      session.entryPath,
+      buffer.text,
+      attribute.valueStart,
+      attribute.valueEnd,
+      declarations,
+      target.property,
+      escaped,
+    );
+    return transaction('set-inline-style', `Set inline ${target.property}`, session.entryPath, [patch]);
   }
   const declaration = declarations.find((candidate) => candidate.declarationIndex === target.declarationIndex);
-  if (declaration === undefined || declaration.property !== target.property) {
+  if (
+    declaration === undefined
+    || declaration.property !== target.property
+    || declaration.value !== target.value
+    || target.declarationSource === null
+    || !sameSpan(declaration.source, target.declarationSource)
+  ) {
     throw new UssCommandError('stale-target', `Inline declaration ${target.property} no longer matches its parser index.`);
   }
   const declarationLexeme = readDeclarationLexeme(buffer.text, declaration);
@@ -215,6 +205,25 @@ export function setInlineStyle(
     end: declarationLexeme.valueEnd,
     replacement,
   }]);
+}
+
+function validateInlineOrigin(
+  target: InlineStyleTarget,
+  declarations: readonly import('../adapter/types').EditorUssDeclaration[],
+): void {
+  if (target.originDeclarationIndex === null) return;
+  const origin = declarations.find((candidate) => candidate.declarationIndex === target.originDeclarationIndex);
+  if (
+    origin === undefined
+    || target.authoredProperty === null
+    || target.originDeclarationSource === null
+    || target.originValue === null
+    || origin.property !== target.authoredProperty
+    || origin.value !== target.originValue
+    || !sameSpan(origin.source, target.originDeclarationSource)
+  ) {
+    throw new UssCommandError('stale-target', 'The authored inline shorthand origin no longer matches its exact declaration.');
+  }
 }
 
 function transaction(
@@ -296,14 +305,6 @@ function sameSpan(
   right: { readonly path: string; readonly start: number; readonly end: number },
 ): boolean {
   return left.path === right.path && left.start === right.start && left.end === right.end;
-}
-
-function snapshotCommandTarget(candidate: StyleTarget): StyleTarget {
-  try {
-    return snapshotStyleTarget(candidate);
-  } catch (error) {
-    throw new UssCommandError('invalid-target', 'The style target could not be snapshotted safely.', error);
-  }
 }
 
 function hash(value: string): string {

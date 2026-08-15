@@ -1,13 +1,14 @@
 import type { EditorUssDeclaration, EditorUssRule, UssSourcePort } from '../adapter/types';
 import type { DocumentSession } from '../documents/DocumentSession';
-import { snapshotStyleTarget, type RuleStyleTarget } from '../documents/StyleTarget';
+import type { RuleStyleTarget } from '../documents/StyleTarget';
+import { revalidateStyleTarget } from './styleTargetRevalidation';
 import { UssCommandError } from './ussCommandError';
 
 export interface CurrentRuleTarget {
   readonly target: RuleStyleTarget;
   readonly source: string;
   readonly rule: EditorUssRule;
-  readonly declaration: EditorUssDeclaration;
+  readonly declaration: EditorUssDeclaration | null;
 }
 
 export interface DeclarationLexeme {
@@ -19,15 +20,8 @@ export function currentRuleTarget(
   session: DocumentSession,
   target: RuleStyleTarget,
 ): CurrentRuleTarget {
-  let snapshot;
-  try {
-    snapshot = snapshotStyleTarget(target);
-  } catch (error) {
-    throw new UssCommandError('invalid-target', 'The authored rule target could not be snapshotted.', error);
-  }
-  if (snapshot.kind !== 'rule') {
-    throw new UssCommandError('invalid-target', 'setDeclaration requires an authored rule target.');
-  }
+  requireUssSourcePort(session);
+  const snapshot = revalidateStyleTarget(session, target, 'rule');
   const {
     path,
     sheetIndex,
@@ -35,6 +29,10 @@ export function currentRuleTarget(
     declarationIndex,
     property,
     value,
+    authoredProperty,
+    originDeclarationIndex,
+    originDeclarationSource,
+    originValue,
     ruleSource,
     selectorSource,
     declarationSource,
@@ -43,9 +41,9 @@ export function currentRuleTarget(
     typeof path !== 'string'
     || !Number.isInteger(sheetIndex)
     || !Number.isInteger(itemIndex)
-    || !Number.isInteger(declarationIndex)
+    || (declarationIndex !== null && !Number.isInteger(declarationIndex))
     || typeof property !== 'string'
-    || typeof value !== 'string'
+    || (value !== null && typeof value !== 'string')
   ) {
     throw new UssCommandError('invalid-target', 'The rule target identity is malformed.');
   }
@@ -61,15 +59,26 @@ export function currentRuleTarget(
   }
   const parsed = requireUssSourcePort(session).parseStylesheet(path, buffer.text);
   const rule = parsed.rules.find((candidate) => candidate.itemIndex === itemIndex);
-  const declaration = rule?.declarations.find((candidate) => candidate.declarationIndex === declarationIndex);
+  const declaration = declarationIndex === null
+    ? null
+    : rule?.declarations.find((candidate) => candidate.declarationIndex === declarationIndex);
+  const origin = rule?.declarations.find((candidate) => candidate.declarationIndex === originDeclarationIndex);
   if (
     rule === undefined
     || declaration === undefined
-    || declaration.property !== property
-    || declaration.value !== value
+    || origin === undefined
+    || origin.property !== authoredProperty
+    || origin.value !== originValue
+    || !sameSpan(origin.source, originDeclarationSource)
+    || (declaration !== null && (
+      declaration.property !== property
+      || declaration.value !== value
+      || declarationSource === null
+      || !sameSpan(declaration.source, declarationSource)
+    ))
+    || (declaration === null && (declarationSource !== null || value !== null))
     || !sameSpan(rule.source, ruleSource)
     || !sameSpan(rule.selectorSource, selectorSource)
-    || !sameSpan(declaration.source, declarationSource)
   ) {
     throw new UssCommandError(
       'stale-target',
