@@ -843,7 +843,7 @@ describe('SaveCoordinator', () => {
     expect(session.snapshot().files.get('Main.uxml')?.text).toBe(external);
   });
 
-  it('overwrites the observed external revision when the user chooses overwrite', async () => {
+  it('overwrites the observed external revision and clears its synchronized recovery checkpoint', async () => {
     const original = '<UXML />';
     const local = '<UXML  />';
     const external = '<UXML><External /></UXML>';
@@ -877,6 +877,7 @@ describe('SaveCoordinator', () => {
     expect(disk.text).toBe(local);
     expect(session.snapshot().files.get('Main.uxml')?.text).toBe(local);
     expect(coordinator.dirtyPaths(session)).toEqual([]);
+    expect(await host.readRecovery(root.id)).toBeNull();
   });
 
   it('refuses an external overwrite when durable recovery preparation is unavailable', async () => {
@@ -970,7 +971,8 @@ describe('SaveCoordinator', () => {
       label: 'First local edit',
       patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
     });
-    const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
+    const journal = new RecoveryJournal(host, root);
+    const coordinator = new SaveCoordinator(host, root, [initial], journal);
     await host.externalWrite(path, external);
     await coordinator.processExternalChanges(session, ['Main.uxml']);
     const replaceGate = deferred<void>();
@@ -1004,6 +1006,119 @@ describe('SaveCoordinator', () => {
     expect(disk.read.text).toBe(capturedLocal);
     expect(session.snapshot().files.get('Main.uxml')?.text).toBe(latestLocal);
     expect(coordinator.dirtyPaths(session)).toEqual(['Main.uxml']);
+    const restored = openTestSession(new Map([['Main.uxml', disk.read.text]]));
+    expect(await journal.recover(restored)).toMatchObject({ status: 'recovered', recordCount: 1 });
+    expect(restored.snapshot().files.get('Main.uxml')?.text).toBe(latestLocal);
+  });
+
+  it('recreates overwrite recovery when local source changes during checkpoint cleanup', async () => {
+    const original = '<UXML />';
+    const capturedLocal = '<UXML  />';
+    const latestLocal = '<UXML   />';
+    const external = '<UXML><External /></UXML>';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.history.execute({
+      id: 'overwrite-cleanup-generation-1',
+      label: 'First local edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const journal = new RecoveryJournal(host, root);
+    const coordinator = new SaveCoordinator(host, root, [initial], journal);
+    await host.externalWrite(path, external);
+    await coordinator.processExternalChanges(session, ['Main.uxml']);
+    const cleanupGate = deferred<void>();
+    const cleanupStarted = deferred<void>();
+    const clearRecovery = host.clearRecovery.bind(host);
+    host.clearRecovery = async (id) => {
+      cleanupStarted.resolve();
+      await cleanupGate.promise;
+      return clearRecovery(id);
+    };
+
+    const overwriting = coordinator.resolveExternalChange(session, 'Main.uxml', 'overwrite');
+    const firstCompletion = await Promise.race([
+      overwriting.then(() => 'resolved' as const),
+      cleanupStarted.promise.then(() => 'cleanup' as const),
+    ]);
+    expect(firstCompletion).toBe('cleanup');
+    session.history.execute({
+      id: 'overwrite-cleanup-generation-2',
+      label: 'Edit during overwrite cleanup',
+      patchesByFile: new Map([['Main.uxml', [{ start: 7, end: 7, replacement: ' ' }]]]),
+    });
+    cleanupGate.resolve();
+    const outcome = await overwriting;
+    const disk = await host.readText(path);
+
+    expect(outcome).toEqual({
+      path: 'Main.uxml',
+      decision: 'overwrite',
+      status: 'conflict',
+      external: 'changed',
+      revision: disk.revision,
+      localDirty: true,
+      error: { code: 'local-changed', message: 'Local source changed while preparing overwrite: Main.uxml' },
+    });
+    expect(disk.text).toBe(capturedLocal);
+    expect(session.snapshot().files.get('Main.uxml')?.text).toBe(latestLocal);
+    const restored = openTestSession(new Map([['Main.uxml', disk.text]]));
+    expect(await journal.recover(restored)).toMatchObject({ status: 'recovered', recordCount: 1 });
+    expect(restored.snapshot().files.get('Main.uxml')?.text).toBe(latestLocal);
+  });
+
+  it('reports overwrite checkpoint cleanup failure and retries without rewriting the synchronized file', async () => {
+    const original = '<UXML />';
+    const local = '<UXML  />';
+    const external = '<UXML><External /></UXML>';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.history.execute({
+      id: 'overwrite-cleanup-failure',
+      label: 'Local edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
+    await host.externalWrite(path, external);
+    await coordinator.processExternalChanges(session, ['Main.uxml']);
+    host.injectFailure({ operation: 'clearRecovery', phase: 'before' });
+
+    const outcome = await coordinator.resolveExternalChange(session, 'Main.uxml', 'overwrite');
+    const disk = await host.readText(path);
+
+    expect(outcome).toEqual({
+      path: 'Main.uxml',
+      decision: 'overwrite',
+      status: 'failed',
+      external: 'changed',
+      revision: disk.revision,
+      localDirty: false,
+      error: { code: 'cleanup-failed', message: 'Recovery journal cleanup failed.' },
+    });
+    expect(disk.text).toBe(local);
+    expect(await host.readRecovery(root.id)).not.toBeNull();
+
+    const retried = await coordinator.save(session);
+
+    expect(retried).toEqual({
+      status: 'noop',
+      files: [{ path: 'Main.uxml', status: 'noop', revision: disk.revision }],
+      dirtyPaths: [],
+      recovery: 'cleared',
+      recoveryRequired: false,
+    });
+    expect((await host.readText(path)).revision).toBe(disk.revision);
+    expect(await host.readRecovery(root.id)).toBeNull();
   });
 
   it('debounces watcher bursts deterministically and suppresses callbacks after disposal', async () => {

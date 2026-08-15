@@ -98,6 +98,18 @@ export class ExternalChangeCoordinator {
       const revision = await this.host.replaceTextAtomically(baseline.path, pending.revision, local.text);
       this.saved.publish(path, local.text, revision);
       this.pending.delete(path);
+      const recoveryFinalization = await this.recovery.finalizeConfirmedWrite(session);
+      if (recoveryFinalization.status === 'failed') {
+        return freezeExternalResolution({
+          path,
+          decision,
+          status: 'failed',
+          external: 'changed',
+          revision,
+          localDirty: this.saved.dirtyPaths(session).includes(path),
+          error: recoveryFinalization.error,
+        });
+      }
       if (!sessionMatches(session, generation, path, local.text)) {
         return freezeExternalResolution({
           path,
