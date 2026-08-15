@@ -104,6 +104,75 @@ describe('ClipboardService', () => {
     expect(changed).toContain('name="item-copy-copy"');
     expect(session.history.undoDepth).toBe(1);
   });
+
+  it('materializes a missing inherited namespace binding when pasting across documents', async () => {
+    const source = openSession([
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:custom="Example.Controls">',
+      '  <custom:Widget name="custom-item" />',
+      '</ui:UXML>',
+    ].join('\n'));
+    const copied = new ClipboardService().copy(source, [elementNamed(source.document.root, 'custom-item')]);
+    expect(copied.ok).toBe(true);
+    if (!copied.ok) return;
+    const destinationSource = [
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+      '  <!-- preserve exactly -->',
+      '  <ui:VisualElement name="parent" />',
+      '</ui:UXML>',
+    ].join('\n');
+    const destination = openSession(destinationSource);
+
+    const result = await new ClipboardService().paste(
+      destination,
+      locatorWithName(destination, 'parent'),
+      0,
+      copied.item,
+    );
+
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    destination.history.execute(result.transaction);
+    const changed = destination.snapshot().files.get(entryPath)?.text ?? '';
+    expect(changed).toMatch(/<custom:Widget\b(?=[^>]*\bname="custom-item")(?=[^>]*\bxmlns:custom="Example\.Controls")[^>]*\/>/);
+    expect(changed).toContain('  <!-- preserve exactly -->');
+    expect(destination.history.undoDepth).toBe(1);
+    destination.history.undo();
+    expect(destination.snapshot().files.get(entryPath)?.text).toBe(destinationSource);
+  });
+
+  it('refuses an incompatible destination namespace binding without inserting a misbound QName', async () => {
+    const source = openSession([
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:custom="Example.Controls">',
+      '  <custom:Widget name="custom-item" />',
+      '</ui:UXML>',
+    ].join('\n'));
+    const copied = new ClipboardService().copy(source, [elementNamed(source.document.root, 'custom-item')]);
+    expect(copied.ok).toBe(true);
+    if (!copied.ok) return;
+    const destinationSource = [
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:custom="Other.Controls">',
+      '  <ui:VisualElement name="parent" />',
+      '</ui:UXML>',
+    ].join('\n');
+    const destination = openSession(destinationSource);
+
+    const result = await new ClipboardService().paste(
+      destination,
+      locatorWithName(destination, 'parent'),
+      0,
+      copied.item,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      diagnostic: {
+        code: 'INVALID_CLIPBOARD_FRAGMENT',
+        message: 'Namespace binding conflict for xmlns:custom.',
+      },
+    });
+    expect(destination.snapshot().files.get(entryPath)?.text).toBe(destinationSource);
+    expect(destination.history.undoDepth).toBe(0);
+  });
 });
 
 function elementNamed(root: EditorElement, name: string): EditorElement {

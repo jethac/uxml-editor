@@ -13,6 +13,11 @@ import type {
 } from '../../core/adapter/types';
 import { freezeParsedPreviewDocument } from '../../core/adapter/immutableParsedDocument';
 import { UxmlPreviewAdapter } from '../../core/adapter/UxmlPreviewAdapter';
+import {
+  ClipboardService,
+  type ClipboardItemLike,
+  type ClipboardPort,
+} from '../../core/commands/ClipboardService';
 import { DocumentSession } from '../../core/documents/DocumentSession';
 import { EditorStore } from '../../core/store/EditorStore';
 import { PreviewCanvas } from './PreviewCanvas';
@@ -184,6 +189,125 @@ describe('PreviewCanvas rendering and viewport controls', () => {
     expect(second.snapshot().files.get(ENTRY)?.text).toBe(absolute);
     expect(first.history.undoDepth).toBe(0);
     expect(second.history.undoDepth).toBe(0);
+  });
+
+  it('forms a Shift multi-selection once across the pointer-down and click sequence', async () => {
+    const source = [
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+      '  <ui:VisualElement name="parent">',
+      '    <ui:Button name="first" style="position: absolute; left: 0px; top: 0px; width: 40px; height: 20px;" />',
+      '    <ui:Button name="second" style="position: absolute; left: 60px; top: 30px; width: 40px; height: 20px;" />',
+      '  </ui:VisualElement>',
+      '</ui:UXML>',
+    ].join('\n');
+    const adapter = new ControlledPreviewPort('multi', [], false, ['first', 'second']);
+    const session = openSession(adapter, source);
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} />);
+    const field = screen.getByTestId('canvas-field');
+    const first = await screen.findByText('multi first');
+    const second = await screen.findByText('multi second');
+
+    fireEvent.pointerDown(first, { button: 0, pointerId: 31, clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(field, { pointerId: 31, clientX: 10, clientY: 10 });
+    fireEvent.click(first, { detail: 1 });
+    fireEvent.pointerDown(second, { button: 0, pointerId: 32, clientX: 70, clientY: 40, shiftKey: true });
+    fireEvent.pointerUp(field, { pointerId: 32, clientX: 70, clientY: 40, shiftKey: true });
+    fireEvent.click(second, { detail: 1, shiftKey: true });
+
+    expect(session.selectedNodeIds).toEqual([
+      nodeNamed(session.document, 'first'),
+      nodeNamed(session.document, 'second'),
+    ]);
+    expect(store.getSnapshot().selection).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Align top' })).toBeEnabled();
+  });
+
+  it('discards a deferred paste when the authoritative session changes before clipboard read resolves', async () => {
+    const sourceAdapter = new ControlledPreviewPort('clipboard source', []);
+    const sourceSession = openSession(sourceAdapter);
+    const sourceNode = findNode(sourceSession.document.root, nodeNamed(sourceSession.document, 'target'));
+    if (sourceNode === null) throw new Error('Missing clipboard source node.');
+    const copied = new ClipboardService().copy(sourceSession, [sourceNode]);
+    expect(copied.ok).toBe(true);
+    if (!copied.ok) return;
+
+    let resolveRead!: (items: readonly ClipboardItemLike[]) => void;
+    const read = vi.fn(() => new Promise<readonly ClipboardItemLike[]>((resolve) => { resolveRead = resolve; }));
+    const clipboardPort: ClipboardPort = { write: vi.fn(), read };
+    const firstAdapter = new ControlledPreviewPort('stale paste session', []);
+    const first = openSession(firstAdapter);
+    const secondAdapter = new ControlledPreviewPort('current paste session', []);
+    secondAdapter.parseDiagnostics = [diagnostic('current paste diagnostic', 'parse')];
+    const second = openSession(secondAdapter);
+    const store = new EditorStore({ session: first });
+    render(<PreviewCanvas store={store} clipboardPort={clipboardPort} />);
+    await screen.findByText('stale paste session preview');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste' }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    act(() => store.dispatch({ type: 'context/set', session: second, host: null }));
+    await screen.findByText('current paste session preview');
+    await waitFor(() => expect(store.getSnapshot().diagnostics.map((item) => item.message)).toEqual([
+      'current paste diagnostic',
+    ]));
+    await act(async () => {
+      resolveRead([copied.item]);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    expect(first.snapshot().files.get(ENTRY)?.text).toBe(UXML);
+    expect(second.snapshot().files.get(ENTRY)?.text).toBe(UXML);
+    expect(first.history.undoDepth).toBe(0);
+    expect(second.history.undoDepth).toBe(0);
+    expect(store.getSnapshot().diagnostics.map((item) => item.message)).toEqual(['current paste diagnostic']);
+  });
+
+  it('re-reads the injected clipboard port after Copy and pastes its newest successful item', async () => {
+    const externalSource = UXML.replace('name="target" text="Choose"', 'name="external" text="External"');
+    const externalSession = openSession(new ControlledPreviewPort('external clipboard', []), externalSource);
+    const externalNode = findNode(externalSession.document.root, nodeNamed(externalSession.document, 'external'));
+    if (externalNode === null) throw new Error('Missing external clipboard node.');
+    const external = new ClipboardService().copy(externalSession, [externalNode]);
+    expect(external.ok).toBe(true);
+    if (!external.ok) return;
+    const clipboardPort: ClipboardPort = {
+      write: vi.fn(async () => undefined),
+      read: vi.fn(async () => [external.item]),
+    };
+    const adapter = new ControlledPreviewPort('current clipboard', []);
+    const session = openSession(adapter);
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} clipboardPort={clipboardPort} />);
+    fireEvent.click(await screen.findByText('current clipboard preview'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy selection' }));
+    await waitFor(() => expect(clipboardPort.write).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Paste' }));
+
+    await waitFor(() => expect(clipboardPort.read).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(session.snapshot().files.get(ENTRY)?.text).toContain('name="external"'));
+    expect(session.snapshot().files.get(ENTRY)?.text).not.toContain('name="target-copy"');
+  });
+
+  it('attempts the current clipboard read and uses the local copy only when that read fails', async () => {
+    const clipboardPort: ClipboardPort = {
+      write: vi.fn(async () => { throw new Error('clipboard write denied'); }),
+      read: vi.fn(async () => { throw new Error('clipboard read denied'); }),
+    };
+    const adapter = new ControlledPreviewPort('clipboard fallback', []);
+    const session = openSession(adapter);
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} clipboardPort={clipboardPort} />);
+    fireEvent.click(await screen.findByText('clipboard fallback preview'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy selection' }));
+    await waitFor(() => expect(clipboardPort.write).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Paste' }));
+
+    await waitFor(() => expect(clipboardPort.read).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(session.snapshot().files.get(ENTRY)?.text).toContain('name="target-copy"'));
+    expect(session.history.undoDepth).toBe(1);
   });
 
   it('keeps renderer dimensions fixed while zoom transforms only the outer surface', async () => {
@@ -545,7 +669,7 @@ class ControlledPreviewPort implements UxmlPreviewPort {
     private readonly label: string,
     private readonly events: string[],
     private readonly deferred = false,
-    private readonly targetName: string | null = 'target',
+    private readonly targetName: string | null | readonly string[] = 'target',
   ) {}
 
   get pendingCount(): number {
@@ -604,21 +728,38 @@ class ControlledPreviewPort implements UxmlPreviewPort {
 
   private createFrame(parsed: ParsedPreviewDocument, container: HTMLElement): PreviewFrame {
     const parentId = nodeNamed(parsed, 'parent');
-    const targetId = this.targetName === null ? nodeWithoutName(parsed) : nodeNamedOrFirstChild(parsed, this.targetName);
     const parent = document.createElement('div');
-    const target = document.createElement('button');
-    const generated = document.createElement('span');
-    generated.textContent = `${this.label} preview`;
-    target.append(generated);
-    parent.append(target);
+    const targetNames = typeof this.targetName === 'string' || this.targetName === null
+      ? [this.targetName]
+      : this.targetName;
+    const targets = targetNames.map((targetName, index) => {
+      const targetId = targetName === null ? nodeWithoutName(parsed) : nodeNamedOrFirstChild(parsed, targetName);
+      const target = document.createElement('button');
+      const generated = document.createElement('span');
+      generated.textContent = targetNames.length === 1 ? `${this.label} preview` : `${this.label} ${targetName}`;
+      target.append(generated);
+      parent.append(target);
+      return { target, targetId, index };
+    });
     container.append(parent);
-    const nodes = new Map<Element, EditorNodeId>([[parent, parentId], [target, targetId]]);
+    const nodes = new Map<Element, EditorNodeId>([
+      [parent, parentId],
+      ...targets.map(({ target, targetId }) => [target, targetId] as const),
+    ]);
     let disposed = false;
     return {
-      elements: new Map<EditorNodeId, HTMLElement>([[parentId, parent], [targetId, target]]),
+      elements: new Map<EditorNodeId, HTMLElement>([
+        [parentId, parent],
+        ...targets.map(({ target, targetId }) => [targetId, target] as const),
+      ]),
       boxes: new Map([
         [parentId, { left: 8, top: 12, width: 180, height: 96 }],
-        [targetId, { left: 24, top: 36, width: 90, height: 28 }],
+        ...targets.map(({ targetId, index }) => [
+          targetId,
+          targetNames.length === 1
+            ? { left: 24, top: 36, width: 90, height: 28 }
+            : { left: 24 + (index * 60), top: 36 + (index * 30), width: 40, height: 20 },
+        ] as const),
       ]),
       diagnostics: [...this.renderDiagnostics],
       nodeForElement: (element) => nodes.get(element) ?? null,

@@ -40,7 +40,7 @@ import type {
 import type { EditorStore } from '../../core/store/EditorStore';
 import type { DocumentSession } from '../../core/documents/DocumentSession';
 import type { ElementLocator } from '../../core/documents/ElementLocator';
-import { ClipboardService, type ClipboardItemLike, type ClipboardPort } from '../../core/commands/ClipboardService';
+import type { ClipboardPort } from '../../core/commands/ClipboardService';
 import {
   layoutCommands,
   type Alignment,
@@ -51,6 +51,7 @@ import {
 import { CanvasOverlay } from './CanvasOverlay';
 import { CanvasInteractionLayer } from './CanvasInteractionLayer';
 import { ManipulationController, type SnapGuide } from './ManipulationController';
+import { useCanvasClipboard } from './useCanvasClipboard';
 import { ViewportModel } from './ViewportModel';
 
 export interface PreviewCanvasProps {
@@ -99,11 +100,6 @@ export function PreviewCanvas({
   const stateSessionRef = useRef<DocumentSession | null>(session);
   const panGestureRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const manipulationRef = useRef<{ pointerId: number; controller: ManipulationController } | null>(null);
-  const clipboardItemRef = useRef<ClipboardItemLike | null>(null);
-  const clipboardService = useMemo(
-    () => new ClipboardService(clipboardPort ?? browserClipboardPort()),
-    [clipboardPort],
-  );
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [panelSize, setPanelSize] = useState<PreviewSize>(DEFAULT_PANEL_SIZE);
   const [widthDraft, setWidthDraft] = useState(String(DEFAULT_PANEL_SIZE.width));
@@ -142,6 +138,14 @@ export function PreviewCanvas({
   const stateControlDescription = selectedNodeId !== null && selectedSelector === null
     ? 'A unique authored name is required for pseudo states.'
     : null;
+  const clipboard = useCanvasClipboard({
+    store,
+    session,
+    selectedNodes,
+    clipboardPort,
+    onDiagnostic: setInteractionDiagnostic,
+    onCommit: syncAfterMutation,
+  });
 
   useEffect(() => {
     if (stateSessionRef.current === session) return;
@@ -226,6 +230,7 @@ export function PreviewCanvas({
   };
 
   const selectRenderedElement = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.detail !== 0) return;
     if (session === null) return;
     const nodeId = nodeForTarget(event.target);
     if (nodeId === null) return;
@@ -370,36 +375,6 @@ export function PreviewCanvas({
     executeLayout(layoutCommands.order(session, selectedNodes, destination));
   };
 
-  const copySelection = async () => {
-    if (session === null || selectedNodes.length === 0) return;
-    const copied = clipboardService.copy(session, selectedNodes);
-    if (!copied.ok) {
-      setInteractionDiagnostic(copied.diagnostic.message);
-      return;
-    }
-    clipboardItemRef.current = copied.item;
-    const written = await clipboardService.writeCopy(session, selectedNodes);
-    setInteractionDiagnostic(written.ok || written.diagnostic.code === 'CLIPBOARD_IO_FAILED'
-      ? null
-      : written.diagnostic.message);
-  };
-
-  const pasteSelection = async () => {
-    if (session === null) return;
-    const parent = selectedNodes[0] ?? session.document.root;
-    const locator = session.locatorFor(parent.id);
-    if (locator === null) return;
-    const result = clipboardItemRef.current === null
-      ? await clipboardService.readPaste(session, locator, parent.children.length)
-      : await clipboardService.paste(session, locator, parent.children.length, clipboardItemRef.current);
-    executeClipboard(result);
-  };
-
-  const duplicateSelection = async () => {
-    if (session === null || selectedNodes.length === 0) return;
-    executeClipboard(await clipboardService.duplicate(session, selectedNodes));
-  };
-
   const toggleState = (state: PseudoState) => {
     if (session === null || selectedLocator === null || selectedStateKey === null || selectedSelector === null) return;
     setPseudoStateStore((current) => {
@@ -456,9 +431,9 @@ export function PreviewCanvas({
         <div className="canvas-command-group" role="group" aria-label="Ordering and clipboard commands">
           <CommandButton label="Bring to front" disabled={selectedNodes.length === 0} onClick={() => orderSelection('front')}><BringToFront /></CommandButton>
           <CommandButton label="Send to back" disabled={selectedNodes.length === 0} onClick={() => orderSelection('back')}><SendToBack /></CommandButton>
-          <CommandButton label="Copy selection" disabled={selectedNodes.length === 0} onClick={() => { void copySelection(); }}><Copy /></CommandButton>
-          <CommandButton label="Paste" disabled={session === null} onClick={() => { void pasteSelection(); }}><ClipboardPaste /></CommandButton>
-          <CommandButton label="Duplicate selection" disabled={selectedNodes.length === 0} onClick={() => { void duplicateSelection(); }}><CopyPlus /></CommandButton>
+          <CommandButton label="Copy selection" disabled={selectedNodes.length === 0} onClick={() => { void clipboard.copy(); }}><Copy /></CommandButton>
+          <CommandButton label="Paste" disabled={session === null} onClick={() => { void clipboard.paste(); }}><ClipboardPaste /></CommandButton>
+          <CommandButton label="Duplicate selection" disabled={selectedNodes.length === 0} onClick={() => { void clipboard.duplicate(); }}><CopyPlus /></CommandButton>
         </div>
         <label className="canvas-check canvas-check--safe">
           <input type="checkbox" checked={showSafeArea} onChange={(event) => setShowSafeArea(event.target.checked)} />
@@ -557,28 +532,15 @@ export function PreviewCanvas({
     }
   }
 
-  function executeClipboard(result: Awaited<ReturnType<ClipboardService['paste']>>) {
-    if (session === null) return;
-    if (!result.ok) {
-      setInteractionDiagnostic(result.diagnostic.message);
-      return;
-    }
-    try {
-      session.history.execute(result.transaction);
-      setInteractionDiagnostic(null);
-      syncAfterMutation();
-    } catch (error) {
-      setInteractionDiagnostic(errorMessage(error));
-    }
-  }
-
-  function syncAfterMutation() {
-    if (session === null) return;
+  function syncAfterMutation(authoritativeSession: DocumentSession | null = session) {
+    if (authoritativeSession === null || store.getSnapshot().session !== authoritativeSession) return;
     store.dispatch({ type: 'session/sync' });
     const currentFrame = frameRef.current;
     store.dispatch({
       type: 'diagnostics/set',
-      diagnostics: currentFrame === null ? session.diagnostics : [...session.diagnostics, ...currentFrame.diagnostics],
+      diagnostics: currentFrame === null
+        ? authoritativeSession.diagnostics
+        : [...authoritativeSession.diagnostics, ...currentFrame.diagnostics],
     });
   }
 
@@ -631,31 +593,6 @@ function arrowDelta(key: string): { readonly x: number; readonly y: number } | n
   if (key === 'ArrowUp') return { x: 0, y: -1 };
   if (key === 'ArrowDown') return { x: 0, y: 1 };
   return null;
-}
-
-function browserClipboardPort(): ClipboardPort | undefined {
-  if (
-    typeof navigator === 'undefined'
-    || navigator.clipboard === undefined
-    || typeof navigator.clipboard.write !== 'function'
-    || typeof navigator.clipboard.read !== 'function'
-    || typeof ClipboardItem === 'undefined'
-  ) return undefined;
-  return {
-    write: async (items) => {
-      const browserItems: ClipboardItem[] = [];
-      for (const item of items) {
-        const data: Record<string, Blob> = {};
-        for (const type of item.types) {
-          const blob = await item.getType(type);
-          data[type] = blob instanceof Blob ? blob : new Blob([await blob.text()], { type });
-        }
-        browserItems.push(new ClipboardItem(data));
-      }
-      await navigator.clipboard.write(browserItems);
-    },
-    read: async () => navigator.clipboard.read(),
-  };
 }
 
 function narrowStateSelector(root: EditorElement, target: EditorNodeId): string | null {

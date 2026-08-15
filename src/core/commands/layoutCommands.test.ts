@@ -148,6 +148,37 @@ describe('layoutCommands', () => {
       diagnostic: expect.objectContaining({ code: 'AMBIGUOUS_LAYOUT_WRITE' }),
     });
   });
+
+  it('refuses differing values that resolve to the same winning USS declaration', () => {
+    const ussPath = 'Assets/UI/shared.uss';
+    const source = [
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+      '  <Style src="shared.uss" />',
+      '  <ui:VisualElement name="a" class="shared" />',
+      '  <ui:VisualElement name="b" class="shared" />',
+      '</ui:UXML>',
+    ].join('\n');
+    const stylesheet = '.shared { position: absolute; left: 0px; top: 0px; }';
+    const session = DocumentSession.open(new Map([
+      [entryPath, source],
+      [ussPath, stylesheet],
+    ]), entryPath, new UxmlPreviewAdapter());
+    const nodes = ['a', 'b'].map((name) => elementNamed(session.document.root, name));
+    const boxes = new Map([
+      [nodes[0].id, { left: 0, top: 0, width: 10, height: 10 }],
+      [nodes[1].id, { left: 80, top: 0, width: 20, height: 10 }],
+    ]);
+
+    const result = layoutCommands.align(session, nodes, 'horizontal-center', previewFrame(boxes));
+
+    expect(result).toEqual({
+      ok: false,
+      diagnostic: expect.objectContaining({ code: 'AMBIGUOUS_LAYOUT_WRITE' }),
+    });
+    expect(session.snapshot().files.get(ussPath)?.text).toBe(stylesheet);
+    expect(session.snapshot().files.get(entryPath)?.text).toBe(source);
+    expect(session.history.undoDepth).toBe(0);
+  });
 });
 
 function frameFor(nodes: readonly EditorElement[]): PreviewFrame {
@@ -156,9 +187,13 @@ function frameFor(nodes: readonly EditorElement[]): PreviewFrame {
     ['b', { left: 30, top: 20, width: 10, height: 10 }],
     ['c', { left: 100, top: 40, width: 10, height: 10 }],
   ]);
+  return previewFrame(new Map(nodes.map((node) => [node.id, positions.get(authoredName(node))!])));
+}
+
+function previewFrame(boxes: PreviewFrame['boxes']): PreviewFrame {
   return {
     elements: new Map(),
-    boxes: new Map(nodes.map((node) => [node.id, positions.get(authoredName(node))!])),
+    boxes,
     diagnostics: [],
     nodeForElement: () => null,
     dispose: () => undefined,

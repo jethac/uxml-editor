@@ -17,6 +17,11 @@ export interface StyleWrite {
   readonly value: number;
 }
 
+interface PlannedStyleWrite {
+  readonly write: StyleWrite;
+  readonly value: string;
+}
+
 export function planStyleWrites(
   session: DocumentSession,
   writes: readonly StyleWrite[],
@@ -24,6 +29,8 @@ export function planStyleWrites(
   options: LayoutCommandOptions,
 ): LayoutCommandResult {
   try {
+    const preflight = preflightStyleWrites(session, writes);
+    if (!preflight.ok) return preflight;
     const before = session.snapshot();
     const shadow = DocumentSession.open(
       new Map([...before.files].map(([path, buffer]) => [path, buffer.text])),
@@ -34,13 +41,12 @@ export function planStyleWrites(
       path,
       new SequentialPatchComposer(buffer.text),
     ]));
-    for (const write of writes) {
+    for (const { write, value } of preflight.writes) {
       const nodeId = resolveElementLocator(shadow.document.root, write.locator);
       const node = nodeId === null ? null : findElement(shadow.document.root, nodeId);
       if (node === null) return ambiguous('A layout target no longer resolves uniquely.');
       const target = chooseWriteTarget(shadow, node, write.property);
       if (!target.ok) return target;
-      const value = `${formatNumber(write.value)}px`;
       const transaction = target.target.kind === 'rule'
         ? setDeclaration(shadow, target.target, value)
         : setInlineStyle(shadow, target.target, value);
@@ -71,6 +77,42 @@ export function planStyleWrites(
       ? error.message
       : 'The authored layout target could not be changed safely.');
   }
+}
+
+function preflightStyleWrites(
+  session: DocumentSession,
+  writes: readonly StyleWrite[],
+): LayoutCommandFailure | { readonly ok: true; readonly writes: readonly PlannedStyleWrite[] } {
+  const valueByTarget = new Map<string, string>();
+  const planned: PlannedStyleWrite[] = [];
+  for (const write of writes) {
+    const nodeId = resolveElementLocator(session.document.root, write.locator);
+    const node = nodeId === null ? null : findElement(session.document.root, nodeId);
+    if (node === null) return ambiguous('A layout target no longer resolves uniquely.');
+    const target = chooseWriteTarget(session, node, write.property);
+    if (!target.ok) return target;
+    const value = `${formatNumber(write.value)}px`;
+    const key = exactWriteTargetKey(target.target);
+    const previous = valueByTarget.get(key);
+    if (previous !== undefined && previous !== value) {
+      return ambiguous('Selected elements require different values through one exact authored layout target.', node.id);
+    }
+    if (previous === value) continue;
+    valueByTarget.set(key, value);
+    planned.push(Object.freeze({ write, value }));
+  }
+  return Object.freeze({ ok: true, writes: Object.freeze(planned) });
+}
+
+function exactWriteTargetKey(target: Exclude<StyleTarget, { kind: 'new-rule' }>): string {
+  if (target.kind === 'rule') {
+    const source = target.declarationSource ?? target.ruleSource;
+    return JSON.stringify(['rule', target.path, target.property, source.start, source.end]);
+  }
+  const source = target.declarationSource ?? target.attributeSource;
+  return source === null
+    ? JSON.stringify(['inline-new', target.path, target.property, target.authoredNodeId])
+    : JSON.stringify(['inline', target.path, target.property, source.start, source.end]);
 }
 
 export function computedPixels(

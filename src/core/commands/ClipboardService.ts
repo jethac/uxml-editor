@@ -3,7 +3,8 @@ import { DocumentSession } from '../documents/DocumentSession';
 import { resolveElementLocator, type ElementLocator } from '../documents/ElementLocator';
 import { normalizeEditorTransaction, type EditorTransaction } from './EditorTransaction';
 import { escapeXmlAttributeValue, readXmlAttributeLexeme } from './xmlFormatting';
-import { insertElement } from './uxmlCommands';
+import { insertElement, setAttribute } from './uxmlCommands';
+import { namespaceBindingsAt } from './uxmlNamespaces';
 import { outerEnd } from './uxmlSourceSpans';
 import {
   createClipboardItem,
@@ -42,6 +43,10 @@ export type ClipboardCopyResult =
 
 export type ClipboardPasteResult =
   | { readonly ok: true; readonly transaction: EditorTransaction }
+  | { readonly ok: false; readonly diagnostic: ClipboardDiagnostic };
+
+export type ClipboardReadResult =
+  | { readonly ok: true; readonly item: ClipboardItemLike }
   | { readonly ok: false; readonly diagnostic: ClipboardDiagnostic };
 
 export class ClipboardService {
@@ -118,9 +123,16 @@ export class ClipboardService {
     }
     try {
       const occupied = authoredNames(session.document.root);
+      const destinationBindings = namespaceBindingsAt(session.document.root, parent);
       const fragments: string[] = [];
       for (const fragment of decoded.payload.fragments) {
-        const transformed = transformFragment(session, decoded.payload, fragment, occupied);
+        const transformed = transformFragment(
+          session,
+          decoded.payload,
+          fragment,
+          occupied,
+          destinationBindings,
+        );
         if (!transformed.ok) return transformed;
         fragments.push(transformed.source);
       }
@@ -149,16 +161,28 @@ export class ClipboardService {
     session: DocumentSession,
     parentLocator: ElementLocator,
     index: number,
+    fallbackItem?: ClipboardItemLike,
   ): Promise<ClipboardPasteResult> {
-    if (this.port === undefined) return pasteFailure('CLIPBOARD_IO_FAILED', 'No clipboard read integration is available.');
+    const read = await this.readItem(fallbackItem);
+    return read.ok ? this.paste(session, parentLocator, index, read.item) : read;
+  }
+
+  async readItem(fallbackItem?: ClipboardItemLike): Promise<ClipboardReadResult> {
+    if (this.port === undefined) {
+      return fallbackItem === undefined
+        ? pasteFailure('CLIPBOARD_IO_FAILED', 'No clipboard read integration is available.')
+        : Object.freeze({ ok: true, item: fallbackItem });
+    }
     try {
       const items = await this.port.read();
       const item = items.find((candidate) => candidate.types.includes(UXML_FRAGMENT_MIME));
       return item === undefined
         ? pasteFailure('INVALID_CLIPBOARD_FRAGMENT', 'The clipboard has no UXML editor fragment data.')
-        : this.paste(session, parentLocator, index, item);
+        : Object.freeze({ ok: true, item });
     } catch (error) {
-      return pasteFailure('CLIPBOARD_IO_FAILED', errorMessage(error, 'Clipboard read failed.'));
+      return fallbackItem === undefined
+        ? pasteFailure('CLIPBOARD_IO_FAILED', errorMessage(error, 'Clipboard read failed.'))
+        : Object.freeze({ ok: true, item: fallbackItem });
     }
   }
 
@@ -184,6 +208,7 @@ function transformFragment(
   payload: UxmlClipboardPayload,
   fragment: ClipboardFragment,
   occupied: Set<string>,
+  destinationBindings: ReadonlyMap<string, string>,
 ): { readonly ok: true; readonly source: string } | { readonly ok: false; readonly diagnostic: ClipboardDiagnostic } {
   try {
     const attributes = fragment.namespaces
@@ -202,10 +227,27 @@ function transformFragment(
       || outerEnd(wrapper, child) !== prefix.length + fragment.source.length
       || parsed.diagnostics.some((diagnostic) => diagnostic.kind === 'malformed')
     ) return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', 'A clipboard fragment must be exactly one structurally valid XML element.');
+    const namespaces = requiredInheritedNamespaces(child, fragment.namespaces, destinationBindings);
+    if (!namespaces.ok) return namespaces;
+    const childLocator = parsed.locatorFor(child.id);
+    if (childLocator === null) {
+      return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', 'A clipboard fragment root has no stable structural locator.');
+    }
+    for (const namespace of namespaces.missing) {
+      parsed.history.execute(setAttribute(parsed, childLocator, namespace.name, namespace.value));
+    }
+
+    const transformedWrapper = parsed.snapshot().files.get(payload.sourcePath)?.text;
+    const transformedChild = parsed.document.root.children.length === 1 ? parsed.document.root.children[0] : null;
+    if (transformedWrapper === undefined || transformedChild === null) {
+      return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', 'A clipboard fragment namespace transform lost its structural boundary.');
+    }
+    const fragmentStart = transformedChild.spans.openTag.start;
+    const fragmentEnd = outerEnd(transformedWrapper, transformedChild);
     const patches: { readonly start: number; readonly end: number; readonly replacement: string }[] = [];
-    for (const element of walk(child)) {
+    for (const element of walk(transformedChild)) {
       for (const attribute of element.attributes.filter((candidate) => candidate.name === 'name')) {
-        const lexeme = readXmlAttributeLexeme(wrapper, attribute.source);
+        const lexeme = readXmlAttributeLexeme(transformedWrapper, attribute.source);
         if (lexeme === null || lexeme.name !== 'name') {
           return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', 'A copied name attribute has no exact quoted source boundary.');
         }
@@ -213,14 +255,14 @@ function transformFragment(
         occupied.add(renamed);
         if (renamed !== attribute.value) {
           patches.push({
-            start: lexeme.valueStart - prefix.length,
-            end: lexeme.valueEnd - prefix.length,
+            start: lexeme.valueStart - fragmentStart,
+            end: lexeme.valueEnd - fragmentStart,
             replacement: escapeXmlAttributeValue(renamed, lexeme.quote),
           });
         }
       }
     }
-    let source = fragment.source;
+    let source = transformedWrapper.slice(fragmentStart, fragmentEnd);
     for (const patch of patches.sort((left, right) => right.start - left.start)) {
       source = source.slice(0, patch.start) + patch.replacement + source.slice(patch.end);
     }
@@ -228,6 +270,66 @@ function transformFragment(
   } catch (error) {
     return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', errorMessage(error, 'A clipboard fragment could not be parsed structurally.'));
   }
+}
+
+function requiredInheritedNamespaces(
+  root: EditorElement,
+  metadata: readonly ClipboardNamespace[],
+  destinationBindings: ReadonlyMap<string, string>,
+):
+  | { readonly ok: true; readonly missing: readonly ClipboardNamespace[] }
+  | { readonly ok: false; readonly diagnostic: ClipboardDiagnostic } {
+  const byPrefix = new Map(metadata.map((namespace) => [namespacePrefix(namespace.name), namespace]));
+  const required = new Set<string>();
+  collectInheritedNamespacePrefixes(root, new Set(), byPrefix, required);
+  const missing: ClipboardNamespace[] = [];
+  for (const prefix of required) {
+    const namespace = byPrefix.get(prefix);
+    if (namespace === undefined) {
+      return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', `Namespace metadata is missing for prefix ${prefix || '(default)'}.`);
+    }
+    const destination = destinationBindings.get(prefix);
+    if (destination === undefined) missing.push(namespace);
+    else if (destination !== namespace.value) {
+      return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', `Namespace binding conflict for ${namespace.name}.`);
+    }
+  }
+  return Object.freeze({ ok: true, missing: Object.freeze(missing) });
+}
+
+function collectInheritedNamespacePrefixes(
+  element: EditorElement,
+  inheritedLocalBindings: ReadonlySet<string>,
+  metadata: ReadonlyMap<string, ClipboardNamespace>,
+  required: Set<string>,
+): void {
+  const localBindings = new Set(inheritedLocalBindings);
+  for (const attribute of element.attributes) {
+    if (attribute.name === 'xmlns' || attribute.name.startsWith('xmlns:')) {
+      localBindings.add(namespacePrefix(attribute.name));
+    }
+  }
+  const elementPrefix = qNamePrefix(element.name, true);
+  if (elementPrefix !== null && !localBindings.has(elementPrefix) && metadata.has(elementPrefix)) {
+    required.add(elementPrefix);
+  }
+  for (const attribute of element.attributes) {
+    if (attribute.name === 'xmlns' || attribute.name.startsWith('xmlns:')) continue;
+    const prefix = qNamePrefix(attribute.name, false);
+    if (prefix !== null && !localBindings.has(prefix) && metadata.has(prefix)) required.add(prefix);
+  }
+  for (const child of element.children) {
+    collectInheritedNamespacePrefixes(child, localBindings, metadata, required);
+  }
+}
+
+function namespacePrefix(name: string): string {
+  return name === 'xmlns' ? '' : name.slice('xmlns:'.length);
+}
+
+function qNamePrefix(name: string, useDefault: boolean): string | null {
+  const separator = name.indexOf(':');
+  return separator < 0 ? (useDefault ? '' : null) : name.slice(0, separator);
 }
 
 function combineFragments(
