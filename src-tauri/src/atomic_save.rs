@@ -966,7 +966,7 @@ fn recover_backup(
 
     #[cfg(windows)]
     {
-        let backup = open_recovery_identity_file(directory, backup_name).map_err(|error| {
+        let backup = open_recovery_backup_file(directory, backup_name).map_err(|error| {
             recovery_artifact_io_error(
                 &artifact,
                 "Could not open retained recovery artifact",
@@ -982,7 +982,7 @@ fn recover_backup(
                 )
             })?;
         }
-        match open_recovery_identity_file(directory, target_name) {
+        match open_recovery_target_file(directory, target_name) {
             Ok(target) => {
                 let same_identity = same_file_identity(&backup, &target).map_err(|error| {
                     recovery_artifact_io_error(
@@ -1007,6 +1007,10 @@ fn recover_backup(
                         &error,
                     )
                 })?;
+                // Keep the target's no-delete-share handle live until the delete-pending backup
+                // is closed, then close the target explicitly rather than relying on drop scopes.
+                drop(backup);
+                drop(target);
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1054,7 +1058,7 @@ fn recover_temporary(
 }
 
 #[cfg(windows)]
-fn open_recovery_identity_file(parent: &Dir, name: &Path) -> std::io::Result<CapFile> {
+fn open_recovery_backup_file(parent: &Dir, name: &Path) -> std::io::Result<CapFile> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -1065,6 +1069,30 @@ fn open_recovery_identity_file(parent: &Dir, name: &Path) -> std::io::Result<Cap
         .read(true)
         .access_mode(FILE_GENERIC_READ | DELETE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = parent.open_with(name, &options)?;
+    let attributes = file_attribute_tag_info(&file)?;
+    if windows_file_attributes_are_reparse(attributes.FileAttributes) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "recovery entry is a reparse object",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_recovery_target_file(parent: &Dir, name: &Path) -> std::io::Result<CapFile> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .read(true)
+        .access_mode(FILE_GENERIC_READ)
+        .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     let file = parent.open_with(name, &options)?;
     let attributes = file_attribute_tag_info(&file)?;
@@ -1355,8 +1383,10 @@ mod tests {
     };
     #[cfg(windows)]
     use super::{
-        open_recovery_child_directory, recover_atomic_artifacts_with_target_open_hook,
-        recovery_entry_io_error, recovery_identities_match, windows_file_attributes_are_reparse,
+        mark_cap_file_deleted, open_recovery_backup_file, open_recovery_child_directory,
+        open_recovery_target_file, recover_atomic_artifacts_with_target_open_hook,
+        recovery_entry_io_error, recovery_identities_match, same_file_identity,
+        windows_file_attributes_are_reparse,
     };
     use cap_std::{ambient_authority, fs::Dir};
     use std::{
@@ -1961,6 +1991,43 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn same_identity_cleanup_blocks_target_delete_and_rename_until_backup_is_closed() {
+        let fixture = Fixture::new();
+        let backup_name = ".Main.uxml.uxml-editor-42-17.bak";
+        let target_name = "Main.uxml";
+        let renamed_name = "Main-renamed.uxml";
+        let backup = fixture.write(backup_name, b"sole-original-bytes");
+        let target = fixture.root.join(target_name);
+        let renamed = fixture.root.join(renamed_name);
+        fs::hard_link(&backup, &target).unwrap();
+        let authority = Dir::open_ambient_dir(&fixture.root, ambient_authority()).unwrap();
+        let backup_handle =
+            open_recovery_backup_file(&authority, std::path::Path::new(backup_name)).unwrap();
+        let target_handle =
+            open_recovery_target_file(&authority, std::path::Path::new(target_name)).unwrap();
+        assert!(same_file_identity(&backup_handle, &target_handle).unwrap());
+
+        let rename_result = fs::rename(&target, &renamed);
+        if rename_result.is_ok() {
+            fs::rename(&renamed, &target).unwrap();
+        }
+        let delete_result = fs::remove_file(&target);
+        if delete_result.is_ok() {
+            fs::hard_link(&backup, &target).unwrap();
+        }
+
+        assert_eq!(rename_result.unwrap_err().raw_os_error(), Some(32));
+        assert_eq!(delete_result.unwrap_err().raw_os_error(), Some(32));
+        mark_cap_file_deleted(&backup_handle).unwrap();
+        drop(backup_handle);
+        assert!(!backup.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"sole-original-bytes");
+        drop(target_handle);
+        assert_eq!(fs::read(&target).unwrap(), b"sole-original-bytes");
     }
 
     struct Fixture {

@@ -409,3 +409,22 @@ Task 15 intentionally does not implement the complete file workflow or unified `
 
 - Native UI automation was not available in this session, so the real directory picker, menu clicks, and Save/Discard/Cancel dialog were not driven interactively. The release executable/window smoke passed, and command fixtures plus injected frontend/Rust boundary tests cover those behaviors.
 - Vite reports the existing large-chunk advisory for the approximately 828 kB editor bundle; the build succeeds and Task 15 does not add a new UI chunking boundary.
+
+## Breaker-Exception Addendum
+
+The authorized breaker-exception fix closes the final two round-5 findings.
+Same-identity recovery now opens the backup with read/delete and read/delete
+sharing, opens the target read-only with read sharing only, retains no-follow
+attribute and full `FILE_ID_INFO` checks, and explicitly closes the
+delete-pending backup before the still-live target. A deterministic hard-link
+test proves target delete and rename return sharing violation 32 and only the
+backup name disappears.
+
+Replacement support now additionally requires an exact successful
+`NtQueryVolumeInformationFile(FileFsDeviceInformation)` result from the same
+selected-root handle, with neither `FILE_REMOTE_DEVICE` nor
+`FILE_REMOTE_DEVICE_VSMB`. Only affirmative local NTFS reports
+`best-effort-safe-write`; failed, incomplete, malformed, remote, ReFS, unknown,
+or invalid filesystem evidence reports `unsupported` before mutation. The sole
+capability remains exactly event listen/unlisten; the older capability summary
+above that mentions window-close authority is superseded by this final state.

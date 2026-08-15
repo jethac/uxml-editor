@@ -366,6 +366,8 @@ mod tests {
         let grant = selected["grant"].as_str().unwrap();
         assert!(grant.starts_with("grant:v1:"));
         assert_eq!(grant.len(), "grant:v1:".len() + 16);
+        #[cfg(windows)]
+        assert_eq!(selected["atomicReplace"], "best-effort-safe-write");
     }
 
     #[test]

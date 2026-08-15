@@ -378,7 +378,8 @@ impl ScopedProjects {
 #[cfg(windows)]
 fn atomic_replace_support(authority: &Dir) -> AtomicReplaceSupport {
     let filesystem = filesystem_name_from_handle(authority);
-    atomic_replace_capability_from_filesystem(filesystem.as_deref())
+    let device = volume_device_query_evidence(authority);
+    atomic_replace_capability_from_volume_evidence(filesystem.as_deref(), device)
 }
 
 #[cfg(not(windows))]
@@ -386,13 +387,99 @@ fn atomic_replace_support(_authority: &Dir) -> AtomicReplaceSupport {
     AtomicReplaceSupport::Unsupported
 }
 
+#[cfg(test)]
 fn atomic_replace_capability_from_filesystem(filesystem: Option<&str>) -> AtomicReplaceSupport {
-    #[cfg(windows)]
-    if filesystem.is_some_and(|name| name.eq_ignore_ascii_case("NTFS")) {
-        return AtomicReplaceSupport::BestEffortSafeWrite;
-    }
     let _ = filesystem;
     AtomicReplaceSupport::Unsupported
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeQueryStatus {
+    Succeeded,
+    Failed(u32),
+    Incomplete(u32),
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VolumeDeviceQueryEvidence {
+    query_status: NativeQueryStatus,
+    completion_status: NativeQueryStatus,
+    bytes_returned: usize,
+    characteristics: u32,
+}
+
+#[cfg(windows)]
+fn atomic_replace_capability_from_volume_evidence(
+    filesystem: Option<&str>,
+    device: VolumeDeviceQueryEvidence,
+) -> AtomicReplaceSupport {
+    use std::mem;
+    use windows_sys::Wdk::System::SystemServices::{
+        FILE_FS_DEVICE_INFORMATION, FILE_REMOTE_DEVICE, FILE_REMOTE_DEVICE_VSMB,
+    };
+
+    let exact_device_information = mem::size_of::<FILE_FS_DEVICE_INFORMATION>();
+    let local = device.query_status == NativeQueryStatus::Succeeded
+        && device.completion_status == NativeQueryStatus::Succeeded
+        && device.bytes_returned == exact_device_information
+        && device.characteristics & (FILE_REMOTE_DEVICE | FILE_REMOTE_DEVICE_VSMB) == 0;
+    if local && filesystem.is_some_and(|name| name.eq_ignore_ascii_case("NTFS")) {
+        AtomicReplaceSupport::BestEffortSafeWrite
+    } else {
+        AtomicReplaceSupport::Unsupported
+    }
+}
+
+#[cfg(windows)]
+fn volume_device_query_evidence(authority: &Dir) -> VolumeDeviceQueryEvidence {
+    use std::{mem, os::windows::io::AsRawHandle};
+    use windows_sys::{
+        Wdk::{
+            Storage::FileSystem::{FileFsDeviceInformation, NtQueryVolumeInformationFile},
+            System::SystemServices::FILE_FS_DEVICE_INFORMATION,
+        },
+        Win32::System::IO::IO_STATUS_BLOCK,
+    };
+
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let mut information = FILE_FS_DEVICE_INFORMATION::default();
+    // SAFETY: both output structures have the exact windows-sys ABI, remain writable for the
+    // synchronous query, and the selected-root authority handle remains live for the call.
+    let query_status = unsafe {
+        NtQueryVolumeInformationFile(
+            authority.as_raw_handle(),
+            &raw mut io_status,
+            (&raw mut information).cast(),
+            mem::size_of::<FILE_FS_DEVICE_INFORMATION>() as u32,
+            FileFsDeviceInformation,
+        )
+    };
+    // SAFETY: the union was zero-initialized and remains live. The classifier rejects this field
+    // unless the query status and exact returned-byte count also establish a completed result.
+    let completion_status = unsafe { io_status.Anonymous.Status };
+    VolumeDeviceQueryEvidence {
+        query_status: native_query_status(query_status),
+        completion_status: native_query_status(completion_status),
+        bytes_returned: io_status.Information,
+        characteristics: information.Characteristics,
+    }
+}
+
+#[cfg(windows)]
+fn native_query_status(status: windows_sys::Win32::Foundation::NTSTATUS) -> NativeQueryStatus {
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+
+    if status == 0 {
+        NativeQueryStatus::Succeeded
+    } else if status > 0 {
+        NativeQueryStatus::Incomplete(status as u32)
+    } else {
+        // SAFETY: `status` came directly from an NT API/IO_STATUS_BLOCK. This documented
+        // conversion avoids treating an NTSTATUS as a Win32 last-error value.
+        NativeQueryStatus::Failed(unsafe { RtlNtStatusToDosError(status) })
+    }
 }
 
 #[cfg(windows)]
@@ -417,6 +504,11 @@ fn filesystem_name_from_handle(authority: &Dir) -> Option<String> {
     if succeeded == 0 {
         return None;
     }
+    filesystem_name_from_utf16_buffer(&filesystem)
+}
+
+#[cfg(windows)]
+fn filesystem_name_from_utf16_buffer(filesystem: &[u16]) -> Option<String> {
     let length = filesystem.iter().position(|unit| *unit == 0)?;
     String::from_utf16(&filesystem[..length]).ok()
 }
@@ -690,6 +782,11 @@ mod tests {
         atomic_replace_capability_from_filesystem, validate_unique_paths, AtomicReplaceSupport,
         NormalizedRelativePath, ScopedProjects,
     };
+    #[cfg(windows)]
+    use super::{
+        atomic_replace_capability_from_volume_evidence, filesystem_name_from_utf16_buffer,
+        NativeQueryStatus, VolumeDeviceQueryEvidence,
+    };
     use sha2::{Digest, Sha256};
     use std::{
         fs,
@@ -829,10 +926,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn replacement_capability_requires_a_successful_handle_derived_ntfs_classification() {
+    fn replacement_capability_without_affirmative_locality_is_unsupported() {
         assert_eq!(
             atomic_replace_capability_from_filesystem(Some("NTFS")),
-            AtomicReplaceSupport::BestEffortSafeWrite
+            AtomicReplaceSupport::Unsupported
         );
         for filesystem in [None, Some("ReFS"), Some("SMB"), Some(""), Some("unknown")] {
             assert_eq!(
@@ -841,6 +938,139 @@ mod tests {
                 "filesystem: {filesystem:?}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_capability_requires_exact_ntfs_and_affirmative_local_device_evidence() {
+        use std::mem;
+        use windows_sys::Wdk::System::SystemServices::{
+            FILE_FS_DEVICE_INFORMATION, FILE_REMOTE_DEVICE, FILE_REMOTE_DEVICE_VSMB,
+        };
+
+        let local = VolumeDeviceQueryEvidence {
+            query_status: NativeQueryStatus::Succeeded,
+            completion_status: NativeQueryStatus::Succeeded,
+            bytes_returned: mem::size_of::<FILE_FS_DEVICE_INFORMATION>(),
+            characteristics: 0,
+        };
+        assert_eq!(
+            atomic_replace_capability_from_volume_evidence(Some("NTFS"), local),
+            AtomicReplaceSupport::BestEffortSafeWrite
+        );
+        assert_eq!(
+            atomic_replace_capability_from_volume_evidence(Some("ntfs"), local),
+            AtomicReplaceSupport::BestEffortSafeWrite
+        );
+
+        for characteristics in [FILE_REMOTE_DEVICE, FILE_REMOTE_DEVICE_VSMB] {
+            assert_eq!(
+                atomic_replace_capability_from_volume_evidence(
+                    Some("NTFS"),
+                    VolumeDeviceQueryEvidence {
+                        characteristics,
+                        ..local
+                    },
+                ),
+                AtomicReplaceSupport::Unsupported
+            );
+        }
+        for filesystem in [
+            None,
+            Some(""),
+            Some("ReFS"),
+            Some("unknown"),
+            Some("NTFS\0"),
+        ] {
+            assert_eq!(
+                atomic_replace_capability_from_volume_evidence(filesystem, local),
+                AtomicReplaceSupport::Unsupported,
+                "filesystem: {filesystem:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_capability_rejects_failed_short_and_malformed_device_queries() {
+        use std::mem;
+        use windows_sys::Wdk::System::SystemServices::FILE_FS_DEVICE_INFORMATION;
+
+        let exact = mem::size_of::<FILE_FS_DEVICE_INFORMATION>();
+        for evidence in [
+            VolumeDeviceQueryEvidence {
+                query_status: NativeQueryStatus::Failed(1),
+                completion_status: NativeQueryStatus::Succeeded,
+                bytes_returned: exact,
+                characteristics: 0,
+            },
+            VolumeDeviceQueryEvidence {
+                query_status: NativeQueryStatus::Incomplete(1),
+                completion_status: NativeQueryStatus::Succeeded,
+                bytes_returned: exact,
+                characteristics: 0,
+            },
+            VolumeDeviceQueryEvidence {
+                query_status: NativeQueryStatus::Succeeded,
+                completion_status: NativeQueryStatus::Failed(1),
+                bytes_returned: exact,
+                characteristics: 0,
+            },
+            VolumeDeviceQueryEvidence {
+                query_status: NativeQueryStatus::Succeeded,
+                completion_status: NativeQueryStatus::Succeeded,
+                bytes_returned: exact - 1,
+                characteristics: 0,
+            },
+            VolumeDeviceQueryEvidence {
+                query_status: NativeQueryStatus::Succeeded,
+                completion_status: NativeQueryStatus::Succeeded,
+                bytes_returned: exact + 1,
+                characteristics: 0,
+            },
+        ] {
+            assert_eq!(
+                atomic_replace_capability_from_volume_evidence(Some("NTFS"), evidence),
+                AtomicReplaceSupport::Unsupported
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_manifest_volume_and_selected_root_dto_agree_on_local_ntfs_support() {
+        let fixture = Fixture::new_on_manifest_volume();
+        fixture.write("Main.uxml", "local-ntfs");
+        let authority =
+            cap_std::fs::Dir::open_ambient_dir(&fixture.root, cap_std::ambient_authority())
+                .unwrap();
+        assert_eq!(
+            super::atomic_replace_support(&authority),
+            AtomicReplaceSupport::BestEffortSafeWrite
+        );
+
+        let root = ScopedProjects::default()
+            .grant_selected(&fixture.root)
+            .unwrap();
+        assert_eq!(root.atomic_replace, "best-effort-safe-write");
+        assert_eq!(
+            serde_json::to_value(root).unwrap()["atomicReplace"],
+            "best-effort-safe-write"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn filesystem_name_decoder_rejects_missing_terminators_and_invalid_utf16() {
+        assert_eq!(
+            filesystem_name_from_utf16_buffer(&['N' as u16, 'T' as u16, 'F' as u16, 'S' as u16]),
+            None
+        );
+        assert_eq!(filesystem_name_from_utf16_buffer(&[0xD800, 0]), None);
+        assert_eq!(
+            filesystem_name_from_utf16_buffer(&['N' as u16, 'T' as u16, 'F' as u16, 'S' as u16, 0]),
+            Some("NTFS".to_string())
+        );
     }
 
     #[test]
@@ -1228,6 +1458,20 @@ mod tests {
                 std::process::id(),
                 NEXT_DIR.fetch_add(1, Ordering::Relaxed)
             ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        #[cfg(windows)]
+        fn new_on_manifest_volume() -> Self {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join(format!(
+                    "uxml-editor-live-volume-test-{}-{}",
+                    std::process::id(),
+                    NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+                ));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&root).unwrap();
             Self { root }
