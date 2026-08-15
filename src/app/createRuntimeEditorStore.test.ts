@@ -51,6 +51,22 @@ describe('createRuntimeEditorStore', () => {
     expect(store.getSnapshot().host?.now()).toBe(42);
   });
 
+  it('reuses the exact TauriHost created by runtime bootstrap', () => {
+    const host = new TauriHost({
+      invoke: async () => null,
+      listen: async () => () => undefined,
+      timers: { now: () => 42, setTimeout: () => 1, clearTimeout: () => undefined },
+    });
+    const store = createRuntimeEditorStore({
+      scope: { __TAURI_INTERNALS__: Object.freeze({}) },
+      tauriHost: host,
+      storage: null,
+      viewport: { width: 800, height: 600 },
+    } as never);
+
+    expect(store.getSnapshot().host).toBe(host);
+  });
+
   it('fails closed when Tauri is detected without native bindings', () => {
     expect(() => createRuntimeEditorStore({
       scope: { __TAURI_INTERNALS__: Object.freeze({}) },

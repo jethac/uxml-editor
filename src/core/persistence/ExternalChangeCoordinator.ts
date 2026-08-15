@@ -153,8 +153,15 @@ export class ExternalChangeCoordinator {
     let timer: Disposable | undefined;
     const pendingPaths = new Set<string>();
     const hostWatcher = await this.host.watch(this.root, (event) => {
-      if (disposed || !this.saved.has(event.path.relativePath)) return;
-      pendingPaths.add(event.path.relativePath);
+      if (disposed) return;
+      if (event.kind === 'rescan-required') {
+        for (const path of session().snapshot().files.keys()) {
+          if (this.saved.has(path)) pendingPaths.add(path);
+        }
+      } else {
+        if (!this.saved.has(event.path.relativePath)) return;
+        pendingPaths.add(event.path.relativePath);
+      }
       timer?.dispose();
       timer = this.host.schedule(debounceMs, async () => {
         timer = undefined;

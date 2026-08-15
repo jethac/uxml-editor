@@ -1,9 +1,9 @@
 use crate::error::HostError;
+use cap_std::fs::{Dir, File as CapFile, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -11,9 +11,15 @@ use std::{
     },
 };
 
+#[cfg(not(windows))]
+use std::fs;
+#[cfg(any(test, not(windows)))]
+use std::fs::File;
+
 static REPLACE_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
 pub fn content_revision(path: &Path) -> Result<String, HostError> {
     let mut file = File::open(path).map_err(|error| read_error(path, &error))?;
     let mut bytes = Vec::new();
@@ -23,11 +29,12 @@ pub fn content_revision(path: &Path) -> Result<String, HostError> {
 }
 
 pub fn replace_text_atomically(
-    target: &Path,
+    parent: &Dir,
+    target_name: &Path,
     expected_revision: &str,
     text: &str,
 ) -> Result<String, HostError> {
-    replace_text_atomically_impl(target, expected_revision, text, None)
+    replace_text_atomically_impl(parent, target_name, expected_revision, text, None, None)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,36 +46,76 @@ enum FaultPhase {
 
 #[cfg(test)]
 fn replace_text_atomically_with_fault(
-    target: &Path,
+    parent: &Dir,
+    target_name: &Path,
     expected_revision: &str,
     text: &str,
     fault: FaultPhase,
 ) -> Result<String, HostError> {
-    replace_text_atomically_impl(target, expected_revision, text, Some(fault))
+    replace_text_atomically_impl(
+        parent,
+        target_name,
+        expected_revision,
+        text,
+        Some(fault),
+        None,
+    )
+}
+
+#[cfg(test)]
+fn replace_text_atomically_with_commit_hook(
+    parent: &Dir,
+    target_name: &Path,
+    expected_revision: &str,
+    text: &str,
+    hook: &mut dyn FnMut() -> std::io::Result<()>,
+) -> (Result<String, HostError>, Option<std::io::Result<()>>) {
+    let mut hook_result = None;
+    let mut recording_hook = || {
+        let result = hook();
+        hook_result = Some(result.as_ref().map(|_| ()).map_err(clone_io_error));
+        result
+    };
+    let result = replace_text_atomically_impl(
+        parent,
+        target_name,
+        expected_revision,
+        text,
+        None,
+        Some(&mut recording_hook),
+    );
+    (result, hook_result)
 }
 
 fn replace_text_atomically_impl(
-    target: &Path,
+    parent: &Dir,
+    target_name: &Path,
     expected_revision: &str,
     text: &str,
     #[cfg_attr(not(test), allow(unused_variables))] fault: Option<FaultPhase>,
+    #[cfg_attr(not(test), allow(unused_variables))] before_commit: Option<
+        &mut dyn FnMut() -> std::io::Result<()>,
+    >,
 ) -> Result<String, HostError> {
     let _lock = REPLACE_LOCK
         .lock()
         .map_err(|_| HostError::new("replace-failed", "Atomic replacement lock is unavailable."))?;
-    let parent = target.parent().ok_or_else(|| {
-        HostError::new(
+    if target_name.components().count() != 1 || target_name.file_name().is_none() {
+        return Err(HostError::new(
             "invalid-path",
-            "Replacement target has no parent directory.",
-        )
-    })?;
-    if !target.is_file() {
+            "Replacement target must be one capability-relative file name.",
+        ));
+    }
+    let metadata = parent
+        .symlink_metadata(target_name)
+        .map_err(|error| read_error(target_name, &error))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(HostError::new(
             "not-found",
             "Replacement target does not exist.",
         ));
     }
-    let (mut temporary, temporary_guard) = create_unique_sibling(target)?;
+    let (mut temporary, temporary_guard) = create_unique_cap_sibling(parent, target_name)?;
     temporary.write_all(text.as_bytes()).map_err(|error| {
         HostError::io(
             "replace-failed",
@@ -93,11 +140,26 @@ fn replace_text_atomically_impl(
         ));
     }
 
-    let current_revision = content_revision(target)?;
+    let mut checked_target = open_checked_target(parent, target_name)?;
+    let current_revision = content_revision_from_cap_file(&mut checked_target)?;
     if current_revision != expected_revision {
         return Err(HostError::new(
             "stale-revision",
             "File changed before replacement.",
+        ));
+    }
+
+    #[cfg(test)]
+    if let Some(hook) = before_commit {
+        let _ = hook();
+    }
+
+    let mut commit_target = open_checked_target(parent, target_name)?;
+    let commit_revision = content_revision_from_cap_file(&mut commit_target)?;
+    if commit_revision != expected_revision {
+        return Err(HostError::new(
+            "stale-revision",
+            "File changed during atomic replacement.",
         ));
     }
 
@@ -109,9 +171,18 @@ fn replace_text_atomically_impl(
         ));
     }
 
-    replace_existing_file(target, temporary_guard.path())?;
-    flush_parent_directory(parent)?;
-    let resulting_revision = content_revision(target)?;
+    parent
+        .rename(temporary_guard.path(), parent, target_name)
+        .map_err(|error| {
+            HostError::io(
+                "replace-failed",
+                "Could not atomically replace the capability-relative destination",
+                &error,
+            )
+        })?;
+    flush_cap_parent_directory(parent)?;
+    let mut resulting_file = open_checked_target(parent, target_name)?;
+    let resulting_revision = content_revision_from_cap_file(&mut resulting_file)?;
     let expected_result = revision_for_bytes(text.as_bytes());
     if resulting_revision != expected_result {
         return Err(HostError::new(
@@ -122,14 +193,20 @@ fn replace_text_atomically_impl(
     Ok(resulting_revision)
 }
 
-fn create_unique_sibling(target: &Path) -> Result<(File, TempGuard), HostError> {
-    let parent = target.parent().ok_or_else(|| {
-        HostError::new(
-            "invalid-path",
-            "Replacement target has no parent directory.",
-        )
-    })?;
-    let file_name = target
+#[cfg(test)]
+fn clone_io_error(error: &std::io::Error) -> std::io::Error {
+    if let Some(code) = error.raw_os_error() {
+        std::io::Error::from_raw_os_error(code)
+    } else {
+        std::io::Error::new(error.kind(), error.to_string())
+    }
+}
+
+fn create_unique_cap_sibling<'a>(
+    parent: &'a Dir,
+    target_name: &Path,
+) -> Result<(CapFile, CapTempGuard<'a>), HostError> {
+    let file_name = target_name
         .file_name()
         .ok_or_else(|| HostError::new("invalid-path", "Replacement target has no file name."))?;
     for _ in 0..64 {
@@ -140,9 +217,11 @@ fn create_unique_sibling(target: &Path) -> Result<(File, TempGuard), HostError> 
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ));
-        let path = parent.join(temporary_name);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((file, TempGuard { path })),
+        let path = PathBuf::from(temporary_name);
+        let mut options = CapOpenOptions::new();
+        options.write(true).create_new(true);
+        match parent.open_with(&path, &options) {
+            Ok(file) => return Ok((file, CapTempGuard { parent, path })),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(HostError::io(
@@ -157,6 +236,48 @@ fn create_unique_sibling(target: &Path) -> Result<(File, TempGuard), HostError> 
         "replace-failed",
         "Could not allocate a unique sibling replacement file.",
     ))
+}
+
+fn open_checked_target(parent: &Dir, target_name: &Path) -> Result<CapFile, HostError> {
+    let mut options = CapOpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+    }
+    parent
+        .open_with(target_name, &options)
+        .map_err(|error| read_error(target_name, &error))
+}
+
+fn content_revision_from_cap_file(file: &mut CapFile) -> Result<String, HostError> {
+    file.rewind()
+        .map_err(|error| HostError::io("read-failed", "Could not seek project file", &error))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| HostError::io("read-failed", "Could not read exact file bytes", &error))?;
+    Ok(revision_for_bytes(&bytes))
+}
+
+#[cfg(not(windows))]
+fn flush_cap_parent_directory(parent: &Dir) -> Result<(), HostError> {
+    parent
+        .try_clone()
+        .and_then(|directory| directory.into_std_file().sync_all())
+        .map_err(|error| {
+            HostError::io(
+                "replace-failed",
+                "Could not flush replacement metadata",
+                &error,
+            )
+        })
+}
+
+#[cfg(windows)]
+fn flush_cap_parent_directory(_parent: &Dir) -> Result<(), HostError> {
+    Ok(())
 }
 
 pub(crate) fn revision_for_bytes(bytes: &[u8]) -> String {
@@ -234,27 +355,31 @@ pub(crate) fn flush_parent_directory(_parent: &Path) -> Result<(), HostError> {
     Ok(())
 }
 
-struct TempGuard {
+struct CapTempGuard<'a> {
+    parent: &'a Dir,
     path: PathBuf,
 }
 
-impl TempGuard {
+impl CapTempGuard<'_> {
     fn path(&self) -> &Path {
         &self.path
     }
 }
 
-impl Drop for TempGuard {
+impl Drop for CapTempGuard<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.parent.remove_file(&self.path);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        content_revision, replace_text_atomically, replace_text_atomically_with_fault, FaultPhase,
+        content_revision, replace_text_atomically as replace_capability_file,
+        replace_text_atomically_with_commit_hook as replace_capability_file_with_commit_hook,
+        replace_text_atomically_with_fault as replace_capability_file_with_fault, FaultPhase,
     };
+    use cap_std::{ambient_authority, fs::Dir};
     use std::{
         fs,
         path::PathBuf,
@@ -265,6 +390,55 @@ mod tests {
     };
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+
+    fn replace_text_atomically(
+        target: &std::path::Path,
+        expected_revision: &str,
+        text: &str,
+    ) -> Result<String, crate::error::HostError> {
+        let parent = Dir::open_ambient_dir(target.parent().unwrap(), ambient_authority()).unwrap();
+        replace_capability_file(
+            &parent,
+            std::path::Path::new(target.file_name().unwrap()),
+            expected_revision,
+            text,
+        )
+    }
+
+    fn replace_text_atomically_with_fault(
+        target: &std::path::Path,
+        expected_revision: &str,
+        text: &str,
+        fault: FaultPhase,
+    ) -> Result<String, crate::error::HostError> {
+        let parent = Dir::open_ambient_dir(target.parent().unwrap(), ambient_authority()).unwrap();
+        replace_capability_file_with_fault(
+            &parent,
+            std::path::Path::new(target.file_name().unwrap()),
+            expected_revision,
+            text,
+            fault,
+        )
+    }
+
+    fn replace_text_atomically_with_commit_hook(
+        target: &std::path::Path,
+        expected_revision: &str,
+        text: &str,
+        hook: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> (
+        Result<String, crate::error::HostError>,
+        Option<std::io::Result<()>>,
+    ) {
+        let parent = Dir::open_ambient_dir(target.parent().unwrap(), ambient_authority()).unwrap();
+        replace_capability_file_with_commit_hook(
+            &parent,
+            std::path::Path::new(target.file_name().unwrap()),
+            expected_revision,
+            text,
+            hook,
+        )
+    }
 
     #[test]
     fn replaces_existing_file_with_exact_crlf_and_unicode_bytes() {
@@ -336,6 +510,36 @@ mod tests {
         );
         let bytes = fs::read(&target).unwrap();
         assert!(bytes == b"first" || bytes == b"second");
+        fixture.assert_no_artifacts();
+    }
+
+    #[test]
+    fn external_writer_in_the_check_to_commit_interval_is_prevented_or_preserved() {
+        let fixture = Fixture::new();
+        let target = fixture.write("Main.uxml", b"original");
+        let observed = content_revision(&target).unwrap();
+        let mut external_write = || fs::write(&target, b"external-writer");
+
+        let (replacement, external) = replace_text_atomically_with_commit_hook(
+            &target,
+            &observed,
+            "editor-replacement",
+            &mut external_write,
+        );
+
+        let external = external.unwrap();
+        #[cfg(not(windows))]
+        assert!(
+            external.is_ok(),
+            "non-Windows replacement does not deny an external writer"
+        );
+        if external.is_ok() {
+            assert_eq!(replacement.unwrap_err().code, "stale-revision");
+            assert_eq!(fs::read(&target).unwrap(), b"external-writer");
+        } else {
+            replacement.unwrap();
+            assert_eq!(fs::read(&target).unwrap(), b"editor-replacement");
+        }
         fixture.assert_no_artifacts();
     }
 

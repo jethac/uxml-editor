@@ -8,13 +8,37 @@ import { App, type AppDesktopPorts } from './App';
 import type { CloseChoice } from '../core/desktop/DesktopLifecycleController';
 
 describe('App desktop integration', () => {
+  it('keeps native file workflow disabled when unbound and reports bridge startup failures', async () => {
+    const menuStates: boolean[] = [];
+    const errors: unknown[] = [];
+    const desktop = {
+      events: { listen: async () => { throw new Error('listen failed'); } },
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: { resolveClose: async () => undefined },
+      menu: { setFileWorkflowEnabled: async (enabled: boolean) => { menuStates.push(enabled); } },
+      errors: { report: (error: unknown) => { errors.push(error); } },
+    } as unknown as AppDesktopPorts;
+
+    const rendered = render(<App
+      store={new EditorStore({ viewport: { width: 1024, height: 768 } })}
+      desktop={desktop}
+    />);
+    await act(() => Promise.resolve());
+    await act(() => Promise.resolve());
+
+    expect(menuStates).toEqual([false]);
+    expect(errors).toHaveLength(1);
+    rendered.unmount();
+  });
   it('mounts current menu commands and clean close handling, then disposes native listeners', async () => {
     const events = new FakeDesktopEvents();
     let closes = 0;
     const desktop: AppDesktopPorts = {
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
-      window: { close: async () => { closes += 1; } },
+      window: { resolveClose: async (_lease, resolution) => { if (resolution === 'close') closes += 1; } },
+      menu: { setFileWorkflowEnabled: async () => undefined },
+      errors: { report: () => undefined },
     };
     const store = new EditorStore({ viewport: { width: 1024, height: 768 } });
     const rendered = render(<App store={store} desktop={desktop} />);
@@ -22,7 +46,7 @@ describe('App desktop integration', () => {
 
     await act(() => events.emit('uxml://menu-command', { commandId: 'view.pane-source' }));
     expect(store.getSnapshot().activePanel).toBe('source');
-    await act(() => events.emit('uxml://close-requested', null));
+    await act(() => events.emit('uxml://close-requested', CLOSE_REQUEST));
     expect(closes).toBe(1);
 
     rendered.unmount();
@@ -36,13 +60,15 @@ describe('App desktop integration', () => {
     const desktop: AppDesktopPorts = {
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'discard' },
-      window: { close: async () => { closes += 1; } },
+      window: { resolveClose: async (_lease, resolution) => { if (resolution === 'close') closes += 1; } },
+      menu: { setFileWorkflowEnabled: async () => undefined },
+      errors: { report: () => undefined },
     };
     const store = new EditorStore({ session: openSession(), viewport: { width: 1024, height: 768 } });
     const rendered = render(<App store={store} desktop={desktop} />);
     await listenersReady(events);
 
-    await act(() => events.emit('uxml://close-requested', null));
+    await act(() => events.emit('uxml://close-requested', CLOSE_REQUEST));
     expect(closes).toBe(0);
 
     rendered.unmount();
@@ -86,3 +112,5 @@ function openSession(): DocumentSession {
     new UxmlPreviewAdapter(),
   );
 }
+
+const CLOSE_REQUEST = Object.freeze({ lease: `close:v1:${'d'.repeat(16)}` });

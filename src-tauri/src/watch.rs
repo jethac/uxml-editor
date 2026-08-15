@@ -1,9 +1,11 @@
-use crate::{atomic_save::content_revision, error::HostError, scoped_fs::NormalizedRelativePath};
+use crate::{atomic_save::revision_for_bytes, error::HostError, scoped_fs::NormalizedRelativePath};
+use cap_std::fs::Dir;
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -18,8 +20,10 @@ pub type WatchEmitter = Arc<dyn Fn(FileChangeDto) + Send + Sync>;
 pub struct FileChangeDto {
     pub watch_id: String,
     pub project_id: String,
+    pub grant: String,
     pub kind: String,
-    pub relative_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
 }
@@ -27,15 +31,23 @@ pub struct FileChangeDto {
 struct WatchEventNormalizer {
     root: PathBuf,
     lexical_root: PathBuf,
+    authority: Dir,
     watch_id: String,
     project_id: String,
+    grant: String,
     active: AtomicBool,
     callback_gate: Mutex<()>,
     delivered: Mutex<HashMap<String, String>>,
 }
 
 impl WatchEventNormalizer {
-    fn new(root: &Path, watch_id: String, project_id: String) -> Result<Self, HostError> {
+    fn new(
+        root: &Path,
+        authority: Dir,
+        watch_id: String,
+        project_id: String,
+        grant: String,
+    ) -> Result<Self, HostError> {
         let lexical_root = root.to_path_buf();
         let root = fs::canonicalize(root).map_err(|error| {
             HostError::io(
@@ -53,8 +65,10 @@ impl WatchEventNormalizer {
         Ok(Self {
             root,
             lexical_root,
+            authority,
             watch_id,
             project_id,
+            grant,
             active: AtomicBool::new(true),
             callback_gate: Mutex::new(()),
             delivered: Mutex::new(HashMap::new()),
@@ -79,14 +93,33 @@ impl WatchEventNormalizer {
             let Ok(mut delivered) = self.delivered.lock() else {
                 return;
             };
-            if delivered.get(&event.relative_path) == Some(&token) {
+            let Some(relative_path) = event.relative_path.as_ref() else {
+                continue;
+            };
+            if delivered.get(relative_path) == Some(&token) {
                 continue;
             }
-            delivered.insert(event.relative_path.clone(), token);
+            delivered.insert(relative_path.clone(), token);
             drop(delivered);
             if self.active.load(Ordering::Acquire) {
                 emit(event);
             }
+        }
+    }
+
+    fn handle_backend_error(&self, emit: &WatchEmitter) {
+        let Ok(_gate) = self.callback_gate.lock() else {
+            return;
+        };
+        if self.active.load(Ordering::Acquire) {
+            emit(FileChangeDto {
+                watch_id: self.watch_id.clone(),
+                project_id: self.project_id.clone(),
+                grant: self.grant.clone(),
+                kind: "rescan-required".to_string(),
+                relative_path: None,
+                revision: None,
+            });
         }
     }
 
@@ -107,37 +140,41 @@ impl WatchEventNormalizer {
             return None;
         }
 
-        match fs::symlink_metadata(candidate) {
+        let relative = candidate
+            .strip_prefix(&self.lexical_root)
+            .or_else(|_| candidate.strip_prefix(&self.root))
+            .ok()?;
+        let relative_path = normalized_relative_string(relative)?;
+        let relative = Path::new(&relative_path);
+
+        match self.authority.symlink_metadata(relative) {
             Ok(metadata) => {
-                if metadata.is_dir() || is_symlink_or_reparse(&metadata) {
+                if metadata.is_dir()
+                    || metadata.file_type().is_symlink()
+                    || is_reparse_point(&metadata)
+                {
                     return None;
                 }
-                let canonical = fs::canonicalize(candidate).ok()?;
-                let relative_path =
-                    normalized_relative_string(canonical.strip_prefix(&self.root).ok()?)?;
+                let mut file = self.authority.open(relative).ok()?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).ok()?;
                 Some(FileChangeDto {
                     watch_id: self.watch_id.clone(),
                     project_id: self.project_id.clone(),
+                    grant: self.grant.clone(),
                     kind: "changed".to_string(),
-                    relative_path,
-                    revision: content_revision(&canonical).ok(),
-                })
-                .filter(|event| event.revision.is_some())
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let relative = candidate
-                    .strip_prefix(&self.lexical_root)
-                    .or_else(|_| candidate.strip_prefix(&self.root))
-                    .ok()?;
-                let relative_path = normalized_relative_string(relative)?;
-                Some(FileChangeDto {
-                    watch_id: self.watch_id.clone(),
-                    project_id: self.project_id.clone(),
-                    kind: "deleted".to_string(),
-                    relative_path,
-                    revision: None,
+                    relative_path: Some(relative_path),
+                    revision: Some(revision_for_bytes(&bytes)),
                 })
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(FileChangeDto {
+                watch_id: self.watch_id.clone(),
+                project_id: self.project_id.clone(),
+                grant: self.grant.clone(),
+                kind: "deleted".to_string(),
+                relative_path: Some(relative_path),
+                revision: None,
+            }),
             Err(_) => None,
         }
     }
@@ -146,6 +183,10 @@ impl WatchEventNormalizer {
 struct ActiveWatch {
     _watcher: notify::RecommendedWatcher,
     normalizer: Arc<WatchEventNormalizer>,
+    #[cfg(test)]
+    emit: WatchEmitter,
+    project_id: String,
+    grant: String,
 }
 
 #[derive(Default)]
@@ -158,28 +199,31 @@ impl WatchRegistry {
     pub fn start(
         &self,
         root: PathBuf,
+        authority: Dir,
         project_id: String,
+        grant: String,
         emit: WatchEmitter,
     ) -> Result<String, HostError> {
         let watch_id = format!(
-            "watch:v1:{}-{}",
-            std::process::id(),
+            "watch:v1:{:016x}",
             self.next_watch.fetch_add(1, Ordering::Relaxed)
         );
         let normalizer = Arc::new(WatchEventNormalizer::new(
             &root,
+            authority,
             watch_id.clone(),
-            project_id,
+            project_id.clone(),
+            grant.clone(),
         )?);
         let callback_normalizer = normalizer.clone();
         let callback_emit = emit.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if let Ok(event) = result {
-                    callback_normalizer.handle_paths(&event.paths, &callback_emit);
-                }
-            })
-            .map_err(watch_error)?;
+        let mut watcher = notify::recommended_watcher(
+            move |result: notify::Result<notify::Event>| match result {
+                Ok(event) => callback_normalizer.handle_paths(&event.paths, &callback_emit),
+                Err(_) => callback_normalizer.handle_backend_error(&callback_emit),
+            },
+        )
+        .map_err(watch_error)?;
         watcher
             .watch(&normalizer.root, RecursiveMode::Recursive)
             .map_err(watch_error)?;
@@ -192,32 +236,49 @@ impl WatchRegistry {
             ActiveWatch {
                 _watcher: watcher,
                 normalizer,
+                #[cfg(test)]
+                emit,
+                project_id,
+                grant,
             },
         );
         Ok(watch_id)
     }
 
-    pub fn stop(&self, watch_id: &str) -> Result<(), HostError> {
-        let active = self
+    pub fn stop(&self, watch_id: &str, project_id: &str, grant: &str) -> Result<(), HostError> {
+        let mut watches = self
             .watches
             .lock()
-            .map_err(|_| HostError::new("read-failed", "File-watch registry is unavailable."))?
+            .map_err(|_| HostError::new("read-failed", "File-watch registry is unavailable."))?;
+        let authorized = watches
+            .get(watch_id)
+            .is_some_and(|active| active.project_id == project_id && active.grant == grant);
+        if !authorized {
+            return Err(HostError::new(
+                "read-failed",
+                "File-watch identifier is not active for this grant.",
+            ));
+        }
+        let active = watches
             .remove(watch_id)
             .ok_or_else(|| HostError::new("read-failed", "File-watch identifier is not active."))?;
+        drop(watches);
         active.normalizer.dispose();
         drop(active);
         Ok(())
     }
 
-    pub fn stop_all(&self) {
-        let Ok(mut watches) = self.watches.lock() else {
-            return;
-        };
+    pub fn stop_all(&self) -> Result<(), HostError> {
+        let mut watches = self
+            .watches
+            .lock()
+            .map_err(|_| HostError::new("read-failed", "File-watch registry is unavailable."))?;
         let active: Vec<_> = watches.drain().map(|(_, active)| active).collect();
         drop(watches);
         for watch in active {
             watch.normalizer.dispose();
         }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -226,6 +287,21 @@ impl WatchRegistry {
             .lock()
             .map(|watches| watches.len())
             .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub fn dispatch_paths(&self, watch_id: &str, paths: &[PathBuf]) -> Result<(), HostError> {
+        let (normalizer, emit) = {
+            let watches = self.watches.lock().map_err(|_| {
+                HostError::new("read-failed", "File-watch registry is unavailable.")
+            })?;
+            let active = watches.get(watch_id).ok_or_else(|| {
+                HostError::new("read-failed", "File-watch identifier is not active.")
+            })?;
+            (active.normalizer.clone(), active.emit.clone())
+        };
+        normalizer.handle_paths(paths, &emit);
+        Ok(())
     }
 }
 
@@ -244,16 +320,15 @@ fn is_editor_artifact_name(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn is_symlink_or_reparse(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
+fn is_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(not(windows))]
-fn is_symlink_or_reparse(metadata: &fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
+fn is_reparse_point(_metadata: &cap_std::fs::Metadata) -> bool {
+    false
 }
 
 fn watch_error(error: notify::Error) -> HostError {
@@ -291,7 +366,7 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind, "changed");
-        assert_eq!(events[0].relative_path, "Main.uxml");
+        assert_eq!(events[0].relative_path.as_deref(), Some("Main.uxml"));
         assert_eq!(events[0].revision, Some(original_revision));
         assert_eq!(events[1].revision, Some(content_revision(&target).unwrap()));
         assert_ne!(events[0].revision, events[1].revision);
@@ -313,8 +388,9 @@ mod tests {
             &[FileChangeDto {
                 watch_id: "watch:v1:test".to_string(),
                 project_id: "project:v1:test".to_string(),
+                grant: "grant:v1:test".to_string(),
                 kind: "deleted".to_string(),
-                relative_path: "Styles/Main.uss".to_string(),
+                relative_path: Some("Styles/Main.uss".to_string()),
                 revision: None,
             }]
         );
@@ -357,7 +433,7 @@ mod tests {
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].relative_path, "Main.uxml");
+        assert_eq!(events[0].relative_path.as_deref(), Some("Main.uxml"));
         assert_eq!(events[0].revision, Some(content_revision(&target).unwrap()));
     }
 
@@ -374,6 +450,30 @@ mod tests {
     }
 
     #[test]
+    fn native_backend_errors_emit_a_typed_rescan_required_event() {
+        let fixture = Fixture::new();
+        let (normalizer, events) = fixture.normalizer();
+
+        normalizer.handle_backend_error(&collector(&events));
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "rescan-required");
+        assert_eq!(events[0].watch_id, "watch:v1:test");
+        assert_eq!(events[0].project_id, "project:v1:test");
+        assert_eq!(events[0].grant, "grant:v1:test");
+        assert_eq!(
+            serde_json::to_value(&events[0]).unwrap(),
+            serde_json::json!({
+                "watchId": "watch:v1:test",
+                "projectId": "project:v1:test",
+                "grant": "grant:v1:test",
+                "kind": "rescan-required",
+            })
+        );
+    }
+
+    #[test]
     fn live_watch_delivers_its_project_only_and_stays_silent_after_stop() {
         let fixture = Fixture::new();
         let registry = WatchRegistry::default();
@@ -382,7 +482,13 @@ mod tests {
             let _ = sender.send(event);
         });
         let watch_id = registry
-            .start(fixture.root.clone(), "project:v1:live".to_string(), emitter)
+            .start(
+                fixture.root.clone(),
+                fixture.authority(),
+                "project:v1:live".to_string(),
+                "grant:v1:live".to_string(),
+                emitter,
+            )
             .unwrap();
         let target = fixture.root.join("Live.uxml");
 
@@ -390,9 +496,11 @@ mod tests {
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(event.watch_id, watch_id);
         assert_eq!(event.project_id, "project:v1:live");
-        assert_eq!(event.relative_path, "Live.uxml");
+        assert_eq!(event.relative_path.as_deref(), Some("Live.uxml"));
 
-        registry.stop(&watch_id).unwrap();
+        registry
+            .stop(&watch_id, "project:v1:live", "grant:v1:live")
+            .unwrap();
         while receiver.try_recv().is_ok() {}
         fs::write(&target, b"after dispose").unwrap();
         assert!(receiver.recv_timeout(Duration::from_millis(500)).is_err());
@@ -432,12 +540,18 @@ mod tests {
             (
                 WatchEventNormalizer::new(
                     &self.root,
+                    self.authority(),
                     "watch:v1:test".to_string(),
                     "project:v1:test".to_string(),
+                    "grant:v1:test".to_string(),
                 )
                 .unwrap(),
                 Arc::new(Mutex::new(Vec::new())),
             )
+        }
+
+        fn authority(&self) -> cap_std::fs::Dir {
+            cap_std::fs::Dir::open_ambient_dir(&self.root, cap_std::ambient_authority()).unwrap()
         }
     }
 

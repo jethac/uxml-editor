@@ -1,6 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { createTauriRuntimeBindings, type TauriRuntimeBindings } from './TauriRuntime';
 
 export function createProductionTauriRuntime(): TauriRuntimeBindings | undefined {
@@ -8,7 +7,7 @@ export function createProductionTauriRuntime(): TauriRuntimeBindings | undefined
   return createTauriRuntimeBindings({
     invoke: (command, payload) => invoke(command, payload as Record<string, unknown> | undefined),
     listen: (eventName, listener) => listen(eventName, (event) => listener(Object.freeze({ payload: event.payload }))),
-    window: Object.freeze({ close: () => getCurrentWindow().close() }),
+    reportError: (error) => console.error('Desktop bridge startup failed.', error),
     timers: Object.freeze({
       now: () => Date.now(),
       setTimeout: (callback: () => void | Promise<void>, delayMs: number) => globalThis.setTimeout(callback, delayMs),

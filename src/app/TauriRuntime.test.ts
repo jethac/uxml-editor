@@ -2,19 +2,45 @@ import { describe, expect, it } from 'vitest';
 import { createTauriRuntimeBindings, type RawTauriRuntimePorts } from './TauriRuntime';
 
 describe('createTauriRuntimeBindings', () => {
-  it('shares injected invoke/listen/timers with TauriHost and authorizes native close before window close', async () => {
+  it('resolves an exact close lease with one native command and exposes file-workflow menu enablement', async () => {
     const calls: Array<{ command: string; payload: unknown }> = [];
-    let windowCloses = 0;
+    const runtime = createTauriRuntimeBindings({
+      invoke: async (command, payload) => {
+        calls.push({ command, payload });
+        return null;
+      },
+      listen: async () => () => undefined,
+      timers: {
+        now: () => 0,
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+    });
+    const lease = `close:v1:${'a'.repeat(16)}`;
+
+    await (runtime.desktop.window as unknown as {
+      resolveClose(lease: string, action: string): Promise<void>;
+    }).resolveClose(lease, 'close');
+    await (runtime.desktop as unknown as {
+      menu: { setFileWorkflowEnabled(enabled: boolean): Promise<void> };
+    }).menu.setFileWorkflowEnabled(true);
+
+    expect(calls).toEqual([
+      { command: 'desktop_resolve_close', payload: { request: { lease, action: 'close' } } },
+      { command: 'desktop_set_file_workflow_enabled', payload: { request: { enabled: true } } },
+    ]);
+  });
+  it('shares injected invoke/listen/timers with TauriHost and resolves close through native authority', async () => {
+    const calls: Array<{ command: string; payload: unknown }> = [];
     const raw: RawTauriRuntimePorts = {
       invoke: async (command, payload) => {
         calls.push({ command, payload });
         if (command === 'desktop_confirm_close') return 'discard';
-        if (command === 'desktop_authorize_close') return null;
+        if (command === 'desktop_resolve_close') return null;
         if (command === 'host_choose_project') return null;
         throw new Error(`Unexpected command: ${command}`);
       },
       listen: async () => () => undefined,
-      window: { close: async () => { windowCloses += 1; } },
       timers: {
         now: () => 42,
         setTimeout: () => 7,
@@ -26,13 +52,13 @@ describe('createTauriRuntimeBindings', () => {
     expect(runtime.host.now()).toBe(42);
     await expect(runtime.host.chooseProject()).resolves.toBeNull();
     await expect(runtime.desktop.confirm.confirmClose()).resolves.toBe('discard');
-    await runtime.desktop.window.close();
+    const lease = `close:v1:${'b'.repeat(16)}`;
+    await runtime.desktop.window.resolveClose(lease, 'close');
 
-    expect(windowCloses).toBe(1);
     expect(calls).toEqual([
       { command: 'host_choose_project', payload: undefined },
       { command: 'desktop_confirm_close', payload: undefined },
-      { command: 'desktop_authorize_close', payload: undefined },
+      { command: 'desktop_resolve_close', payload: { request: { lease, action: 'close' } } },
     ]);
   });
 
@@ -40,7 +66,6 @@ describe('createTauriRuntimeBindings', () => {
     const runtime = createTauriRuntimeBindings({
       invoke: async () => decision,
       listen: async () => () => undefined,
-      window: { close: async () => undefined },
       timers: {
         now: () => 0,
         setTimeout: () => 1,
@@ -51,12 +76,10 @@ describe('createTauriRuntimeBindings', () => {
     await expect(runtime.desktop.confirm.confirmClose()).rejects.toThrow('malformed close decision');
   });
 
-  it('does not close the window when native authorization fails or returns unexpected data', async () => {
-    let windowCloses = 0;
+  it('rejects an unexpected native close resolution result', async () => {
     const runtime = createTauriRuntimeBindings({
       invoke: async () => ({ authorized: true }),
       listen: async () => () => undefined,
-      window: { close: async () => { windowCloses += 1; } },
       timers: {
         now: () => 0,
         setTimeout: () => 1,
@@ -64,19 +87,20 @@ describe('createTauriRuntimeBindings', () => {
       },
     });
 
-    await expect(runtime.desktop.window.close()).rejects.toThrow('unexpected authorization result');
-    expect(windowCloses).toBe(0);
+    await expect(runtime.desktop.window.resolveClose(
+      `close:v1:${'c'.repeat(16)}`,
+      'close',
+    )).rejects.toThrow('returned unexpected data');
   });
 
-  it('revokes one-shot native authorization when the window close call fails', async () => {
+  it('uses no separable authorization or revocation command when native close resolution fails', async () => {
     const commands: string[] = [];
     const runtime = createTauriRuntimeBindings({
       invoke: async (command) => {
         commands.push(command);
-        return null;
+        throw new Error('native close failed');
       },
       listen: async () => () => undefined,
-      window: { close: async () => { throw new Error('native close failed'); } },
       timers: {
         now: () => 0,
         setTimeout: () => 1,
@@ -84,7 +108,10 @@ describe('createTauriRuntimeBindings', () => {
       },
     });
 
-    await expect(runtime.desktop.window.close()).rejects.toThrow('native close failed');
-    expect(commands).toEqual(['desktop_authorize_close', 'desktop_revoke_close_authorization']);
+    await expect(runtime.desktop.window.resolveClose(
+      `close:v1:${'d'.repeat(16)}`,
+      'close',
+    )).rejects.toThrow('native close failed');
+    expect(commands).toEqual(['desktop_resolve_close']);
   });
 });

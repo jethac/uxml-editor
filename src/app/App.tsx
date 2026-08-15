@@ -8,6 +8,8 @@ import {
 import {
   DesktopLifecycleController,
   type CloseChoice,
+  type CloseLease,
+  type CloseResolution,
   type DirtyState,
   type SaveBeforeCloseResult,
 } from '../core/desktop/DesktopLifecycleController';
@@ -24,12 +26,14 @@ export interface AppProps {
 export interface AppDesktopPorts {
   readonly events: DesktopEventPort;
   readonly confirm: { confirmClose(): CloseChoice | Promise<CloseChoice> };
-  readonly window: { close(): void | Promise<void> };
+  readonly window: { resolveClose(lease: CloseLease, resolution: CloseResolution): void | Promise<void> };
+  readonly menu: { setFileWorkflowEnabled(enabled: boolean): void | Promise<void> };
+  readonly errors: { report(error: unknown): void };
 }
 
 export interface Task16FileLifecyclePort extends Task16FileCommandPort {
-  getDirtyState(): DirtyState | Promise<DirtyState>;
-  saveBeforeClose(): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult>;
+  getDirtyState(lease: CloseLease): DirtyState | Promise<DirtyState>;
+  saveBeforeClose(lease: CloseLease): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult>;
 }
 
 export function App({ store, desktop, task16FileLifecycle }: AppProps) {
@@ -53,21 +57,23 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
     );
     const lifecycle = new DesktopLifecycleController({
       events: desktop.events,
-      dirty: { getDirtyState: () => currentFileLifecycle.getDirtyState() },
+      dirty: { getDirtyState: (lease) => currentFileLifecycle.getDirtyState(lease) },
       confirm: desktop.confirm,
-      save: { saveBeforeClose: () => currentFileLifecycle.saveBeforeClose() },
+      save: { saveBeforeClose: (lease) => currentFileLifecycle.saveBeforeClose(lease) },
       window: desktop.window,
     });
     void (async () => {
       try {
+        await desktop.menu.setFileWorkflowEnabled(task16FileLifecycle !== undefined);
         const commandDisposable = await commandBridge.start();
         if (!active) return commandDisposable.dispose();
         disposables.push(commandDisposable);
         const lifecycleDisposable = await lifecycle.start();
         if (!active) return lifecycleDisposable.dispose();
         disposables.push(lifecycleDisposable);
-      } catch {
+      } catch (error) {
         for (const disposable of disposables.splice(0)) disposable.dispose();
+        desktop.errors.report(error);
       }
     })();
     return () => {

@@ -3,11 +3,13 @@ import {
   fileRevision,
   normalizeRelativePath,
   projectId,
+  projectGrantGenerationOf,
   projectPath,
   snapshotProjectRoot,
   type ConfirmationRequest,
   type ConfirmationResult,
   type Disposable,
+  type DisposalOutcome,
   type FileChangeListener,
   type FileChangeEvent,
   type FileEnumerationResult,
@@ -51,21 +53,29 @@ export class TauriHost implements HostPort {
     appData: 'app-data',
     dialogs: 'native',
   });
-  private readonly grants = new Map<ProjectId, ProjectRoot>();
+  private readonly grants = new Map<ProjectId, NativeGrant>();
+  private readonly watches = new Set<ActiveNativeWatch>();
 
   constructor(private readonly ports: TauriHostPorts) {}
 
   async chooseProject(): Promise<ProjectRoot | null> {
     const result = await this.invoke('host_choose_project', undefined, 'selection-failed');
     if (result === null) return null;
-    if (!isExactRecord(result, ['projectId', 'displayName'])
-      || !isNonemptyString(result.projectId)
+    if (!isExactRecord(result, ['projectId', 'displayName', 'grant'])
+      || !isNativeProjectId(result.projectId)
+      || !isNativeGrant(result.grant)
       || !isNonemptyString(result.displayName)) {
+      await Promise.all([...this.watches].map((watch) => watch.retire(true)));
+      this.grants.clear();
       throw malformed('selection-failed', 'Project selection returned a malformed result.');
     }
-    const root = snapshotProjectRoot({ id: projectId(result.projectId), name: result.displayName });
+    const root = snapshotProjectRoot(
+      { id: projectId(result.projectId), name: result.displayName },
+      result.grant,
+    );
+    await Promise.all([...this.watches].map((watch) => watch.retire(true)));
     this.grants.clear();
-    this.grants.set(root.id, root);
+    this.grants.set(root.id, Object.freeze({ root, token: result.grant }));
     return snapshotProjectRoot(root);
   }
 
@@ -73,7 +83,7 @@ export class TauriHost implements HostPort {
     const grant = this.requireRoot(root);
     const result = await this.invoke(
       'host_enumerate_files',
-      request({ projectId: grant.id }),
+      request({ projectId: grant.root.id, grant: grant.token }),
       'read-failed',
     );
     if (!isExactRecord(result, ['relativePaths']) || !Array.isArray(result.relativePaths)) {
@@ -89,17 +99,17 @@ export class TauriHost implements HostPort {
         throw malformed('read-failed', `File enumeration returned a duplicate or case-colliding path: ${normalized}`);
       }
       seen.add(collisionKey);
-      paths.push(projectPath(grant, normalized));
+      paths.push(projectPath(grant.root, normalized));
     }
     paths.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en'));
     return Object.freeze({ status: 'supported', files: Object.freeze(paths) });
   }
 
   async readText(path: ProjectPath): Promise<FileReadResult> {
-    const normalizedPath = this.requirePath(path);
+    const { path: normalizedPath, grant } = this.requirePath(path);
     const result = await this.invoke(
       'host_read_text',
-      request(pathRequest(normalizedPath)),
+      request(pathRequest(normalizedPath, grant.token)),
       'read-failed',
     );
     if (!isExactRecord(result, ['text', 'revision'])
@@ -119,13 +129,13 @@ export class TauriHost implements HostPort {
     expectedRevision: FileRevision,
     text: string,
   ): Promise<FileRevision> {
-    const normalizedPath = this.requirePath(path);
+    const { path: normalizedPath, grant } = this.requirePath(path);
     if (!isNativeRevision(expectedRevision)) {
       throw new HostError('stale-revision', 'Atomic replacement requires a valid content revision.');
     }
     const result = await this.invoke(
       'host_replace_text',
-      request({ ...pathRequest(normalizedPath), expectedRevision, text }),
+      request({ ...pathRequest(normalizedPath, grant.token), expectedRevision, text }),
       'replace-failed',
     );
     if (!isExactRecord(result, ['revision']) || !isNativeRevision(result.revision)) {
@@ -151,10 +161,12 @@ export class TauriHost implements HostPort {
       }
       const event = parseWatchEvent(payload, watchId, grant);
       if (event === null || !active) return undefined;
-      const prior = delivered.get(event.path.relativePath);
-      const token = event.kind === 'deleted' ? '<deleted>' : event.revision;
-      if (prior === token) return undefined;
-      delivered.set(event.path.relativePath, token);
+      if (event.kind !== 'rescan-required') {
+        const prior = delivered.get(event.path.relativePath);
+        const token = event.kind === 'deleted' ? '<deleted>' : event.revision;
+        if (prior === token) return undefined;
+        delivered.set(event.path.relativePath, token);
+      }
       delivery = delivery
         .then(async () => {
           if (active) await listener(event);
@@ -168,10 +180,10 @@ export class TauriHost implements HostPort {
       });
       const result = await this.invoke(
         'host_start_watch',
-        request({ projectId: grant.id }),
+        request({ projectId: grant.root.id, grant: grant.token }),
         'read-failed',
       );
-      if (!isExactRecord(result, ['watchId']) || !isNonemptyString(result.watchId)) {
+      if (!isExactRecord(result, ['watchId']) || !isNativeWatchId(result.watchId)) {
         throw malformed('read-failed', 'File watch returned a malformed id.');
       }
       watchId = result.watchId;
@@ -183,15 +195,43 @@ export class TauriHost implements HostPort {
       if (error instanceof HostError) throw error;
       throw mapNativeError(error, 'read-failed');
     }
-    return Object.freeze({
-      dispose: () => {
-        if (!active) return;
+    let resolveCompletion!: (outcome: DisposalOutcome) => void;
+    const completion = new Promise<DisposalOutcome>((resolve) => { resolveCompletion = resolve; });
+    let retirement: Promise<DisposalOutcome> | undefined;
+    const activeWatch: ActiveNativeWatch = {
+      retire: (nativeAlreadyStopped) => {
+        if (retirement !== undefined) return retirement;
         active = false;
+        pendingPayloads.length = 0;
         unlisten?.();
-        if (watchId !== undefined) {
-          void this.invoke('host_stop_watch', request({ watchId }), 'read-failed').catch(() => undefined);
-        }
+        retirement = (async () => {
+          await delivery;
+          try {
+            if (!nativeAlreadyStopped && watchId !== undefined) {
+              await this.invokeVoid(
+                'host_stop_watch',
+                request({ projectId: grant.root.id, grant: grant.token, watchId }),
+                'read-failed',
+              );
+            }
+            return Object.freeze({ status: 'disposed' as const });
+          } catch (error) {
+            return Object.freeze({
+              status: 'failed' as const,
+              error: error instanceof HostError ? error : mapNativeError(error, 'read-failed'),
+            });
+          } finally {
+            this.watches.delete(activeWatch);
+          }
+        })();
+        void retirement.then(resolveCompletion);
+        return retirement;
       },
+    };
+    this.watches.add(activeWatch);
+    return Object.freeze({
+      dispose: () => { void activeWatch.retire(false); },
+      completion,
     });
   }
 
@@ -224,7 +264,7 @@ export class TauriHost implements HostPort {
     let priorTime = Number.POSITIVE_INFINITY;
     for (const value of result) {
       if (!isExactRecord(value, ['projectId', 'displayName', 'lastOpenedAt'])
-        || !isNonemptyString(value.projectId)
+        || !isNativeProjectId(value.projectId)
         || !isNonemptyString(value.displayName)
         || !isFiniteTimestamp(value.lastOpenedAt)
         || value.lastOpenedAt > priorTime
@@ -243,6 +283,9 @@ export class TauriHost implements HostPort {
 
   async rememberRecentProject(root: ProjectRoot): Promise<void> {
     const snapshot = snapshotProjectRoot(root);
+    if (!isNativeProjectId(snapshot.id)) {
+      throw new HostError('app-data-failed', 'Recent project identifier is malformed.');
+    }
     await this.invokeVoid(
       'host_remember_recent_project',
       request({ projectId: snapshot.id, displayName: snapshot.name }),
@@ -272,10 +315,12 @@ export class TauriHost implements HostPort {
     return Object.freeze({ dispose: () => this.ports.timers.clearTimeout(handle) });
   }
 
-  private requireRoot(candidate: ProjectRoot): ProjectRoot {
+  private requireRoot(candidate: ProjectRoot): NativeGrant {
     const snapshot = snapshotProjectRoot(candidate);
     const grant = this.grants.get(snapshot.id);
-    if (grant === undefined || grant.name !== snapshot.name) {
+    if (grant === undefined
+      || grant.root.name !== snapshot.name
+      || projectGrantGenerationOf(snapshot) !== grant.token) {
       throw new HostError('root-not-granted', `Project root is not granted: ${snapshot.id}`);
     }
     return grant;
@@ -288,15 +333,15 @@ export class TauriHost implements HostPort {
     return candidate;
   }
 
-  private requirePath(candidate: ProjectPath): ProjectPath {
+  private requirePath(candidate: ProjectPath): Readonly<{ path: ProjectPath; grant: NativeGrant }> {
     if (!isRecord(candidate) || !isNonemptyString(candidate.projectId) || typeof candidate.relativePath !== 'string') {
       throw new HostError('invalid-path', 'Project file path is malformed.');
     }
     const grant = this.grants.get(candidate.projectId as ProjectId);
-    if (grant === undefined) {
+    if (grant === undefined || projectGrantGenerationOf(candidate) !== grant.token) {
       throw new HostError('root-not-granted', `Project root is not granted: ${candidate.projectId}`);
     }
-    return projectPath(grant, candidate.relativePath);
+    return Object.freeze({ path: projectPath(grant.root, candidate.relativePath), grant });
   }
 
   private async invoke(
@@ -329,8 +374,8 @@ function request(value: Record<string, unknown>): Readonly<{ request: Readonly<R
   return Object.freeze({ request: Object.freeze(value) });
 }
 
-function pathRequest(path: ProjectPath): Readonly<{ projectId: ProjectId; relativePath: string }> {
-  return Object.freeze({ projectId: path.projectId, relativePath: path.relativePath });
+function pathRequest(path: ProjectPath, grant: string): Readonly<{ projectId: ProjectId; grant: string; relativePath: string }> {
+  return Object.freeze({ projectId: path.projectId, grant, relativePath: path.relativePath });
 }
 
 function strictNormalizedPath(value: string, code: HostError['code']): string {
@@ -343,18 +388,24 @@ function strictNormalizedPath(value: string, code: HostError['code']): string {
   }
 }
 
-function parseWatchEvent(payload: unknown, watchId: string, root: ProjectRoot): FileChangeEvent | null {
+function parseWatchEvent(payload: unknown, watchId: string, grant: NativeGrant): FileChangeEvent | null {
   if (!isRecord(payload)
     || payload.watchId !== watchId
-    || payload.projectId !== root.id
-    || (payload.kind !== 'changed' && payload.kind !== 'deleted')) return null;
+    || payload.projectId !== grant.root.id
+    || payload.grant !== grant.token
+    || (payload.kind !== 'changed' && payload.kind !== 'deleted' && payload.kind !== 'rescan-required')) return null;
+  if (payload.kind === 'rescan-required') {
+    return isExactRecord(payload, ['watchId', 'projectId', 'grant', 'kind'])
+      ? Object.freeze({ kind: 'rescan-required', root: snapshotProjectRoot(grant.root) })
+      : null;
+  }
   const expectedKeys = payload.kind === 'changed'
-    ? ['watchId', 'projectId', 'kind', 'relativePath', 'revision']
-    : ['watchId', 'projectId', 'kind', 'relativePath'];
+    ? ['watchId', 'projectId', 'grant', 'kind', 'relativePath', 'revision']
+    : ['watchId', 'projectId', 'grant', 'kind', 'relativePath'];
   if (!isExactRecord(payload, expectedKeys) || typeof payload.relativePath !== 'string') return null;
   let path: ProjectPath;
   try {
-    path = projectPath(root, strictNormalizedPath(payload.relativePath, 'read-failed'));
+    path = projectPath(grant.root, strictNormalizedPath(payload.relativePath, 'read-failed'));
   } catch {
     return null;
   }
@@ -413,6 +464,27 @@ function malformed(code: HostError['code'], message: string): HostError {
 
 function isNativeRevision(value: unknown): value is string {
   return typeof value === 'string' && /^sha256:v1:[0-9a-f]{64}$/.test(value);
+}
+
+function isNativeProjectId(value: unknown): value is string {
+  return typeof value === 'string' && /^project:v1:[0-9a-f]{64}$/.test(value);
+}
+
+function isNativeGrant(value: unknown): value is string {
+  return typeof value === 'string' && /^grant:v1:[0-9a-f]{16}$/.test(value);
+}
+
+function isNativeWatchId(value: unknown): value is string {
+  return typeof value === 'string' && /^watch:v1:[0-9a-f]{16}$/.test(value);
+}
+
+interface NativeGrant {
+  readonly root: ProjectRoot;
+  readonly token: string;
+}
+
+interface ActiveNativeWatch {
+  retire(nativeAlreadyStopped: boolean): Promise<DisposalOutcome>;
 }
 
 function isFiniteTimestamp(value: unknown): value is number {

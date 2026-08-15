@@ -1153,6 +1153,42 @@ describe('SaveCoordinator', () => {
     expect(session.snapshot().files.get('Main.uxml')?.text).toBe(second);
   });
 
+  it('rescans every saved open file when the native watcher reports backend uncertainty', async () => {
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: {
+        'Main.uxml': '<UXML />',
+        'Styles.uss': '.old {}',
+      } }],
+    });
+    const root = (await host.chooseProject())!;
+    const mainPath = projectPath(root, 'Main.uxml');
+    const stylePath = projectPath(root, 'Styles.uss');
+    const initial = await Promise.all([host.readText(mainPath), host.readText(stylePath)]);
+    const session = openTestSession(new Map([
+      ['Main.uxml', '<UXML />'],
+      ['Styles.uss', '.old {}'],
+    ]));
+    const coordinator = new SaveCoordinator(host, root, initial);
+    let nativeListener: ((event: never) => void | Promise<void>) | undefined;
+    host.watch = async (_root, listener) => {
+      nativeListener = listener as (event: never) => void | Promise<void>;
+      return Object.freeze({ dispose: () => undefined });
+    };
+    const deliveries: unknown[] = [];
+    const watcher = await coordinator.watch(() => session, (outcomes) => { deliveries.push(outcomes); }, 10);
+    await host.externalWrite(mainPath, '<UXML><External /></UXML>');
+    await host.externalWrite(stylePath, '.external {}');
+
+    await nativeListener!({ kind: 'rescan-required', root } as never);
+    await host.advanceTime(10);
+
+    expect(deliveries).toEqual([[
+      expect.objectContaining({ path: 'Main.uxml', status: 'reloaded' }),
+      expect.objectContaining({ path: 'Styles.uss', status: 'reloaded' }),
+    ]]);
+    watcher.dispose();
+  });
+
   it('does not mutate the session when disposal occurs during a debounced external read', async () => {
     const original = '<UXML />';
     const external = '<UXML><External /></UXML>';

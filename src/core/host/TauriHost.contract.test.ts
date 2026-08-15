@@ -11,6 +11,13 @@ import {
 import { MemoryHost } from './MemoryHost';
 import { TauriHost, type TauriEvent, type TauriHostPorts } from './TauriHost';
 
+const NATIVE_PROJECT_A = `project:v1:${'a'.repeat(64)}`;
+const NATIVE_PROJECT_B = `project:v1:${'b'.repeat(64)}`;
+const NATIVE_GRANT_A = `grant:v1:${'1'.repeat(16)}`;
+const NATIVE_GRANT_B = `grant:v1:${'2'.repeat(16)}`;
+const NATIVE_WATCH_A = `watch:v1:${'3'.repeat(16)}`;
+const NATIVE_REVISION_A = `sha256:v1:${'4'.repeat(64)}`;
+
 interface HostContractHarness {
   readonly host: HostPort;
   readonly expectedProjectName: string;
@@ -25,7 +32,7 @@ describeHostContract('MemoryHost', () => {
   const host = new MemoryHost({
     initialTime: 1_000,
     projects: [{
-      id: 'project-a',
+      id: NATIVE_PROJECT_A,
       name: 'Chosen Project',
       files: {
         'Assets/Zeta.uss': '.zeta {}\n',
@@ -72,11 +79,11 @@ function describeHostContract(name: string, createHarness: () => HostContractHar
       const { host, expectedProjectName } = createHarness();
       const root = await host.chooseProject();
 
-      expect(root).toEqual({ id: 'project-a', name: expectedProjectName });
+      expect(root).toEqual({ id: NATIVE_PROJECT_A, name: expectedProjectName });
       expect(Object.isFrozen(root)).toBe(true);
       const read = await host.readText(projectPath(root!, 'Assets/UI/./Main.uxml'));
       expect(read.text).toBe('<UXML label="日本語">\r\n</UXML>\r\n');
-      expect(read.path).toEqual({ projectId: 'project-a', relativePath: 'Assets/UI/Main.uxml' });
+      expect(read.path).toEqual({ projectId: NATIVE_PROJECT_A, relativePath: 'Assets/UI/Main.uxml' });
       expect(read.revision).toMatch(/^[a-z0-9-]+:v1:/);
       expect(Object.isFrozen(read)).toBe(true);
       expect(Object.isFrozen(read.path)).toBe(true);
@@ -90,9 +97,9 @@ function describeHostContract(name: string, createHarness: () => HostContractHar
       expect(enumeration).toEqual({
         status: 'supported',
         files: [
-          { projectId: 'project-a', relativePath: 'Assets/Alpha.uss' },
-          { projectId: 'project-a', relativePath: 'Assets/UI/Main.uxml' },
-          { projectId: 'project-a', relativePath: 'Assets/Zeta.uss' },
+          { projectId: NATIVE_PROJECT_A, relativePath: 'Assets/Alpha.uss' },
+          { projectId: NATIVE_PROJECT_A, relativePath: 'Assets/UI/Main.uxml' },
+          { projectId: NATIVE_PROJECT_A, relativePath: 'Assets/Zeta.uss' },
         ],
       });
       expect(Object.isFrozen(enumeration)).toBe(true);
@@ -137,13 +144,14 @@ function describeHostContract(name: string, createHarness: () => HostContractHar
       expect(events).toHaveLength(2);
       expect(events[0]).toMatchObject({
         kind: 'changed',
-        path: { projectId: 'project-a', relativePath: 'Assets/UI/Main.uxml' },
+        path: { projectId: NATIVE_PROJECT_A, relativePath: 'Assets/UI/Main.uxml' },
       });
       expect(events[1]).toEqual({
         kind: 'deleted',
-        path: { projectId: 'project-a', relativePath: 'Assets/Zeta.uss' },
+        path: { projectId: NATIVE_PROJECT_A, relativePath: 'Assets/Zeta.uss' },
       });
-      expect(events.every((event) => Object.isFrozen(event) && Object.isFrozen(event.path))).toBe(true);
+      expect(events.every((event) => Object.isFrozen(event)
+        && Object.isFrozen(event.kind === 'rescan-required' ? event.root : event.path))).toBe(true);
 
       watch.dispose();
       await harness.externalWrite('Assets/UI/Main.uxml', '<UXML after="dispose" />');
@@ -162,7 +170,7 @@ function describeHostContract(name: string, createHarness: () => HostContractHar
 
       await harness.host.rememberRecentProject(root);
       await harness.advanceTime(5);
-      const second = Object.freeze({ id: projectId('project-b'), name: 'Second' });
+      const second = Object.freeze({ id: projectId(NATIVE_PROJECT_B), name: 'Second' });
       if (harness.host instanceof MemoryHost) {
         // MemoryHost intentionally requires grants for file operations, not recent metadata.
       }
@@ -171,8 +179,8 @@ function describeHostContract(name: string, createHarness: () => HostContractHar
       await harness.host.rememberRecentProject(root);
       const recent = await harness.host.listRecentProjects();
       expect(recent).toEqual([
-        { root: { id: 'project-a', name: 'Chosen Project' }, lastOpenedAt: 1_010 },
-        { root: { id: 'project-b', name: 'Second' }, lastOpenedAt: 1_005 },
+        { root: { id: NATIVE_PROJECT_A, name: 'Chosen Project' }, lastOpenedAt: 1_010 },
+        { root: { id: NATIVE_PROJECT_B, name: 'Second' }, lastOpenedAt: 1_005 },
       ]);
       expect(Object.isFrozen(recent)).toBe(true);
       expect(recent.every((entry) => Object.isFrozen(entry) && Object.isFrozen(entry.root))).toBe(true);
@@ -207,6 +215,153 @@ function describeHostContract(name: string, createHarness: () => HostContractHar
 }
 
 describe('TauriHost IPC validation and serialization', () => {
+  it('requires exact native project, grant, revision, and watch schemas and carries the grant on filesystem IPC', async () => {
+    const calls: Array<{ command: string; payload: unknown }> = [];
+    const host = new TauriHost({
+      invoke: async (command, payload) => {
+        calls.push({ command, payload });
+        if (command === 'host_choose_project') {
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
+        }
+        if (command === 'host_enumerate_files') return { relativePaths: [] };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async () => () => undefined,
+      timers: new FakeTimers(0),
+    });
+
+    const root = (await host.chooseProject())!;
+    await host.enumerateFiles(root);
+
+    expect(calls.at(-1)).toEqual({
+      command: 'host_enumerate_files',
+      payload: { request: { projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A } },
+    });
+
+    for (const malformedResult of [
+      { projectId: 'project:v1:short', displayName: 'Project', grant: NATIVE_GRANT_A },
+      { projectId: `project:v1:${'A'.repeat(64)}`, displayName: 'Project', grant: NATIVE_GRANT_A },
+      { projectId: NATIVE_PROJECT_A, displayName: 'Project', grant: 'grant:v1:short' },
+      { projectId: NATIVE_PROJECT_A, displayName: 'Project' },
+    ]) {
+      const malformedHost = new TauriHost({
+        invoke: async () => malformedResult,
+        listen: async () => () => undefined,
+        timers: new FakeTimers(0),
+      });
+      await expect(malformedHost.chooseProject()).rejects.toMatchObject({ code: 'selection-failed' });
+    }
+  });
+
+  it('validates grant-scoped watch events and reports native stop failure after synchronous disposal', async () => {
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
+        }
+        if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
+        if (command === 'host_stop_watch') throw { code: 'read-failed', message: 'stop failed' };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      timers: new FakeTimers(0),
+    });
+    const root = (await host.chooseProject())!;
+    const delivered: FileChangeEvent[] = [];
+    const watch = await host.watch(root, (event) => { delivered.push(event); });
+
+    await nativeListener!({ payload: {
+      watchId: NATIVE_WATCH_A,
+      projectId: NATIVE_PROJECT_A,
+      grant: NATIVE_GRANT_A,
+      kind: 'rescan-required',
+    } });
+    expect(delivered).toEqual([{ kind: 'rescan-required', root }]);
+
+    watch.dispose();
+    expect(nativeListener).toBeUndefined();
+    expect('completion' in watch).toBe(true);
+    await expect((watch as typeof watch & { completion: Promise<unknown> }).completion).resolves.toMatchObject({
+      status: 'failed', error: { code: 'read-failed' },
+    });
+  });
+
+  it('drains old grant delivery before publishing a successful replacement and preserves it on failure', async () => {
+    let selection = 0;
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    let release!: () => void;
+    let started!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const listenerStarted = new Promise<void>((resolve) => { started = resolve; });
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          if (selection === 1) return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
+          if (selection === 2) return { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B };
+          throw { code: 'selection-failed', message: 'picker failed' };
+        }
+        if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
+        if (command === 'host_enumerate_files') return { relativePaths: [] };
+        if (command === 'host_stop_watch') return null;
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      timers: new FakeTimers(0),
+    });
+    const first = (await host.chooseProject())!;
+    await host.watch(first, async () => { started(); await blocked; });
+    const delivery = nativeListener!({ payload: {
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'changed', relativePath: 'Main.uxml', revision: NATIVE_REVISION_A,
+    } });
+    await listenerStarted;
+
+    let replacementSettled = false;
+    const replacement = host.chooseProject().then((root) => { replacementSettled = true; return root; });
+    await Promise.resolve();
+    expect(replacementSettled).toBe(false);
+    await expect(host.enumerateFiles(first)).resolves.toMatchObject({ status: 'supported' });
+    release();
+    await delivery;
+    const second = await replacement;
+    await expect(host.enumerateFiles(first)).rejects.toMatchObject({ code: 'root-not-granted' });
+
+    await expect(host.chooseProject()).rejects.toMatchObject({ code: 'selection-failed' });
+    await expect(host.enumerateFiles(second!)).resolves.toMatchObject({ status: 'supported' });
+  });
+
+  it('invalidates an old frontend root when the same stable project is selected with a new grant', async () => {
+    let selection = 0;
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          return {
+            projectId: NATIVE_PROJECT_A,
+            displayName: 'Project A',
+            grant: selection === 1 ? NATIVE_GRANT_A : NATIVE_GRANT_B,
+          };
+        }
+        if (command === 'host_enumerate_files') return { relativePaths: [] };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async () => () => undefined,
+      timers: new FakeTimers(0),
+    });
+    const oldRoot = (await host.chooseProject())!;
+    const currentRoot = (await host.chooseProject())!;
+
+    await expect(host.enumerateFiles(oldRoot)).rejects.toMatchObject({ code: 'root-not-granted' });
+    await expect(host.enumerateFiles(currentRoot)).resolves.toMatchObject({ status: 'supported' });
+  });
   it('publishes frozen native capabilities without claiming browser or memory behavior', () => {
     const host = new TauriHost({
       invoke: async () => null,
@@ -227,9 +382,9 @@ describe('TauriHost IPC validation and serialization', () => {
 
   it.each([
     {},
-    { projectId: '', displayName: 'Chosen' },
-    { projectId: 'project-a', displayName: '' },
-    { projectId: 'project-a', displayName: 'Chosen', absolutePath: 'C:\\secret' },
+    { projectId: '', displayName: 'Chosen', grant: NATIVE_GRANT_A },
+    { projectId: NATIVE_PROJECT_A, displayName: '', grant: NATIVE_GRANT_A },
+    { projectId: NATIVE_PROJECT_A, displayName: 'Chosen', grant: NATIVE_GRANT_A, absolutePath: 'C:\\secret' },
   ])('rejects an untrusted choose_project result before branding it: %j', async (result) => {
     const host = new TauriHost({
       invoke: async () => result,
@@ -255,7 +410,9 @@ describe('TauriHost IPC validation and serialization', () => {
     const host = new TauriHost({
       invoke: async (command, payload) => {
         calls.push({ command, payload });
-        if (command === 'host_choose_project') return { projectId: 'project-a', displayName: 'Chosen Project' };
+        if (command === 'host_choose_project') {
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A };
+        }
         if (command === 'host_read_text') throw { code: 'not-found', message: 'missing fixture' };
         throw new Error(`Unexpected command: ${command}`);
       },
@@ -273,7 +430,9 @@ describe('TauriHost IPC validation and serialization', () => {
       { command: 'host_choose_project', payload: undefined },
       {
         command: 'host_read_text',
-        payload: { request: { projectId: 'project-a', relativePath: 'Assets/Main.uxml' } },
+        payload: { request: {
+          projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A, relativePath: 'Assets/Main.uxml',
+        } },
       },
     ]);
   });
@@ -297,10 +456,12 @@ describe('TauriHost IPC validation and serialization', () => {
     const events: FileChangeEvent[] = [];
     const watch = await host.watch(root, (event) => { events.push(event); });
     await bridge.emit('uxml://file-change', {
-      watchId: 'watch-1', projectId: 'other', kind: 'changed', relativePath: 'A.uss', revision: 'sha256:v1:1',
+      watchId: NATIVE_WATCH_A, projectId: 'other', grant: NATIVE_GRANT_A,
+      kind: 'changed', relativePath: 'A.uss', revision: NATIVE_REVISION_A,
     });
     await bridge.emit('uxml://file-change', {
-      watchId: 'watch-1', projectId: 'project-a', kind: 'changed', relativePath: '../escape', revision: 'sha256:v1:1',
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'changed', relativePath: '../escape', revision: NATIVE_REVISION_A,
     });
     expect(events).toEqual([]);
     watch.dispose();
@@ -360,19 +521,20 @@ describe('TauriHost IPC validation and serialization', () => {
     const host = new TauriHost({
       invoke: async (command) => {
         if (command === 'host_choose_project') {
-          return { projectId: 'project-a', displayName: 'Chosen Project' };
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A };
         }
         if (command === 'host_start_watch') {
           await nativeListener!({
             payload: {
-              watchId: 'watch-1',
-              projectId: 'project-a',
+              watchId: NATIVE_WATCH_A,
+              projectId: NATIVE_PROJECT_A,
+              grant: NATIVE_GRANT_A,
               kind: 'changed',
               relativePath: 'Assets/UI/Main.uxml',
               revision: `sha256:v1:${'a'.repeat(64)}`,
             },
           });
-          return { watchId: 'watch-1' };
+          return { watchId: NATIVE_WATCH_A };
         }
         if (command === 'host_stop_watch') return null;
         throw new Error(`Unexpected command: ${command}`);
@@ -390,7 +552,7 @@ describe('TauriHost IPC validation and serialization', () => {
 
     expect(events).toEqual([{
       kind: 'changed',
-      path: { projectId: 'project-a', relativePath: 'Assets/UI/Main.uxml' },
+      path: { projectId: NATIVE_PROJECT_A, relativePath: 'Assets/UI/Main.uxml' },
       revision: `sha256:v1:${'a'.repeat(64)}`,
     }]);
     watch.dispose();
@@ -401,7 +563,7 @@ describe('TauriHost IPC validation and serialization', () => {
     async (lastOpenedAt) => {
       const bridge = new FakeTauriBridge(() => 0);
       bridge.overrides.set('host_list_recent_projects', [{
-        projectId: 'project-a', displayName: 'Project', lastOpenedAt,
+        projectId: NATIVE_PROJECT_A, displayName: 'Project', lastOpenedAt,
       }]);
       const host = new TauriHost({ ...bridge.ports, timers: new FakeTimers(0) });
 
@@ -483,7 +645,8 @@ class FakeTauriBridge {
     const revision = this.nextRevision();
     this.revisions.set(path, revision);
     await this.emit('uxml://file-change', {
-      watchId: 'watch-1', projectId: 'project-a', kind: 'changed', relativePath: path, revision,
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'changed', relativePath: path, revision,
     });
   }
 
@@ -491,7 +654,8 @@ class FakeTauriBridge {
     this.files.delete(path);
     this.revisions.delete(path);
     await this.emit('uxml://file-change', {
-      watchId: 'watch-1', projectId: 'project-a', kind: 'deleted', relativePath: path,
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'deleted', relativePath: path,
     });
   }
 
@@ -506,18 +670,18 @@ class FakeTauriBridge {
     const request = readRequest(payload);
     switch (command) {
       case 'host_choose_project':
-        return { projectId: 'project-a', displayName: 'Chosen Project' };
+        return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A };
       case 'host_enumerate_files':
-        this.requireProject(request.projectId);
+        this.requireGranted(request);
         return { relativePaths: [...this.files.keys()].sort() };
       case 'host_read_text': {
-        this.requireProject(request.projectId);
+        this.requireGranted(request);
         const text = this.files.get(request.relativePath);
         if (text === undefined) throw nativeError('not-found', 'File does not exist.');
         return { text, revision: this.revisions.get(request.relativePath) };
       }
       case 'host_replace_text': {
-        this.requireProject(request.projectId);
+        this.requireGranted(request);
         const current = this.revisions.get(request.relativePath);
         if (current === undefined) throw nativeError('not-found', 'File does not exist.');
         if (current !== request.expectedRevision) throw nativeError('stale-revision', 'File changed before replacement.');
@@ -531,9 +695,11 @@ class FakeTauriBridge {
         return { revision };
       }
       case 'host_start_watch':
-        this.requireProject(request.projectId);
-        return { watchId: 'watch-1' };
+        this.requireGranted(request);
+        return { watchId: NATIVE_WATCH_A };
       case 'host_stop_watch':
+        this.requireGranted(request);
+        if (request.watchId !== NATIVE_WATCH_A) throw nativeError('read-failed', 'Watch is not active.');
         return null;
       case 'host_read_recovery':
         this.requireProject(request.projectId);
@@ -568,7 +734,12 @@ class FakeTauriBridge {
   }
 
   private requireProject(id: unknown): void {
-    if (id !== 'project-a') throw nativeError('root-not-granted', 'Project is not granted.');
+    if (id !== NATIVE_PROJECT_A) throw nativeError('root-not-granted', 'Project is not granted.');
+  }
+
+  private requireGranted(request: Record<string, any>): void {
+    this.requireProject(request.projectId);
+    if (request.grant !== NATIVE_GRANT_A) throw nativeError('root-not-granted', 'Grant is not current.');
   }
 
   private nextRevision(): string {

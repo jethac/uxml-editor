@@ -7,20 +7,18 @@ export interface RawTauriRuntimePorts {
     eventName: string,
     listener: (event: TauriEvent<unknown>) => void | Promise<void>,
   ) => Promise<() => void>;
-  readonly window: { close(): void | Promise<void> };
+  readonly reportError?: (error: unknown) => void;
   readonly timers: TauriTimerPorts;
 }
 
 export interface TauriRuntimeBindings {
   readonly host: TauriHost;
-  readonly hostPorts: RawTauriRuntimePorts;
   readonly desktop: AppDesktopPorts;
 }
 
 export function createTauriRuntimeBindings(raw: RawTauriRuntimePorts): TauriRuntimeBindings {
   return Object.freeze({
     host: new TauriHost(raw),
-    hostPorts: raw,
     desktop: Object.freeze({
       events: Object.freeze({ listen: raw.listen }),
       confirm: Object.freeze({
@@ -33,19 +31,31 @@ export function createTauriRuntimeBindings(raw: RawTauriRuntimePorts): TauriRunt
         },
       }),
       window: Object.freeze({
-        close: async () => {
-          const authorized = await raw.invoke('desktop_authorize_close');
-          if (authorized !== null && authorized !== undefined) {
-            throw new Error('Native host returned an unexpected authorization result.');
+        resolveClose: async (lease: string, action: 'close' | 'cancel') => {
+          if (!/^close:v1:[0-9a-f]{16}$/.test(lease)
+            || (action !== 'close' && action !== 'cancel')) {
+            throw new Error('Desktop close resolution is malformed.');
           }
-          try {
-            await raw.window.close();
-          } catch (error) {
-            await raw.invoke('desktop_revoke_close_authorization').catch(() => undefined);
-            throw error;
-          }
+          await invokeVoid(raw, 'desktop_resolve_close', { request: { lease, action } });
         },
+      }),
+      menu: Object.freeze({
+        setFileWorkflowEnabled: (enabled: boolean) => invokeVoid(
+          raw,
+          'desktop_set_file_workflow_enabled',
+          { request: { enabled } },
+        ),
+      }),
+      errors: Object.freeze({
+        report: (error: unknown) => (raw.reportError ?? console.error)(error),
       }),
     }),
   });
+}
+
+async function invokeVoid(raw: RawTauriRuntimePorts, command: string, payload: unknown): Promise<void> {
+  const result = await raw.invoke(command, payload);
+  if (result !== null && result !== undefined) {
+    throw new Error(`Native command ${command} returned unexpected data.`);
+  }
 }

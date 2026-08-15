@@ -8,11 +8,51 @@ import {
 } from './DesktopLifecycleController';
 
 describe('DesktopLifecycleController', () => {
+  it('holds one validated native lease through dirty evaluation and resolves it atomically', async () => {
+    const lease = `close:v1:${'a'.repeat(16)}`;
+    const events = new FakeDesktopEvents();
+    const observations: Array<readonly [string, string]> = [];
+    const controller = new DesktopLifecycleController({
+      events,
+      dirty: { getDirtyState: (observed?: string) => {
+        observations.push([observed ?? '<missing>', 'dirty']);
+        return 'clean';
+      } },
+      confirm: { confirmClose: () => 'cancel' },
+      save: { saveBeforeClose: () => 'cancelled' },
+      window: { resolveClose: async (...args: unknown[]) => {
+        observations.push([String(args[0] ?? '<missing>'), String(args[1] ?? '<missing>')]);
+      } },
+    });
+    await controller.start();
+
+    await events.emit('uxml://close-requested', { lease });
+
+    expect(observations).toEqual([[lease, 'dirty'], [lease, 'close']]);
+  });
+
+  it('resolves cancellation natively so a later close generation can proceed', async () => {
+    const lease = `close:v1:${'b'.repeat(16)}`;
+    const events = new FakeDesktopEvents();
+    const resolutions: unknown[][] = [];
+    const controller = new DesktopLifecycleController({
+      events,
+      dirty: { getDirtyState: () => 'dirty' },
+      confirm: { confirmClose: () => 'cancel' },
+      save: { saveBeforeClose: () => 'cancelled' },
+      window: { resolveClose: async (...args: unknown[]) => { resolutions.push(args); } },
+    });
+    await controller.start();
+
+    await events.emit('uxml://close-requested', { lease });
+
+    expect(resolutions).toEqual([[lease, 'cancel']]);
+  });
   it('closes clean windows without prompting or saving', async () => {
     const fixture = createFixture({ dirty: 'clean' });
     const disposable = await fixture.controller.start();
 
-    await fixture.events.emit('uxml://close-requested', null);
+    await fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
 
     expect(fixture.confirmCalls).toBe(0);
     expect(fixture.saveCalls).toBe(0);
@@ -30,7 +70,7 @@ describe('DesktopLifecycleController', () => {
     const fixture = createFixture({ dirty: 'dirty', choice, save });
     await fixture.controller.start();
 
-    await fixture.events.emit('uxml://close-requested', null);
+    await fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
 
     expect(fixture.confirmCalls).toBe(1);
     expect(fixture.saveCalls).toBe(expectedSaves);
@@ -41,7 +81,7 @@ describe('DesktopLifecycleController', () => {
     const fixture = createFixture({ dirty: 'unknown' });
     await fixture.controller.start();
 
-    await fixture.events.emit('uxml://close-requested', null);
+    await fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
 
     expect(fixture.confirmCalls).toBe(0);
     expect(fixture.saveCalls).toBe(0);
@@ -53,7 +93,7 @@ describe('DesktopLifecycleController', () => {
     const fixture = createFixture({ dirty: () => dirtyStates.shift() ?? 'dirty', choice: 'save', save: 'saved' });
     await fixture.controller.start();
 
-    await fixture.events.emit('uxml://close-requested', null);
+    await fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
 
     expect(fixture.saveCalls).toBe(1);
     expect(fixture.closeCalls).toBe(0);
@@ -65,8 +105,8 @@ describe('DesktopLifecycleController', () => {
     const fixture = createFixture({ dirty: 'dirty', choice: () => choice });
     await fixture.controller.start();
 
-    const first = fixture.events.emit('uxml://close-requested', null);
-    const second = fixture.events.emit('uxml://close-requested', null);
+    const first = fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
+    const second = fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
     await Promise.resolve();
     expect(fixture.confirmCalls).toBe(1);
     resolveChoice!('discard');
@@ -87,14 +127,14 @@ describe('DesktopLifecycleController', () => {
     });
     const disposable = await fixture.controller.start();
 
-    await fixture.events.emit('uxml://close-requested', null);
+    await fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
     expect(fixture.closeCalls).toBe(0);
-    await fixture.events.emit('uxml://close-requested', null);
+    await fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
     expect(fixture.closeCalls).toBe(1);
 
     disposable.dispose();
     disposable.dispose();
-    await fixture.events.emit('uxml://close-requested', null);
+    await fixture.events.emit('uxml://close-requested', CLOSE_REQUEST);
     expect(fixture.closeCalls).toBe(1);
     expect(fixture.events.listenerCount('uxml://close-requested')).toBe(0);
   });
@@ -133,7 +173,9 @@ function createFixture(options: FixtureOptions) {
         return result;
       },
     },
-    window: { close: async () => { closeCalls += 1; } },
+    window: { resolveClose: async (_lease, resolution) => {
+      if (resolution === 'close') closeCalls += 1;
+    } },
   });
   return {
     controller,
@@ -165,3 +207,5 @@ class FakeDesktopEvents {
     return this.listeners.get(eventName)?.size ?? 0;
   }
 }
+
+const CLOSE_REQUEST = Object.freeze({ lease: `close:v1:${'c'.repeat(16)}` });

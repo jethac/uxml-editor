@@ -11,7 +11,7 @@ if (!root) {
 }
 
 const runtime = createProductionTauriRuntime();
-const store = createRuntimeEditorStore({ tauriPorts: runtime?.hostPorts });
+const store = createRuntimeEditorStore({ tauriHost: runtime?.host });
 
 createRoot(root).render(
   <StrictMode>

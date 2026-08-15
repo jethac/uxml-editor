@@ -8,6 +8,7 @@ export interface RuntimeEditorStoreOptions {
   readonly scope?: Record<string, unknown>;
   readonly browserHostOptions?: BrowserHostOptions;
   readonly tauriPorts?: TauriHostPorts;
+  readonly tauriHost?: TauriHost;
   readonly storage?: EditorLayoutStorage | null;
   readonly viewport?: EditorViewport;
 }
@@ -16,7 +17,7 @@ export function createRuntimeEditorStore(options: RuntimeEditorStoreOptions = {}
   const scope = options.scope ?? globalThis as unknown as Record<string, unknown>;
   const tauri = Object.prototype.hasOwnProperty.call(scope, '__TAURI_INTERNALS__');
   const host = tauri
-    ? createTauriHost(options.tauriPorts)
+    ? options.tauriHost ?? createTauriHost(options.tauriPorts)
     : new BrowserHost(options.browserHostOptions);
   const storage = options.storage === undefined ? createBrowserLayoutStorage() : options.storage;
   const viewport = options.viewport ?? readRuntimeViewport(scope);

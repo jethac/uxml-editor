@@ -1,12 +1,19 @@
 use crate::{atomic_save::revision_for_bytes, error::HostError};
+use cap_std::{ambient_authority, fs::Dir};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        RwLock,
+    },
 };
+
+static NEXT_GRANT: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
 pub struct NormalizedRelativePath(String);
@@ -42,6 +49,7 @@ impl NormalizedRelativePath {
 pub struct ProjectRootDto {
     pub project_id: String,
     pub display_name: String,
+    pub grant: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,10 +59,21 @@ pub struct ReadTextDto {
     pub revision: String,
 }
 
-#[derive(Clone, Debug)]
 struct Grant {
+    authority: Dir,
     root: PathBuf,
     project_id: String,
+    token: String,
+}
+
+pub struct PreparedGrant {
+    grant: Grant,
+    root: ProjectRootDto,
+}
+
+pub struct WatchGrant {
+    pub authority: Dir,
+    pub root: PathBuf,
 }
 
 #[derive(Default)]
@@ -63,7 +82,13 @@ pub struct ScopedProjects {
 }
 
 impl ScopedProjects {
+    #[cfg(test)]
     pub fn grant_selected(&self, root: &Path) -> Result<ProjectRootDto, HostError> {
+        let prepared = self.prepare_selected(root)?;
+        self.install_selected(prepared)
+    }
+
+    pub fn prepare_selected(&self, root: &Path) -> Result<PreparedGrant, HostError> {
         let canonical = fs::canonicalize(root).map_err(|error| {
             HostError::io(
                 "selection-failed",
@@ -84,6 +109,14 @@ impl ScopedProjects {
                 "The selected project root is not a directory.",
             ));
         }
+        let authority =
+            Dir::open_ambient_dir(&canonical, ambient_authority()).map_err(|error| {
+                HostError::io(
+                    "selection-failed",
+                    "Could not open the selected project capability",
+                    &error,
+                )
+            })?;
         let display_name = canonical
             .file_name()
             .and_then(|name| name.to_str())
@@ -96,24 +129,35 @@ impl ScopedProjects {
             })?
             .to_string();
         let project_id = project_id_for_path(&canonical);
+        let token = next_grant_token();
         let grant = Grant {
+            authority,
             root: canonical,
             project_id: project_id.clone(),
+            token: token.clone(),
         };
-        let mut current = self.current.write().map_err(|_| {
-            HostError::new("selection-failed", "Project grant state is unavailable.")
-        })?;
-        *current = Some(grant);
-        Ok(ProjectRootDto {
-            project_id,
-            display_name,
+        Ok(PreparedGrant {
+            grant,
+            root: ProjectRootDto {
+                project_id,
+                display_name,
+                grant: token,
+            },
         })
     }
 
-    pub fn enumerate_files(&self, project_id: &str) -> Result<Vec<String>, HostError> {
-        self.with_grant(project_id, |grant| {
+    pub fn install_selected(&self, prepared: PreparedGrant) -> Result<ProjectRootDto, HostError> {
+        let mut current = self.current.write().map_err(|_| {
+            HostError::new("selection-failed", "Project grant state is unavailable.")
+        })?;
+        *current = Some(prepared.grant);
+        Ok(prepared.root)
+    }
+
+    pub fn enumerate_files(&self, project_id: &str, token: &str) -> Result<Vec<String>, HostError> {
+        self.with_grant(project_id, token, |grant| {
             let mut paths = Vec::new();
-            collect_files(&grant.root, &grant.root, &mut paths)?;
+            collect_files(&grant.authority, Path::new(""), &mut paths)?;
             validate_unique_paths(&paths)?;
             paths.sort();
             Ok(paths)
@@ -123,10 +167,42 @@ impl ScopedProjects {
     pub fn read_text(
         &self,
         project_id: &str,
+        token: &str,
         relative_path: &str,
     ) -> Result<ReadTextDto, HostError> {
-        self.with_file(project_id, relative_path, |path| {
-            let bytes = fs::read(path).map_err(|error| read_error(path, &error))?;
+        self.with_file(project_id, token, relative_path, |path| {
+            let mut file = path
+                .0
+                .open(path.1)
+                .map_err(|error| read_error(path.1, &error))?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| read_error(path.1, &error))?;
+            let revision = revision_for_bytes(&bytes);
+            let text = String::from_utf8(bytes).map_err(|_| {
+                HostError::new("read-failed", "Project file is not valid UTF-8 text.")
+            })?;
+            Ok(ReadTextDto { text, revision })
+        })
+    }
+
+    #[cfg(test)]
+    fn read_text_after_authorization_hook(
+        &self,
+        project_id: &str,
+        token: &str,
+        relative_path: &str,
+        hook: impl FnOnce(),
+    ) -> Result<ReadTextDto, HostError> {
+        self.with_file(project_id, token, relative_path, |path| {
+            hook();
+            let mut file = path
+                .0
+                .open(path.1)
+                .map_err(|error| read_error(path.1, &error))?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| read_error(path.1, &error))?;
             let revision = revision_for_bytes(&bytes);
             let text = String::from_utf8(bytes).map_err(|_| {
                 HostError::new("read-failed", "Project file is not valid UTF-8 text.")
@@ -138,21 +214,54 @@ impl ScopedProjects {
     pub fn with_file<T>(
         &self,
         project_id: &str,
+        token: &str,
         relative_path: &str,
-        operation: impl FnOnce(&Path) -> Result<T, HostError>,
+        operation: impl FnOnce((&Dir, &Path)) -> Result<T, HostError>,
     ) -> Result<T, HostError> {
-        self.with_grant(project_id, |grant| {
+        self.with_grant(project_id, token, |grant| {
             let normalized = NormalizedRelativePath::parse(relative_path)?;
-            let path = resolve_existing_file(grant, &normalized)?;
-            operation(&path)
+            let (parent, file_name) = open_existing_file_parent(grant, &normalized)?;
+            operation((&parent, file_name.as_path()))
         })
     }
 
     pub fn current_root(&self, project_id: &str) -> Result<PathBuf, HostError> {
-        self.with_grant(project_id, |grant| Ok(grant.root.clone()))
+        self.with_project(project_id, |grant| Ok(grant.root.clone()))
+    }
+
+    pub fn watch_grant(&self, project_id: &str, token: &str) -> Result<WatchGrant, HostError> {
+        self.with_grant(project_id, token, |grant| {
+            Ok(WatchGrant {
+                authority: grant.authority.try_clone().map_err(|error| {
+                    HostError::io(
+                        "read-failed",
+                        "Could not clone the project capability",
+                        &error,
+                    )
+                })?,
+                root: grant.root.clone(),
+            })
+        })
     }
 
     fn with_grant<T>(
+        &self,
+        project_id: &str,
+        token: &str,
+        operation: impl FnOnce(&Grant) -> Result<T, HostError>,
+    ) -> Result<T, HostError> {
+        self.with_project(project_id, |grant| {
+            if grant.token != token {
+                return Err(HostError::new(
+                    "root-not-granted",
+                    "Project grant is no longer current.",
+                ));
+            }
+            operation(grant)
+        })
+    }
+
+    fn with_project<T>(
         &self,
         project_id: &str,
         operation: impl FnOnce(&Grant) -> Result<T, HostError>,
@@ -173,6 +282,11 @@ impl ScopedProjects {
     }
 }
 
+fn next_grant_token() -> String {
+    let sequence = NEXT_GRANT.fetch_add(1, Ordering::Relaxed);
+    format!("grant:v1:{sequence:016x}")
+}
+
 pub fn validate_unique_paths(paths: &[String]) -> Result<(), HostError> {
     let mut seen = HashSet::new();
     for path in paths {
@@ -187,8 +301,10 @@ pub fn validate_unique_paths(paths: &[String]) -> Result<(), HostError> {
     Ok(())
 }
 
-fn collect_files(root: &Path, directory: &Path, paths: &mut Vec<String>) -> Result<(), HostError> {
-    let entries = fs::read_dir(directory).map_err(|error| read_error(directory, &error))?;
+fn collect_files(directory: &Dir, prefix: &Path, paths: &mut Vec<String>) -> Result<(), HostError> {
+    let entries = directory
+        .entries()
+        .map_err(|error| read_error(prefix, &error))?;
     for entry in entries {
         let entry = entry.map_err(|error| {
             HostError::io(
@@ -197,28 +313,24 @@ fn collect_files(root: &Path, directory: &Path, paths: &mut Vec<String>) -> Resu
                 &error,
             )
         })?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|error| read_error(&path, &error))?;
-        if is_symlink_or_reparse(&metadata) {
+        let file_name = entry.file_name();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| read_error(Path::new(&file_name), &error))?;
+        if file_type.is_symlink() {
             return Err(HostError::new(
                 "invalid-path",
                 "Project entry is a symbolic link or reparse point.",
             ));
         }
-        let canonical = fs::canonicalize(&path).map_err(|error| read_error(&path, &error))?;
-        if !canonical.starts_with(root) {
-            return Err(HostError::new(
-                "invalid-path",
-                "Project entry escapes the granted root.",
-            ));
-        }
-        if metadata.is_dir() {
-            collect_files(root, &canonical, paths)?;
-        } else if metadata.is_file() {
-            let relative = path.strip_prefix(root).map_err(|_| {
-                HostError::new("invalid-path", "Project entry is outside the granted root.")
-            })?;
-            let relative = relative_path_string(relative)?;
+        let relative = prefix.join(&file_name);
+        if file_type.is_dir() {
+            let child = entry
+                .open_dir()
+                .map_err(|error| read_error(&relative, &error))?;
+            collect_files(&child, &relative, paths)?;
+        } else if file_type.is_file() {
+            let relative = relative_path_string(&relative)?;
             NormalizedRelativePath::parse(&relative)?;
             paths.push(relative);
         }
@@ -226,36 +338,37 @@ fn collect_files(root: &Path, directory: &Path, paths: &mut Vec<String>) -> Resu
     Ok(())
 }
 
-fn resolve_existing_file(
+fn open_existing_file_parent(
     grant: &Grant,
     relative: &NormalizedRelativePath,
-) -> Result<PathBuf, HostError> {
-    let mut candidate = grant.root.clone();
-    for segment in relative.as_str().split('/') {
-        candidate.push(segment);
-        let metadata =
-            fs::symlink_metadata(&candidate).map_err(|error| read_error(&candidate, &error))?;
-        if is_symlink_or_reparse(&metadata) {
-            return Err(HostError::new(
-                "invalid-path",
-                "Project path traverses a symbolic link or reparse point.",
-            ));
-        }
+) -> Result<(Dir, PathBuf), HostError> {
+    let relative = Path::new(relative.as_str());
+    let parent_path = relative.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = relative
+        .file_name()
+        .ok_or_else(|| invalid_path(relative.to_string_lossy().as_ref()))?;
+    let parent = if parent_path.as_os_str().is_empty() {
+        grant.authority.try_clone()
+    } else {
+        grant.authority.open_dir(parent_path)
     }
-    let canonical = fs::canonicalize(&candidate).map_err(|error| read_error(&candidate, &error))?;
-    if !canonical.starts_with(&grant.root) {
+    .map_err(|error| read_error(parent_path, &error))?;
+    let metadata = parent
+        .symlink_metadata(file_name)
+        .map_err(|error| read_error(relative, &error))?;
+    if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
         return Err(HostError::new(
             "invalid-path",
-            "Project path escapes the granted root.",
+            "Project path traverses a symbolic link or reparse point.",
         ));
     }
-    if !canonical.is_file() {
+    if !metadata.is_file() {
         return Err(HostError::new(
             "not-found",
-            format!("Project file does not exist: {}", relative.as_str()),
+            format!("Project file does not exist: {}", relative.display()),
         ));
     }
-    Ok(canonical)
+    Ok((parent, PathBuf::from(file_name)))
 }
 
 fn relative_path_string(path: &Path) -> Result<String, HostError> {
@@ -307,13 +420,10 @@ fn read_error(path: &Path, error: &std::io::Error) -> HostError {
     HostError::io(code, "Could not access a project path", error)
 }
 
-fn is_symlink_or_reparse(metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
+fn is_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
+        use cap_std::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
         metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
@@ -373,9 +483,11 @@ mod tests {
         let projects = ScopedProjects::default();
 
         let root = projects.grant_selected(&fixture.root).unwrap();
-        let files = projects.enumerate_files(&root.project_id).unwrap();
+        let files = projects
+            .enumerate_files(&root.project_id, &root.grant)
+            .unwrap();
         let read = projects
-            .read_text(&root.project_id, "Assets/UI/Main.uxml")
+            .read_text(&root.project_id, &root.grant, "Assets/UI/Main.uxml")
             .unwrap();
 
         assert_eq!(
@@ -406,15 +518,41 @@ mod tests {
         let second_root = projects.grant_selected(&second.root).unwrap();
 
         let error = projects
-            .read_text(&first_root.project_id, "Main.uxml")
+            .read_text(&first_root.project_id, &first_root.grant, "Main.uxml")
             .unwrap_err();
         assert_eq!(error.code, "root-not-granted");
         assert_eq!(
             projects
-                .read_text(&second_root.project_id, "Main.uxml")
+                .read_text(&second_root.project_id, &second_root.grant, "Main.uxml")
                 .unwrap()
                 .text,
             "second"
+        );
+    }
+
+    #[test]
+    fn reselecting_the_same_stable_project_invalidates_the_previous_grant_token() {
+        let fixture = Fixture::new();
+        fixture.write("Main.uxml", "same project");
+        let projects = ScopedProjects::default();
+        let previous = projects.grant_selected(&fixture.root).unwrap();
+        let current = projects.grant_selected(&fixture.root).unwrap();
+
+        assert_eq!(previous.project_id, current.project_id);
+        assert_ne!(previous.grant, current.grant);
+        assert_eq!(
+            projects
+                .read_text(&previous.project_id, &previous.grant, "Main.uxml")
+                .unwrap_err()
+                .code,
+            "root-not-granted"
+        );
+        assert_eq!(
+            projects
+                .read_text(&current.project_id, &current.grant, "Main.uxml")
+                .unwrap()
+                .text,
+            "same project"
         );
     }
 
@@ -443,11 +581,53 @@ mod tests {
         let root = projects.grant_selected(&project.root).unwrap();
 
         let read_error = projects
-            .read_text(&root.project_id, "Assets/Linked.uxml")
+            .read_text(&root.project_id, &root.grant, "Assets/Linked.uxml")
             .unwrap_err();
         assert_eq!(read_error.code, "invalid-path");
-        let enumerate_error = projects.enumerate_files(&root.project_id).unwrap_err();
+        let enumerate_error = projects
+            .enumerate_files(&root.project_id, &root.grant)
+            .unwrap_err();
         assert_eq!(enumerate_error.code, "invalid-path");
+    }
+
+    #[test]
+    fn authorized_multi_component_read_never_follows_a_concurrent_directory_swap() {
+        let project = Fixture::new();
+        let outside = Fixture::new();
+        project.write("Assets/Main.uxml", "inside");
+        outside.write("Main.uxml", "outside");
+        let projects = ScopedProjects::default();
+        let root = projects.grant_selected(&project.root).unwrap();
+        let assets = project.root.join("Assets");
+        let original_assets = project.root.join("Assets-original");
+        let swap_prevented = std::cell::Cell::new(false);
+
+        let result = projects.read_text_after_authorization_hook(
+            &root.project_id,
+            &root.grant,
+            "Assets/Main.uxml",
+            || {
+                if fs::rename(&assets, &original_assets).is_err() {
+                    swap_prevented.set(true);
+                    return;
+                }
+                if create_dir_symlink(&outside.root, &assets).is_err() {
+                    fs::rename(&original_assets, &assets).unwrap();
+                }
+            },
+        );
+
+        if swap_prevented.get() {
+            assert_eq!(result.unwrap().text, "inside");
+        } else if fs::symlink_metadata(&assets)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            remove_dir_symlink(&assets).unwrap();
+            fs::rename(&original_assets, &assets).unwrap();
+            if let Ok(read) = result {
+                assert_ne!(read.text, "outside");
+            }
+        }
     }
 
     #[test]
@@ -471,7 +651,9 @@ mod tests {
 
         let mut mismatch = None;
         for _ in 0..128 {
-            let read = projects.read_text(&root.project_id, "Main.uxml").unwrap();
+            let read = projects
+                .read_text(&root.project_id, &root.grant, "Main.uxml")
+                .unwrap();
             let expected = format!("sha256:v1:{:x}", Sha256::digest(read.text.as_bytes()));
             if read.revision != expected {
                 mismatch = Some((read.revision, expected));
@@ -524,5 +706,25 @@ mod tests {
     #[cfg(windows)]
     fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
         std::os::windows::fs::symlink_file(target, link)
+    }
+
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[cfg(unix)]
+    fn remove_dir_symlink(link: &Path) -> std::io::Result<()> {
+        fs::remove_file(link)
+    }
+
+    #[cfg(windows)]
+    fn remove_dir_symlink(link: &Path) -> std::io::Result<()> {
+        fs::remove_dir(link)
     }
 }

@@ -300,7 +300,8 @@ export class MemoryHost implements HostPort {
   }
 
   private async dispatch(event: FileChangeEvent): Promise<void> {
-    const watchers = [...(this.watchers.get(event.path.projectId) ?? [])];
+    const projectId = event.kind === 'rescan-required' ? event.root.id : event.path.projectId;
+    const watchers = [...(this.watchers.get(projectId) ?? [])];
     for (const watcher of watchers) {
       if (watcher.active) await watcher.listener(event);
     }

@@ -1,18 +1,21 @@
 declare const projectIdBrand: unique symbol;
 declare const projectPathBrand: unique symbol;
 declare const fileRevisionBrand: unique symbol;
+const projectGrantGeneration = Symbol('projectGrantGeneration');
 
 export type ProjectId = string & { readonly [projectIdBrand]: true };
 export type ProjectPath = Readonly<{
   projectId: ProjectId;
   relativePath: string;
   readonly [projectPathBrand]?: true;
+  readonly [projectGrantGeneration]?: string;
 }>;
 export type FileRevision = string & { readonly [fileRevisionBrand]: true };
 
 export interface ProjectRoot {
   readonly id: ProjectId;
   readonly name: string;
+  readonly [projectGrantGeneration]?: string;
 }
 
 export interface FileReadResult {
@@ -59,14 +62,20 @@ export interface HostCapabilities {
 
 export type FileChangeEvent =
   | Readonly<{ readonly kind: 'changed'; readonly path: ProjectPath; readonly revision: FileRevision }>
-  | Readonly<{ readonly kind: 'deleted'; readonly path: ProjectPath }>;
+  | Readonly<{ readonly kind: 'deleted'; readonly path: ProjectPath }>
+  | Readonly<{ readonly kind: 'rescan-required'; readonly root: ProjectRoot }>;
 
 export type FileChangeListener = (event: FileChangeEvent) => void | Promise<void>;
 export type ScheduledCallback = () => void | Promise<void>;
 
 export interface Disposable {
   dispose(): void;
+  readonly completion?: Promise<DisposalOutcome>;
 }
+
+export type DisposalOutcome =
+  | Readonly<{ readonly status: 'disposed' }>
+  | Readonly<{ readonly status: 'failed'; readonly error: HostError }>;
 
 export interface HostPort {
   readonly capabilities: HostCapabilities;
@@ -112,7 +121,12 @@ export function projectPath(root: ProjectRoot, candidate: string): ProjectPath {
     throw new HostError('invalid-path', 'A project path requires a valid project root and text path.');
   }
   const relativePath = normalizeRelativePath(candidate);
-  return Object.freeze({ projectId: root.id, relativePath });
+  const path: { projectId: ProjectId; relativePath: string; [projectGrantGeneration]?: string } = {
+    projectId: root.id,
+    relativePath,
+  };
+  copyProjectGrantGeneration(root, path);
+  return Object.freeze(path);
 }
 
 export function normalizeRelativePath(candidate: string): string {
@@ -149,11 +163,35 @@ export function fileRevision(value: string): FileRevision {
   return value as FileRevision;
 }
 
-export function snapshotProjectRoot(root: ProjectRoot): ProjectRoot {
+export function snapshotProjectRoot(root: ProjectRoot, generation?: string): ProjectRoot {
   if (!isProjectRoot(root)) {
     throw new HostError('root-not-granted', 'The project root is invalid.');
   }
-  return Object.freeze({ id: projectId(root.id), name: root.name });
+  const snapshot: { id: ProjectId; name: string; [projectGrantGeneration]?: string } = {
+    id: projectId(root.id),
+    name: root.name,
+  };
+  copyProjectGrantGeneration(root, snapshot, generation);
+  return Object.freeze(snapshot);
+}
+
+export function projectGrantGenerationOf(candidate: ProjectRoot | ProjectPath): string | undefined {
+  return candidate[projectGrantGeneration];
+}
+
+function copyProjectGrantGeneration(
+  source: ProjectRoot | ProjectPath,
+  target: { [projectGrantGeneration]?: string },
+  override?: string,
+): void {
+  const generation = override ?? source[projectGrantGeneration];
+  if (generation === undefined) return;
+  Object.defineProperty(target, projectGrantGeneration, {
+    configurable: false,
+    enumerable: false,
+    value: generation,
+    writable: false,
+  });
 }
 
 function isProjectRoot(candidate: unknown): candidate is ProjectRoot {

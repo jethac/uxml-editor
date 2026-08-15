@@ -3,6 +3,8 @@ import type { Disposable } from '../host/HostPort';
 export type DirtyState = 'clean' | 'dirty' | 'unknown';
 export type CloseChoice = 'save' | 'discard' | 'cancel';
 export type SaveBeforeCloseResult = 'saved' | 'cancelled' | 'failed';
+export type CloseLease = string;
+export type CloseResolution = 'close' | 'cancel';
 
 export interface DesktopEvent<T> {
   readonly payload: T;
@@ -15,10 +17,10 @@ export interface DesktopLifecyclePorts {
       listener: (event: DesktopEvent<unknown>) => void | Promise<void>,
     ): Promise<() => void>;
   };
-  readonly dirty: { getDirtyState(): DirtyState | Promise<DirtyState> };
-  readonly confirm: { confirmClose(): CloseChoice | Promise<CloseChoice> };
-  readonly save: { saveBeforeClose(): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult> };
-  readonly window: { close(): void | Promise<void> };
+  readonly dirty: { getDirtyState(lease: CloseLease): DirtyState | Promise<DirtyState> };
+  readonly confirm: { confirmClose(lease: CloseLease): CloseChoice | Promise<CloseChoice> };
+  readonly save: { saveBeforeClose(lease: CloseLease): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult> };
+  readonly window: { resolveClose(lease: CloseLease, resolution: CloseResolution): void | Promise<void> };
 }
 
 export class DesktopLifecycleController {
@@ -33,7 +35,10 @@ export class DesktopLifecycleController {
     this.active = true;
     let unlisten: (() => void) | undefined;
     try {
-      unlisten = await this.ports.events.listen('uxml://close-requested', () => this.requestClose());
+      unlisten = await this.ports.events.listen('uxml://close-requested', ({ payload }) => {
+        const lease = parseCloseLease(payload);
+        if (lease !== null) return this.requestClose(lease);
+      });
     } catch (error) {
       this.active = false;
       throw error;
@@ -47,59 +52,68 @@ export class DesktopLifecycleController {
     });
   }
 
-  private async requestClose(): Promise<void> {
+  private async requestClose(lease: CloseLease): Promise<void> {
     if (!this.active || this.closing) return;
     if (this.handling !== undefined) return this.handling;
-    const attempt = this.evaluateClose().finally(() => {
+    const attempt = this.evaluateClose(lease).finally(() => {
       if (this.handling === attempt) this.handling = undefined;
     });
     this.handling = attempt;
     return attempt;
   }
 
-  private async evaluateClose(): Promise<void> {
+  private async evaluateClose(lease: CloseLease): Promise<void> {
     let dirty: DirtyState;
     try {
-      dirty = await this.ports.dirty.getDirtyState();
+      dirty = await this.ports.dirty.getDirtyState(lease);
     } catch {
-      return;
+      return this.resolveOnce(lease, 'cancel');
     }
-    if (!isDirtyState(dirty) || dirty === 'unknown') return;
-    if (dirty === 'clean') return this.closeOnce();
+    if (!isDirtyState(dirty) || dirty === 'unknown') return this.resolveOnce(lease, 'cancel');
+    if (dirty === 'clean') return this.resolveOnce(lease, 'close');
 
     let choice: CloseChoice;
     try {
-      choice = await this.ports.confirm.confirmClose();
+      choice = await this.ports.confirm.confirmClose(lease);
     } catch {
-      return;
+      return this.resolveOnce(lease, 'cancel');
     }
-    if (!isCloseChoice(choice) || choice === 'cancel') return;
-    if (choice === 'discard') return this.closeOnce();
+    if (!isCloseChoice(choice) || choice === 'cancel') return this.resolveOnce(lease, 'cancel');
+    if (choice === 'discard') return this.resolveOnce(lease, 'close');
 
     let saved: SaveBeforeCloseResult;
     try {
-      saved = await this.ports.save.saveBeforeClose();
+      saved = await this.ports.save.saveBeforeClose(lease);
     } catch {
-      return;
+      return this.resolveOnce(lease, 'cancel');
     }
-    if (saved !== 'saved') return;
+    if (saved !== 'saved') return this.resolveOnce(lease, 'cancel');
     try {
-      if (await this.ports.dirty.getDirtyState() !== 'clean') return;
+      if (await this.ports.dirty.getDirtyState(lease) !== 'clean') {
+        return this.resolveOnce(lease, 'cancel');
+      }
     } catch {
-      return;
+      return this.resolveOnce(lease, 'cancel');
     }
-    await this.closeOnce();
+    await this.resolveOnce(lease, 'close');
   }
 
-  private async closeOnce(): Promise<void> {
-    if (!this.active || this.closing) return;
-    this.closing = true;
+  private async resolveOnce(lease: CloseLease, resolution: CloseResolution): Promise<void> {
+    if (!this.active || (resolution === 'close' && this.closing)) return;
+    if (resolution === 'close') this.closing = true;
     try {
-      await this.ports.window.close();
+      await this.ports.window.resolveClose(lease, resolution);
     } catch {
-      this.closing = false;
+      if (resolution === 'close') this.closing = false;
     }
   }
+}
+
+function parseCloseLease(payload: unknown): CloseLease | null {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (Object.keys(record).length !== 1 || typeof record.lease !== 'string') return null;
+  return /^close:v1:[0-9a-f]{16}$/.test(record.lease) ? record.lease : null;
 }
 
 function isDirtyState(value: unknown): value is DirtyState {

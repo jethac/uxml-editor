@@ -3,15 +3,19 @@ mod atomic_save;
 mod commands;
 mod desktop;
 mod error;
+mod identifiers;
 mod scoped_fs;
 mod watch;
 
 use commands::{
-    ConfirmationDto, ConfirmationRequest, FileEnumerationDto, HostState, MessageKind,
-    MessageRequest, PathRequest, ProjectRequest, RecentProjectRequest, RecoveryDto,
+    ConfirmationDto, ConfirmationRequest, FileEnumerationDto, GrantedProjectRequest, HostState,
+    MessageKind, MessageRequest, PathRequest, ProjectRequest, RecentProjectRequest, RecoveryDto,
     RecoveryWriteRequest, ReplaceTextRequest, RevisionDto, WatchStartDto, WatchStopRequest,
 };
-use desktop::MenuCommandPayload;
+use desktop::{
+    CloseGateDecision, CloseRequestPayload, CloseResolutionRequest, FileWorkflowEnabledRequest,
+    MenuCommandPayload,
+};
 use error::HostError;
 use scoped_fs::{ProjectRootDto, ReadTextDto};
 use std::{sync::Arc, time::SystemTime};
@@ -54,7 +58,7 @@ async fn host_choose_project(
 #[tauri::command]
 fn host_enumerate_files(
     state: State<'_, HostState>,
-    request: ProjectRequest,
+    request: GrantedProjectRequest,
 ) -> Result<FileEnumerationDto, HostError> {
     state.enumerate(&request)
 }
@@ -79,7 +83,7 @@ fn host_replace_text(
 fn host_start_watch(
     app: AppHandle,
     state: State<'_, HostState>,
-    request: ProjectRequest,
+    request: GrantedProjectRequest,
 ) -> Result<WatchStartDto, HostError> {
     let event_app = app.clone();
     let emit: WatchEmitter = Arc::new(move |event| {
@@ -93,7 +97,9 @@ fn host_stop_watch(
     state: State<'_, HostState>,
     request: WatchStopRequest,
 ) -> Result<(), HostError> {
-    state.watches.stop(&request.watch_id)
+    state
+        .watches
+        .stop(&request.watch_id, &request.project_id, &request.grant)
 }
 
 #[tauri::command]
@@ -225,13 +231,40 @@ async fn desktop_confirm_close(app: AppHandle) -> Result<&'static str, HostError
 }
 
 #[tauri::command]
-fn desktop_authorize_close(state: State<'_, HostState>) {
-    state.close_gate.authorize_once();
+fn desktop_resolve_close(
+    app: AppHandle,
+    state: State<'_, HostState>,
+    request: CloseResolutionRequest,
+) -> Result<(), HostError> {
+    if !state.close_gate.resolve(&request.lease, request.action)? {
+        return Ok(());
+    }
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| HostError::new("read-failed", "The main desktop window is unavailable."))?;
+    if let Err(error) = window.destroy() {
+        return Err(HostError::new(
+            "read-failed",
+            format!("Native window close failed: {error}"),
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn desktop_revoke_close_authorization(state: State<'_, HostState>) {
-    state.close_gate.revoke_authorization();
+fn desktop_set_file_workflow_enabled(
+    app: AppHandle,
+    request: FileWorkflowEnabledRequest,
+) -> Result<(), HostError> {
+    let menu = app
+        .menu()
+        .ok_or_else(|| HostError::new("read-failed", "The native menu is unavailable."))?;
+    desktop::set_file_workflow_enabled(&menu, request.enabled).map_err(|error| {
+        HostError::new(
+            "read-failed",
+            format!("Could not update native file commands: {error}"),
+        )
+    })
 }
 
 fn validate_dialog_text(value: &str, field: &str, max_length: usize) -> Result<(), HostError> {
@@ -291,8 +324,8 @@ pub fn run() {
             host_confirm,
             host_show_message,
             desktop_confirm_close,
-            desktop_authorize_close,
-            desktop_revoke_close_authorization,
+            desktop_resolve_close,
+            desktop_set_file_workflow_enabled,
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -303,9 +336,13 @@ pub fn run() {
                     api.prevent_close();
                     return;
                 };
-                if state.close_gate.should_intercept() {
-                    api.prevent_close();
-                    let _ = window.emit("uxml://close-requested", ());
+                match state.close_gate.request() {
+                    Ok(CloseGateDecision::Prevent) | Err(_) => api.prevent_close(),
+                    Ok(CloseGateDecision::Emit(lease)) => {
+                        api.prevent_close();
+                        let _ =
+                            window.emit("uxml://close-requested", CloseRequestPayload { lease });
+                    }
                 }
             }
         })

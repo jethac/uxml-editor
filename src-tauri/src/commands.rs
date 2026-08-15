@@ -3,6 +3,9 @@ use crate::{
     atomic_save::replace_text_atomically,
     desktop::CloseGate,
     error::HostError,
+    identifiers::{
+        deserialize_grant, deserialize_project_id, deserialize_revision, deserialize_watch_id,
+    },
     scoped_fs::{ProjectRootDto, ReadTextDto, ScopedProjects},
     watch::{WatchEmitter, WatchRegistry},
 };
@@ -15,21 +18,38 @@ use std::{
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
     pub project_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PathRequest {
+pub struct GrantedProjectRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
     pub project_id: String,
+    #[serde(deserialize_with = "deserialize_grant")]
+    pub grant: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PathRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
+    pub project_id: String,
+    #[serde(deserialize_with = "deserialize_grant")]
+    pub grant: String,
     pub relative_path: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplaceTextRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
     pub project_id: String,
+    #[serde(deserialize_with = "deserialize_grant")]
+    pub grant: String,
     pub relative_path: String,
+    #[serde(deserialize_with = "deserialize_revision")]
     pub expected_revision: String,
     pub text: String,
 }
@@ -37,6 +57,7 @@ pub struct ReplaceTextRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecoveryWriteRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
     pub project_id: String,
     pub journal: String,
 }
@@ -44,6 +65,7 @@ pub struct RecoveryWriteRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecentProjectRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
     pub project_id: String,
     pub display_name: String,
 }
@@ -51,6 +73,11 @@ pub struct RecentProjectRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WatchStopRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
+    pub project_id: String,
+    #[serde(deserialize_with = "deserialize_grant")]
+    pub grant: String,
+    #[serde(deserialize_with = "deserialize_watch_id")]
     pub watch_id: String,
 }
 
@@ -139,45 +166,63 @@ impl HostState {
 
     pub fn select_project(&self, path: &Path) -> Result<ProjectRootDto, HostError> {
         let _session = self.lock_project_session("selection-failed")?;
-        let selected = self.projects.grant_selected(path)?;
-        self.watches.stop_all();
-        Ok(selected)
+        let prepared = self.projects.prepare_selected(path)?;
+        self.watches.stop_all()?;
+        self.projects.install_selected(prepared)
     }
 
     pub fn start_watch(
         &self,
-        request: &ProjectRequest,
+        request: &GrantedProjectRequest,
         emit: WatchEmitter,
     ) -> Result<WatchStartDto, HostError> {
         let _session = self.lock_project_session("read-failed")?;
-        let root = self.projects.current_root(&request.project_id)?;
+        let grant = self
+            .projects
+            .watch_grant(&request.project_id, &request.grant)?;
         Ok(WatchStartDto {
-            watch_id: self.watches.start(root, request.project_id.clone(), emit)?,
+            watch_id: self.watches.start(
+                grant.root,
+                grant.authority,
+                request.project_id.clone(),
+                request.grant.clone(),
+                emit,
+            )?,
         })
     }
 
-    pub fn enumerate(&self, request: &ProjectRequest) -> Result<FileEnumerationDto, HostError> {
+    pub fn enumerate(
+        &self,
+        request: &GrantedProjectRequest,
+    ) -> Result<FileEnumerationDto, HostError> {
         Ok(FileEnumerationDto {
-            relative_paths: self.projects.enumerate_files(&request.project_id)?,
+            relative_paths: self
+                .projects
+                .enumerate_files(&request.project_id, &request.grant)?,
         })
     }
 
     pub fn read(&self, request: &PathRequest) -> Result<ReadTextDto, HostError> {
         self.projects
-            .read_text(&request.project_id, &request.relative_path)
+            .read_text(&request.project_id, &request.grant, &request.relative_path)
     }
 
     pub fn replace(&self, request: &ReplaceTextRequest) -> Result<RevisionDto, HostError> {
-        self.projects
-            .with_file(&request.project_id, &request.relative_path, |path| {
+        self.projects.with_file(
+            &request.project_id,
+            &request.grant,
+            &request.relative_path,
+            |(parent, file_name)| {
                 Ok(RevisionDto {
                     revision: replace_text_atomically(
-                        path,
+                        parent,
+                        file_name,
                         &request.expected_revision,
                         &request.text,
                     )?,
                 })
-            })
+            },
+        )
     }
 
     pub fn read_recovery(&self, request: &ProjectRequest) -> Result<RecoveryDto, HostError> {
@@ -224,15 +269,15 @@ impl HostState {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileEnumerationDto, HostState, PathRequest, ProjectRequest, RecentProjectRequest,
-        RecoveryWriteRequest, ReplaceTextRequest,
+        FileEnumerationDto, GrantedProjectRequest, HostState, PathRequest, ProjectRequest,
+        RecentProjectRequest, RecoveryWriteRequest, ReplaceTextRequest, WatchStopRequest,
     };
     use std::{
         fs,
         path::PathBuf,
         sync::{
             atomic::{AtomicU64, Ordering},
-            Arc, Barrier,
+            mpsc, Arc, Barrier, Mutex,
         },
     };
 
@@ -255,10 +300,70 @@ mod tests {
         let error = state
             .read(&PathRequest {
                 project_id: root.project_id,
+                grant: root.grant,
                 relative_path: "C:/secret.uxml".to_string(),
             })
             .unwrap_err();
         assert_eq!(error.code, "invalid-path");
+    }
+
+    #[test]
+    fn filesystem_request_schemas_require_exact_project_grant_revision_and_watch_ids() {
+        let project_id = format!("project:v1:{}", "a".repeat(64));
+        let grant = format!("grant:v1:{}", "b".repeat(16));
+        let revision = format!("sha256:v1:{}", "c".repeat(64));
+        let watch_id = format!("watch:v1:{}", "d".repeat(16));
+
+        assert!(
+            serde_json::from_value::<GrantedProjectRequest>(serde_json::json!({
+                "projectId": project_id,
+                "grant": grant,
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ReplaceTextRequest>(serde_json::json!({
+                "projectId": format!("project:v1:{}", "a".repeat(64)),
+                "grant": format!("grant:v1:{}", "b".repeat(16)),
+                "relativePath": "Main.uxml",
+                "expectedRevision": revision,
+                "text": "replacement",
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<WatchStopRequest>(serde_json::json!({
+                "projectId": format!("project:v1:{}", "a".repeat(64)),
+                "grant": format!("grant:v1:{}", "b".repeat(16)),
+                "watchId": watch_id,
+            }))
+            .is_ok()
+        );
+
+        for malformed in [
+            serde_json::json!({ "projectId": "project:v1:short", "grant": format!("grant:v1:{}", "b".repeat(16)) }),
+            serde_json::json!({ "projectId": format!("project:v1:{}", "A".repeat(64)), "grant": format!("grant:v1:{}", "b".repeat(16)) }),
+            serde_json::json!({ "projectId": format!("project:v1:{}", "a".repeat(64)), "grant": "grant:v1:short" }),
+        ] {
+            assert!(serde_json::from_value::<GrantedProjectRequest>(malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn project_selection_serializes_a_distinct_exact_grant_token() {
+        let fixture = Fixture::new();
+        let state = HostState::new(fixture.root.join("app-data"));
+
+        let selected =
+            serde_json::to_value(state.select_project(&fixture.project).unwrap()).unwrap();
+
+        assert_eq!(
+            selected["projectId"].as_str().unwrap().len(),
+            "project:v1:".len() + 64
+        );
+        let grant = selected["grant"].as_str().unwrap();
+        assert!(grant.starts_with("grant:v1:"));
+        assert_eq!(grant.len(), "grant:v1:".len() + 16);
     }
 
     #[test]
@@ -270,12 +375,14 @@ mod tests {
         let missing = state
             .read(&PathRequest {
                 project_id: root.project_id.clone(),
+                grant: root.grant.clone(),
                 relative_path: "Missing.uxml".to_string(),
             })
             .unwrap_err();
         let observed = state
             .read(&PathRequest {
                 project_id: root.project_id.clone(),
+                grant: root.grant.clone(),
                 relative_path: "Main.uxml".to_string(),
             })
             .unwrap();
@@ -283,6 +390,7 @@ mod tests {
         let stale = state
             .replace(&ReplaceTextRequest {
                 project_id: root.project_id,
+                grant: root.grant,
                 relative_path: "Main.uxml".to_string(),
                 expected_revision: observed.revision,
                 text: "local".to_string(),
@@ -305,13 +413,15 @@ mod tests {
         let root = state.select_project(&fixture.project).unwrap();
 
         let enumeration = state
-            .enumerate(&ProjectRequest {
+            .enumerate(&GrantedProjectRequest {
                 project_id: root.project_id.clone(),
+                grant: root.grant.clone(),
             })
             .unwrap();
         assert_eq!(enumeration.relative_paths, ["A.uxml", "B.uss"]);
         let request = PathRequest {
             project_id: root.project_id.clone(),
+            grant: root.grant.clone(),
             relative_path: "A.uxml".to_string(),
         };
         let read = state.read(&request).unwrap();
@@ -322,6 +432,7 @@ mod tests {
         let replacement = state
             .replace(&ReplaceTextRequest {
                 project_id: root.project_id.clone(),
+                grant: root.grant.clone(),
                 relative_path: "A.uxml".to_string(),
                 expected_revision: read.revision.clone(),
                 text: "replacement\r\n".to_string(),
@@ -336,6 +447,7 @@ mod tests {
             state
                 .replace(&ReplaceTextRequest {
                     project_id: root.project_id.clone(),
+                    grant: root.grant.clone(),
                     relative_path: "A.uxml".to_string(),
                     expected_revision: read.revision,
                     text: "stale".to_string(),
@@ -385,8 +497,9 @@ mod tests {
 
         assert_eq!(
             state
-                .enumerate(&ProjectRequest {
+                .enumerate(&GrantedProjectRequest {
                     project_id: first.project_id,
+                    grant: first.grant,
                 })
                 .unwrap_err()
                 .code,
@@ -394,8 +507,9 @@ mod tests {
         );
         assert_eq!(
             state
-                .enumerate(&ProjectRequest {
+                .enumerate(&GrantedProjectRequest {
                     project_id: second.project_id,
+                    grant: second.grant,
                 })
                 .unwrap()
                 .relative_paths,
@@ -411,8 +525,9 @@ mod tests {
         let current = state.select_project(&fixture.project).unwrap();
         state
             .start_watch(
-                &ProjectRequest {
+                &GrantedProjectRequest {
                     project_id: current.project_id.clone(),
+                    grant: current.grant.clone(),
                 },
                 Arc::new(|_| {}),
             )
@@ -425,8 +540,9 @@ mod tests {
         assert_eq!(state.watches.active_count(), 1);
         assert_eq!(
             state
-                .enumerate(&ProjectRequest {
+                .enumerate(&GrantedProjectRequest {
                     project_id: current.project_id,
+                    grant: current.grant,
                 })
                 .unwrap()
                 .relative_paths,
@@ -453,8 +569,9 @@ mod tests {
         assert_eq!(state.list_recent().unwrap()[0].project_id, ungranted_id);
         assert_eq!(
             state
-                .enumerate(&ProjectRequest {
+                .enumerate(&GrantedProjectRequest {
                     project_id: ungranted_id,
+                    grant: format!("grant:v1:{:016x}", 1),
                 })
                 .unwrap_err()
                 .code,
@@ -477,8 +594,9 @@ mod tests {
         let start = std::thread::spawn(move || {
             start_barrier.wait();
             start_state.start_watch(
-                &ProjectRequest {
+                &GrantedProjectRequest {
                     project_id: first.project_id,
+                    grant: first.grant,
                 },
                 Arc::new(|_| {}),
             )
@@ -498,6 +616,82 @@ mod tests {
             assert_eq!(error.code, "root-not-granted");
         }
         assert_eq!(state.watches.active_count(), 0);
+    }
+
+    #[test]
+    fn successful_project_replacement_drains_old_watch_callbacks_before_grant_publication() {
+        let fixture = Fixture::new();
+        fixture.write("Main.uxml", b"first");
+        let second = fixture.root.join("second-drain");
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("Main.uxml"), b"second").unwrap();
+        let state = Arc::new(HostState::new(fixture.root.join("app-data")));
+        let first = state.select_project(&fixture.project).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let callback_release = release_rx.clone();
+        let watch = state
+            .start_watch(
+                &GrantedProjectRequest {
+                    project_id: first.project_id.clone(),
+                    grant: first.grant.clone(),
+                },
+                Arc::new(move |_| {
+                    let _ = started_tx.send(());
+                    let _ = callback_release.lock().unwrap().recv();
+                }),
+            )
+            .unwrap();
+        let dispatch_state = state.clone();
+        let target = state
+            .projects
+            .current_root(&first.project_id)
+            .unwrap()
+            .join("Main.uxml");
+        let dispatch = std::thread::spawn(move || {
+            dispatch_state
+                .watches
+                .dispatch_paths(&watch.watch_id, &[target])
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+
+        let selection_state = state.clone();
+        let selection = std::thread::spawn(move || selection_state.select_project(&second));
+        for _ in 0..100 {
+            if state.watches.active_count() == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(state.watches.active_count(), 0);
+        assert_eq!(
+            state
+                .enumerate(&GrantedProjectRequest {
+                    project_id: first.project_id.clone(),
+                    grant: first.grant.clone(),
+                })
+                .unwrap()
+                .relative_paths,
+            ["Main.uxml"]
+        );
+
+        release_tx.send(()).unwrap();
+        dispatch.join().unwrap().unwrap();
+        let current = selection.join().unwrap().unwrap();
+        assert_ne!(current.grant, first.grant);
+        assert_eq!(
+            state
+                .enumerate(&GrantedProjectRequest {
+                    project_id: first.project_id,
+                    grant: first.grant,
+                })
+                .unwrap_err()
+                .code,
+            "root-not-granted"
+        );
     }
 
     #[test]
