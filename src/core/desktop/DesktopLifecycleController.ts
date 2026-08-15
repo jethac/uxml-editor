@@ -44,6 +44,43 @@ export interface DesktopLifecyclePorts {
   readonly errors?: { report(error: unknown): void };
 }
 
+export interface LifecycleDisposable extends Disposable {
+  retry(): Promise<DisposalOutcome>;
+}
+
+export class DesktopLifecycleWithdrawalError extends Error {
+  readonly completion: Promise<DisposalOutcome>;
+
+  constructor(
+    startupError: unknown,
+    withdrawalError: HostError,
+    readonly retry: () => Promise<DisposalOutcome>,
+  ) {
+    super('Desktop lifecycle startup failed and exact readiness withdrawal must be retried.', {
+      cause: startupError,
+    });
+    this.name = 'DesktopLifecycleWithdrawalError';
+    this.completion = Promise.resolve(Object.freeze({
+      status: 'failed' as const,
+      error: withdrawalError,
+    }));
+  }
+}
+
+export class DesktopLifecycleDisposalError extends HostError {
+  readonly completion: Promise<DisposalOutcome>;
+
+  constructor(cause: HostError, readonly retry: () => Promise<DisposalOutcome>) {
+    super(
+      'read-failed',
+      'Could not withdraw desktop lifecycle readiness; close delivery remains attached.',
+      cause,
+    );
+    this.name = 'DesktopLifecycleDisposalError';
+    this.completion = Promise.resolve(Object.freeze({ status: 'failed' as const, error: cause }));
+  }
+}
+
 export class DesktopLifecycleController {
   private active = false;
   private closing = false;
@@ -52,7 +89,7 @@ export class DesktopLifecycleController {
 
   constructor(private readonly ports: DesktopLifecyclePorts) {}
 
-  async start(): Promise<Disposable> {
+  async start(): Promise<LifecycleDisposable> {
     if (this.active) throw new Error('Desktop lifecycle controller is already started.');
     const generation = this.lifecycleGeneration;
     this.active = true;
@@ -66,30 +103,65 @@ export class DesktopLifecycleController {
       });
       await this.ports.window.setLifecycleReady(generation, true);
     } catch (error) {
-      this.active = false;
-      unlisten?.();
       try {
         await this.ports.window.setLifecycleReady(generation, false);
       } catch (withdrawalError) {
-        this.report(withdrawalError);
+        const failure = lifecycleWithdrawalError(withdrawalError);
+        this.report(failure);
+        let retrying: Promise<DisposalOutcome> | undefined;
+        const retry = (): Promise<DisposalOutcome> => {
+          if (retrying !== undefined) return retrying;
+          retrying = Promise.resolve(this.ports.window.setLifecycleReady(generation, false))
+            .then(() => {
+              this.active = false;
+              unlisten?.();
+              return Object.freeze({ status: 'disposed' as const });
+            })
+            .catch((retryError) => {
+              const retryFailure = lifecycleWithdrawalError(retryError);
+              this.report(retryFailure);
+              return Object.freeze({ status: 'failed' as const, error: retryFailure });
+            })
+            .finally(() => { retrying = undefined; });
+          return retrying;
+        };
+        throw new DesktopLifecycleWithdrawalError(error, failure, retry);
       }
+      this.active = false;
+      unlisten?.();
       throw error;
     }
     let retirement: Promise<DisposalOutcome> | undefined;
+    let retrying: Promise<DisposalOutcome> | undefined;
+    const withdraw = (): Promise<DisposalOutcome> => {
+      if (!this.active) return Promise.resolve(Object.freeze({ status: 'disposed' as const }));
+      if (retrying !== undefined) return retrying;
+      const attempt = Promise.resolve(this.ports.window.setLifecycleReady(generation, false))
+        .then(() => {
+          this.active = false;
+          unlisten?.();
+          return Object.freeze({ status: 'disposed' as const });
+        })
+        .catch((error) => {
+          const failure = lifecycleWithdrawalError(error);
+          const retryAfterCurrent = async (): Promise<DisposalOutcome> => {
+            const current = retrying;
+            if (current !== undefined) await current;
+            return withdraw();
+          };
+          const disposalError = new DesktopLifecycleDisposalError(failure, retryAfterCurrent);
+          this.report(disposalError);
+          return Object.freeze({ status: 'failed' as const, error: disposalError });
+        })
+        .finally(() => { retrying = undefined; });
+      retrying = attempt;
+      return attempt;
+    };
     return Object.freeze({
       dispose: () => {
-        if (!this.active) return;
-        this.active = false;
-        unlisten?.();
-        retirement = Promise.resolve(this.ports.window.setLifecycleReady(generation, false))
-          .then(() => Object.freeze({ status: 'disposed' as const }))
-          .catch((error) => Object.freeze({
-            status: 'failed' as const,
-            error: error instanceof HostError
-              ? error
-              : new HostError('read-failed', 'Could not withdraw desktop lifecycle readiness.', error),
-          }));
+        retirement ??= withdraw();
       },
+      retry: withdraw,
       get completion() {
         return retirement ?? Promise.resolve(Object.freeze({ status: 'disposed' as const }));
       },
@@ -239,4 +311,10 @@ function isDocumentStateLease(value: unknown): value is DocumentStateLease {
 
 function isCloseChoice(value: unknown): value is CloseChoice {
   return value === 'save' || value === 'discard' || value === 'cancel';
+}
+
+function lifecycleWithdrawalError(error: unknown): HostError {
+  return error instanceof HostError
+    ? error
+    : new HostError('read-failed', 'Could not withdraw desktop lifecycle readiness.', error);
 }

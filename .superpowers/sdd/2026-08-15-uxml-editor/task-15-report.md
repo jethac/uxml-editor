@@ -4,6 +4,42 @@
 
 Implemented on `agent/uxml-editor` from base `a139972`. The desktop runtime now uses a real `TauriHost`; the browser runtime continues to use `BrowserHost`. Rust is the sole filesystem authority, native operations are limited to the current directory-picker grant, and desktop menu/close events terminate in typed, tested frontend controllers.
 
+## Fix Round 4 Addendum (2026-08-16)
+
+This addendum records the accepted fixes from `task-15-fix-3-review.md` after commit `515f25e`. It supersedes conflicting earlier statements about pathname-based quarantine/installation, temporary-artifact deletion, one-shot close delivery, watch retirement completion, and overlapping menu listeners. Full behavioral RED/GREEN evidence is in `task-15-fix-4-report.md`.
+
+### Windows replacement and recovery
+
+- Windows opens the checked target with `FILE_GENERIC_READ | DELETE` and the editor temporary with `FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE`; both use only `FILE_SHARE_READ`. The live handles therefore exclude writable/delete/rename handles throughout their protocol.
+- The checked target handle is renamed no-replace to a unique backup name relative to the granted capability directory. The same handle is rehashed after that rename, and the deterministic final-interval hook runs after this hash.
+- The synchronized temporary handle is renamed no-replace to the destination relative to the same directory handle. The result is hashed through that installed handle while sharing remains exclusive. A post-result hook proves a competing rename/replacement cannot displace the destination before return.
+- Root-relative handle rename uses `NtSetInformationFile(FileRenameInformation)` with the grant directory handle as `RootDirectory` and `ReplaceIfExists = false`. The documented Win32 `SetFileInformationByHandle(FileRenameInfo)` form was tried first but returned `ERROR_INVALID_PARAMETER` with a non-null `RootDirectory` on the supported Windows target. The native operation preserves the required handle-bound, capability-relative semantics.
+- The backup is marked deleted through its own `DELETE`-capable handle using `SetFileInformationByHandle(FileDispositionInfo)` only after result verification and the final fallible metadata step. No fallible or destructive step follows successful backup disposition. Temporary cleanup also uses the owning handle, so a raced pathname cannot be removed by a guard.
+- A destination or backup-name competitor is never overwritten. Before installation, the original is restored by no-replace handle rename when safe; otherwise its relative backup artifact is retained and surfaced. After installation, both result and original remain available on every injected failure.
+- Non-Windows replacement remains typed `unsupported` before mutation. Tauri advertises `best-effort-safe-write` only on Windows and `unsupported` elsewhere; no portable hash-CAS claim is made.
+- Recovery never trusts an artifact name as proof of temporary ownership. Matching `.tmp` files are retained and surfaced. An absent target is restored by no-replace handle rename of the backup; target-plus-backup is cleaned only when live handle identity proves both names refer to the same file. Different identities remain surfaced. Recovery is repeatable after interruption and reports only relative artifact names.
+
+### Close, watch, and menu generations
+
+- Rust redelivers the exact pending close lease and lifecycle generation on each later native close attempt. If both resolve and abandon transports fail, the TypeScript controller clears its processing state, reports both failures, and retries the same lease on redelivery.
+- Lifecycle withdrawal is exact-generation and retryable. The close listener remains attached until native readiness withdrawal succeeds; startup/disposal failures expose typed completion and retry handles. A failed old withdrawal cannot clear or resolve a newer generation.
+- Project replacement still deactivates and unlistens watches synchronously and does not await an active callback. Public watch completion now remains pending for the callback captured at retirement and reports its later rejection; queued callbacks remain suppressed.
+- Frontend command listeners share a generation gate per desktop runtime. A listener retained after a failed old disable remains functional while it has no successor, becomes inert immediately when a newer generation registers, and is removed only after exact disable succeeds. Save, Edit, and View overlap regressions execute exactly once on the current owner.
+
+### Round 4 verification
+
+- Focused Task 15 TypeScript: 6 files / 131 tests.
+- Focused Rust replacement/scoped/desktop: 45 tests.
+- `npm test`: 40 files / 602 tests.
+- `npm run build`: passed, 1,889 modules transformed.
+- `npm run test:e2e`: 13 passed.
+- Cargo fmt/check/strict clippy: passed.
+- `cargo test`: 69 passed; doc tests passed.
+- `npx tauri build --no-bundle`: passed; the rebuilt 10,074,112-byte release executable remained live for the five-second hidden smoke.
+- `npm audit --omit=dev`: 0 vulnerabilities. Exact dependency/license/notice, capability, forbidden-surface, review-hash, and diff audits passed.
+
+Round 4 changes only the enabled `windows-sys` API feature set; versions, lockfiles, notices, CSP, the two event-only capability permissions, exact DTO validation, one-host ownership, and browser fallback are unchanged. The accepted review artifact is unchanged at SHA-256 `105F694D92A19CD3E6BD87150B0FFCED1DA14B5E14F3DA4A2D823F3A4B44434F`.
+
 ## Fix Round 3 Addendum (2026-08-16)
 
 This addendum records the accepted fixes from `task-15-fix-2-review.md` after commit `7425b18`. It supersedes conflicting round-2 statements below about cross-platform safe-write availability, quarantine cleanup, Task 16 lease semantics, boolean close readiness, listener-origin watch draining, and menu rollback/disposal. Full RED/GREEN evidence and verification are in `task-15-fix-3-report.md`.

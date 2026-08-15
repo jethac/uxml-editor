@@ -1,5 +1,5 @@
 import { act, render } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { UxmlPreviewAdapter } from '../core/adapter/UxmlPreviewAdapter';
 import { DocumentSession } from '../core/documents/DocumentSession';
 import type { DesktopEvent } from '../core/desktop/DesktopCommandBridge';
@@ -93,6 +93,7 @@ describe('App desktop integration', () => {
     const events = new FakeDesktopEvents();
     const errors: unknown[] = [];
     let disableAttempts = 0;
+    let saves = 0;
     const desktop: AppDesktopPorts = {
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
@@ -114,7 +115,7 @@ describe('App desktop integration', () => {
     const rendered = render(<App
       store={new EditorStore({ viewport: { width: 1024, height: 768 } })}
       desktop={desktop}
-      task16FileLifecycle={task16Lifecycle()}
+      task16FileLifecycle={task16Lifecycle({ save: () => { saves += 1; } })}
     />);
     await listenersReady(events);
 
@@ -123,6 +124,8 @@ describe('App desktop integration', () => {
 
     expect(errors).toHaveLength(1);
     expect(events.listenerCount('uxml://menu-command')).toBe(1);
+    await events.emit('uxml://menu-command', { commandId: 'file.save' });
+    expect(saves).toBe(1);
     await (errors[0] as { retry(): Promise<void> }).retry();
     expect(events.listenerCount('uxml://menu-command')).toBe(0);
   });
@@ -173,6 +176,55 @@ describe('App desktop integration', () => {
     await act(() => Promise.resolve());
 
     expect(enabled).toBe(true);
+    rendered.unmount();
+  });
+
+  it('executes file edit and view commands only on the newest listener generation after disable response loss', async () => {
+    const events = new FakeDesktopEvents();
+    const errors: unknown[] = [];
+    let disableAttempts = 0;
+    const desktop: AppDesktopPorts = {
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: {
+        setFileWorkflowEnabled: async (_generation, enabled) => {
+          if (!enabled) {
+            disableAttempts += 1;
+            if (disableAttempts === 1) throw new Error('disable response lost');
+          }
+        },
+      },
+      errors: { report: (error) => { errors.push(error); } },
+    };
+    const store = new EditorStore({ viewport: { width: 1024, height: 768 } });
+    const dispatch = vi.spyOn(store, 'dispatch');
+    let oldSaves = 0;
+    let currentSaves = 0;
+    const oldLifecycle = task16Lifecycle({ save: () => { oldSaves += 1; } });
+    const currentLifecycle = task16Lifecycle({ save: () => { currentSaves += 1; } });
+    const rendered = render(<App store={store} desktop={desktop} task16FileLifecycle={oldLifecycle} />);
+    await listenersReady(events);
+
+    rendered.rerender(<App store={store} desktop={desktop} task16FileLifecycle={currentLifecycle} />);
+    for (let attempt = 0; attempt < 12 && events.listenerCount('uxml://menu-command') < 2; attempt += 1) {
+      await act(() => Promise.resolve());
+    }
+    expect(events.listenerCount('uxml://menu-command')).toBe(2);
+
+    await act(() => events.emit('uxml://menu-command', { commandId: 'file.save' }));
+    await act(() => events.emit('uxml://menu-command', { commandId: 'edit.undo' }));
+    await act(() => events.emit('uxml://menu-command', { commandId: 'view.zoom-in' }));
+
+    expect(oldSaves).toBe(0);
+    expect(currentSaves).toBe(1);
+    expect(dispatch.mock.calls.filter(([action]) => action.type === 'command/undo')).toHaveLength(1);
+    expect(dispatch.mock.calls.filter(([action]) => action.type === 'command/zoom-in')).toHaveLength(1);
+    expect(errors).toHaveLength(1);
     rendered.unmount();
   });
   it('mounts current menu commands and clean close handling, then disposes native listeners', async () => {
@@ -280,7 +332,7 @@ function openSession(): DocumentSession {
 
 const CLOSE_LEASE = `close:v1:${'d'.repeat(16)}`;
 
-function task16Lifecycle(): Task16FileLifecyclePort {
+function task16Lifecycle(overrides: Partial<Task16FileLifecyclePort> = {}): Task16FileLifecyclePort {
   return Object.freeze({
     runExclusiveCloseState: async (
       _nativeLease: string,
@@ -293,5 +345,6 @@ function task16Lifecycle(): Task16FileLifecyclePort {
     save: () => undefined,
     saveAll: () => undefined,
     closeProject: () => undefined,
+    ...overrides,
   });
 }

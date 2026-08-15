@@ -79,12 +79,15 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
     if (desktop === undefined) return;
     let active = true;
     const workflowGeneration = nextWorkflowGeneration();
+    const commandGenerations = commandGenerationGate(desktop);
+    let commandGenerationRegistered = false;
     const disposables: Disposable[] = [];
     const currentFileLifecycle = task16FileLifecycle ?? unboundTask16FileLifecycle(store);
     const commandBridge = new DesktopCommandBridge(
       desktop.events,
       new EditorDesktopCommandController(store, task16FileLifecycle),
       desktop.errors,
+      () => commandGenerations.isCurrent(workflowGeneration),
     );
     const lifecycle = new DesktopLifecycleController({
       events: desktop.events,
@@ -98,13 +101,12 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
       errors: desktop.errors,
     });
     const disposeStarted = () => {
+      if (commandGenerationRegistered) {
+        commandGenerations.retire(workflowGeneration);
+        commandGenerationRegistered = false;
+      }
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();
-        if (disposable.completion !== undefined) {
-          void disposable.completion.then((outcome) => {
-            if (outcome.status === 'failed') desktop.errors.report(outcome.error);
-          });
-        }
       }
     };
     const disableFileWorkflow = async (reportFailure = true): Promise<boolean> => {
@@ -137,6 +139,8 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
           return;
         }
         disposables.push(commandDisposable);
+        commandGenerations.register(workflowGeneration);
+        commandGenerationRegistered = true;
         await desktop.menu.setFileWorkflowEnabled(
           workflowGeneration,
           task16FileLifecycle !== undefined,
@@ -157,6 +161,33 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
 }
 
 let workflowSequence = 1;
+const commandGenerationGates = new WeakMap<AppDesktopPorts, DesktopCommandGenerationGate>();
+
+interface DesktopCommandGenerationGate {
+  register(generation: WorkflowGeneration): void;
+  retire(generation: WorkflowGeneration): void;
+  isCurrent(generation: WorkflowGeneration): boolean;
+}
+
+function commandGenerationGate(desktop: AppDesktopPorts): DesktopCommandGenerationGate {
+  const existing = commandGenerationGates.get(desktop);
+  if (existing !== undefined) return existing;
+  const active: WorkflowGeneration[] = [];
+  const gate = Object.freeze({
+    register: (generation: WorkflowGeneration) => {
+      const prior = active.indexOf(generation);
+      if (prior >= 0) active.splice(prior, 1);
+      active.push(generation);
+    },
+    retire: (generation: WorkflowGeneration) => {
+      const index = active.indexOf(generation);
+      if (index >= 0) active.splice(index, 1);
+    },
+    isCurrent: (generation: WorkflowGeneration) => active.at(-1) === generation,
+  });
+  commandGenerationGates.set(desktop, gate);
+  return gate;
+}
 
 function nextWorkflowGeneration(): WorkflowGeneration {
   const sequence = workflowSequence;

@@ -48,12 +48,13 @@ export class DesktopCommandBridge {
     private readonly events: DesktopEventPort,
     private readonly executor: DesktopCommandExecutor,
     private readonly errors: DesktopErrorPort = { report: () => undefined },
+    private readonly isCurrentGeneration: () => boolean = () => true,
   ) {}
 
   async start(): Promise<Disposable> {
     let active = true;
     const unlisten = await this.events.listen('uxml://menu-command', async ({ payload }) => {
-      if (!active || !isDesktopCommandPayload(payload)) return;
+      if (!active || !this.isCurrentGeneration() || !isDesktopCommandPayload(payload)) return;
       try {
         await this.executor.execute(payload.commandId);
       } catch (error) {

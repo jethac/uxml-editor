@@ -226,8 +226,8 @@ impl CloseGate {
         let Some(lifecycle_generation) = state.ready.clone() else {
             return Ok(CloseGateDecision::Prevent);
         };
-        if state.pending.is_some() {
-            return Ok(CloseGateDecision::Prevent);
+        if let Some(pending) = state.pending.as_ref() {
+            return Ok(CloseGateDecision::Emit(pending.clone()));
         }
         let lease = format!(
             "close:v1:{:016x}",
@@ -666,7 +666,10 @@ mod tests {
         let CloseGateDecision::Emit(delivery) = gate.request().unwrap() else {
             panic!("first request must emit");
         };
-        assert_eq!(gate.request().unwrap(), CloseGateDecision::Prevent);
+        assert_eq!(
+            gate.request().unwrap(),
+            CloseGateDecision::Emit(delivery.clone())
+        );
         assert!(gate
             .resolve(
                 &delivery.lease,
@@ -807,6 +810,28 @@ mod tests {
             gate.request().unwrap(),
             CloseGateDecision::Emit(_)
         ));
+    }
+
+    #[test]
+    fn pending_close_lease_is_redelivered_exactly_on_a_later_native_attempt() {
+        let gate = CloseGate::default();
+        gate.set_ready(LIFECYCLE_ONE, true).unwrap();
+        let CloseGateDecision::Emit(first) = gate.request().unwrap() else {
+            panic!("first request must emit");
+        };
+
+        let CloseGateDecision::Emit(redelivered) = gate.request().unwrap() else {
+            panic!("pending lease was not redelivered");
+        };
+
+        assert_eq!(redelivered, first);
+        assert!(!gate
+            .resolve(
+                &redelivered.lease,
+                &redelivered.lifecycle_generation,
+                CloseResolution::Cancel,
+            )
+            .unwrap());
     }
 
     const LIFECYCLE_ONE: &str = "lifecycle:v1:0000000000000001";

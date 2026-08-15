@@ -103,6 +103,34 @@ describe('DesktopLifecycleController', () => {
     expect(events.listenerCount('uxml://close-requested')).toBe(0);
   });
 
+  it('retains a startup listener when readiness withdrawal also fails and exposes retry', async () => {
+    const events = new FakeDesktopEvents();
+    let calls = 0;
+    const controller = new DesktopLifecycleController({
+      events,
+      state: fixedState('clean'),
+      confirm: { confirmClose: () => 'cancel' },
+      save: { saveBeforeClose: () => 'cancelled' },
+      window: {
+        setLifecycleReady: async () => {
+          calls += 1;
+          if (calls <= 2) throw new Error(calls === 1 ? 'ready response lost' : 'withdrawal failed');
+        },
+        resolveClose: async () => undefined,
+      },
+    });
+
+    const failure = await controller.start().then(
+      () => undefined,
+      (error: unknown) => error as { retry?: () => Promise<unknown> },
+    );
+
+    expect(failure?.retry).toBeTypeOf('function');
+    expect(events.listenerCount('uxml://close-requested')).toBe(1);
+    await expect(failure?.retry?.()).resolves.toMatchObject({ status: 'disposed' });
+    expect(events.listenerCount('uxml://close-requested')).toBe(0);
+  });
+
   it('holds one validated native lease through dirty evaluation and resolves it atomically', async () => {
     const lease = `close:v1:${'a'.repeat(16)}`;
     const events = new FakeDesktopEvents();
@@ -208,6 +236,157 @@ describe('DesktopLifecycleController', () => {
 
     expect(errors).toHaveLength(1);
     expect(abandoned).toEqual([CLOSE_LEASE]);
+  });
+
+  it('retries the exact redelivered lease after both resolution transports fail', async () => {
+    const events = new FakeDesktopEvents();
+    const errors: unknown[] = [];
+    let resolveAttempts = 0;
+    let abandonAttempts = 0;
+    const controller = new DesktopLifecycleController({
+      events,
+      state: fixedState('clean'),
+      confirm: { confirmClose: () => 'cancel' },
+      save: { saveBeforeClose: () => 'cancelled' },
+      window: {
+        setLifecycleReady: async () => undefined,
+        resolveClose: async () => {
+          resolveAttempts += 1;
+          if (resolveAttempts === 1) throw new Error('resolution transport failed');
+        },
+        abandonClose: async () => {
+          abandonAttempts += 1;
+          throw new Error('abandon transport failed');
+        },
+      },
+      errors: { report: (error) => { errors.push(error); } },
+    });
+    await controller.start();
+    const request = closeRequest(controller);
+
+    await events.emit('uxml://close-requested', request);
+    await events.emit('uxml://close-requested', request);
+
+    expect(resolveAttempts).toBe(2);
+    expect(abandonAttempts).toBe(1);
+    expect(errors).toHaveLength(2);
+  });
+
+  it('keeps close delivery live after withdrawal failure and exposes an exact retry', async () => {
+    const events = new FakeDesktopEvents();
+    const errors: unknown[] = [];
+    let withdrawalAttempts = 0;
+    const controller = new DesktopLifecycleController({
+      events,
+      state: fixedState('clean'),
+      confirm: { confirmClose: () => 'cancel' },
+      save: { saveBeforeClose: () => 'cancelled' },
+      window: {
+        setLifecycleReady: async (_generation, ready) => {
+          if (!ready) {
+            withdrawalAttempts += 1;
+            if (withdrawalAttempts === 1) throw new Error('withdrawal transport failed');
+          }
+        },
+        resolveClose: async () => undefined,
+      },
+      errors: { report: (error) => { errors.push(error); } },
+    });
+    const disposable = await controller.start() as Awaited<ReturnType<typeof controller.start>> & {
+      retry(): Promise<Readonly<{ status: 'disposed' | 'failed' }>>;
+    };
+
+    disposable.dispose();
+    await expect(disposable.completion).resolves.toMatchObject({ status: 'failed' });
+    expect(events.listenerCount('uxml://close-requested')).toBe(1);
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { retry?: unknown }).retry).toBeTypeOf('function');
+
+    await expect((errors[0] as { retry(): Promise<unknown> }).retry()).resolves.toMatchObject({ status: 'disposed' });
+    expect(events.listenerCount('uxml://close-requested')).toBe(0);
+    expect(withdrawalAttempts).toBe(2);
+  });
+
+  it('keeps a failed old withdrawal inert beside a newer generation and retries without withdrawing it', async () => {
+    const events = new FakeDesktopEvents();
+    const errors: unknown[] = [];
+    const resolutions: string[] = [];
+    let currentGeneration = '';
+    let oldGeneration = '';
+    let failOldWithdrawal = true;
+    const ports = () => ({
+      events,
+      state: fixedState('clean'),
+      confirm: { confirmClose: () => 'cancel' as const },
+      save: { saveBeforeClose: () => 'cancelled' as const },
+      window: {
+        setLifecycleReady: async (generation: string, ready: boolean) => {
+          if (ready) currentGeneration = generation;
+          else if (generation === oldGeneration && failOldWithdrawal) {
+            failOldWithdrawal = false;
+            throw new Error('old withdrawal response lost');
+          } else if (generation === currentGeneration) {
+            currentGeneration = '';
+          }
+        },
+        resolveClose: async (_lease: string, generation: string) => { resolutions.push(generation); },
+      },
+      errors: { report: (error: unknown) => { errors.push(error); } },
+    });
+    const oldController = new DesktopLifecycleController(ports());
+    oldGeneration = oldController.lifecycleGeneration;
+    const oldDisposable = await oldController.start();
+    const currentController = new DesktopLifecycleController(ports());
+    const currentDisposable = await currentController.start();
+
+    oldDisposable.dispose();
+    await expect(oldDisposable.completion).resolves.toMatchObject({ status: 'failed' });
+    expect(currentGeneration).toBe(currentController.lifecycleGeneration);
+
+    await events.emit('uxml://close-requested', closeRequest(currentController));
+    expect(resolutions).toEqual([currentController.lifecycleGeneration]);
+    expect(events.listenerCount('uxml://close-requested')).toBe(2);
+    expect(errors).toHaveLength(1);
+    await (errors[0] as { retry(): Promise<unknown> }).retry();
+    expect(currentGeneration).toBe(currentController.lifecycleGeneration);
+    expect(events.listenerCount('uxml://close-requested')).toBe(1);
+    currentDisposable.dispose();
+  });
+
+  it('lets an error sink request withdrawal retry immediately without reusing the failed attempt', async () => {
+    const events = new FakeDesktopEvents();
+    let attempts = 0;
+    let immediateRetry: Promise<unknown> | undefined;
+    const controller = new DesktopLifecycleController({
+      events,
+      state: fixedState('clean'),
+      confirm: { confirmClose: () => 'cancel' },
+      save: { saveBeforeClose: () => 'cancelled' },
+      window: {
+        setLifecycleReady: async (_generation, ready) => {
+          if (!ready) {
+            attempts += 1;
+            if (attempts === 1) throw new Error('withdrawal failed');
+          }
+        },
+        resolveClose: async () => undefined,
+      },
+      errors: {
+        report: (error) => {
+          immediateRetry = (error as { retry(): Promise<unknown> }).retry();
+        },
+      },
+    });
+    const disposable = await controller.start();
+
+    disposable.dispose();
+    for (let attempt = 0; attempt < 4 && immediateRetry === undefined; attempt += 1) {
+      await Promise.resolve();
+    }
+    await expect(immediateRetry).resolves.toMatchObject({ status: 'disposed' });
+
+    expect(attempts).toBe(2);
+    expect(events.listenerCount('uxml://close-requested')).toBe(0);
   });
 
   it('resolves cancellation natively so a later close generation can proceed', async () => {

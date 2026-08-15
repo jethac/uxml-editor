@@ -176,8 +176,9 @@ export class TauriHost implements HostPort {
         active = false;
         pendingPayloads.length = 0;
         unlisten?.();
+        const deliveryAtRetirement = delivery;
         retirement = (async () => {
-          if (!skipDelivery) await delivery;
+          if (!skipDelivery) await deliveryAtRetirement;
           try {
             if (!nativeAlreadyStopped && watchId !== undefined) {
               await this.invokeVoid(
@@ -199,7 +200,17 @@ export class TauriHost implements HostPort {
             this.watches.delete(activeWatch);
           }
         })();
-        void retirement.then(resolveCompletion);
+        const completionSettlement = skipDelivery
+          ? (async (): Promise<DisposalOutcome> => {
+              const retirementOutcome = await retirement!;
+              await deliveryAtRetirement;
+              if (deliveryFailure !== undefined) {
+                return Object.freeze({ status: 'failed' as const, error: deliveryFailure });
+              }
+              return retirementOutcome;
+            })()
+          : retirement;
+        void completionSettlement.then(resolveCompletion);
         return retirement;
       },
     };

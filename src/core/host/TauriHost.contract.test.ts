@@ -328,6 +328,101 @@ describe('TauriHost IPC validation and serialization', () => {
     expect(errors).toHaveLength(1);
   });
 
+  it('publishes a replacement without awaiting an active listener but keeps completion pending for its failure', async () => {
+    let selection = 0;
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          return selection === 1
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B, atomicReplace: NATIVE_ATOMIC_REPLACE };
+        }
+        if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      timers: new FakeTimers(0),
+    });
+    const first = (await host.chooseProject())!;
+    const watch = await host.watch(first, async () => {
+      markStarted();
+      await blocked;
+      throw new Error('retired listener failed');
+    });
+    const delivery = nativeListener!({ payload: {
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'rescan-required',
+    } });
+    await started;
+
+    const replacement = await host.chooseProject();
+    const completion = watch.completion;
+    expect(completion).toBeDefined();
+    let completionSettled = false;
+    void completion!.then(() => { completionSettled = true; });
+    await Promise.resolve();
+
+    expect(replacement?.id).toBe(NATIVE_PROJECT_B);
+    expect(completionSettled).toBe(false);
+    release();
+    await delivery;
+    await expect(completion).resolves.toMatchObject({ status: 'failed' });
+  });
+
+  it('waits for a successful in-flight delivery before resolving replacement retirement completion', async () => {
+    let selection = 0;
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          return selection === 1
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B, atomicReplace: NATIVE_ATOMIC_REPLACE };
+        }
+        if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      timers: new FakeTimers(0),
+    });
+    const first = (await host.chooseProject())!;
+    const watch = await host.watch(first, async () => { markStarted(); await blocked; });
+    const delivery = nativeListener!({ payload: {
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'rescan-required',
+    } });
+    await started;
+
+    await host.chooseProject();
+    const completion = watch.completion;
+    expect(completion).toBeDefined();
+    let completionSettled = false;
+    void completion!.then(() => { completionSettled = true; });
+    await Promise.resolve();
+    expect(completionSettled).toBe(false);
+
+    release();
+    await delivery;
+    await expect(completion).resolves.toEqual({ status: 'disposed' });
+  });
+
   it('observes rejected scheduled callbacks without rejecting the timer adapter', async () => {
     const errors: unknown[] = [];
     const timers = new FakeTimers(0);

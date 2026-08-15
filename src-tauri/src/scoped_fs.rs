@@ -856,6 +856,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_acquisition_never_deletes_an_unauthenticated_collided_temporary() {
+        let fixture = Fixture::new();
+        fixture.write("Main.uxml", "project-bytes");
+        fixture.write(".Main.uxml.uxml-editor-42-9.tmp", "user-owned-collision");
+        let projects = ScopedProjects::default();
+
+        let error = projects.grant_selected(&fixture.root).unwrap_err();
+
+        assert_eq!(error.code, "replace-failed");
+        assert!(error.message.contains(".Main.uxml.uxml-editor-42-9.tmp"));
+        assert_eq!(
+            fs::read_to_string(fixture.root.join(".Main.uxml.uxml-editor-42-9.tmp")).unwrap(),
+            "user-owned-collision"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("Main.uxml")).unwrap(),
+            "project-bytes"
+        );
+    }
+
+    #[test]
+    fn interrupted_absent_target_recovery_is_idempotent_when_names_share_identity() {
+        let fixture = Fixture::new();
+        let backup = fixture.root.join(".Main.uxml.uxml-editor-42-10.bak");
+        fixture.write(".Main.uxml.uxml-editor-42-10.bak", "crash-original");
+        fs::hard_link(&backup, fixture.root.join("Main.uxml")).unwrap();
+        let projects = ScopedProjects::default();
+
+        let first = projects.grant_selected(&fixture.root).unwrap();
+        assert_eq!(
+            projects
+                .read_text(&first.project_id, &first.grant, "Main.uxml")
+                .unwrap()
+                .text,
+            "crash-original"
+        );
+        assert!(!backup.exists());
+
+        let second = projects.grant_selected(&fixture.root).unwrap();
+        assert_eq!(
+            projects
+                .read_text(&second.project_id, &second.grant, "Main.uxml")
+                .unwrap()
+                .text,
+            "crash-original"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_same_identity_recovery_cleanup_retains_and_names_the_relative_artifact() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let fixture = Fixture::new();
+        let backup_name = ".Main.uxml.uxml-editor-42-11.bak";
+        let backup = fixture.root.join(backup_name);
+        fixture.write(backup_name, "crash-original");
+        fs::hard_link(&backup, fixture.root.join("Main.uxml")).unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&backup)
+            .unwrap();
+        let projects = ScopedProjects::default();
+
+        let error = projects.grant_selected(&fixture.root).unwrap_err();
+
+        assert_eq!(error.code, "replace-failed");
+        assert!(error.message.contains(backup_name));
+        assert!(!error
+            .message
+            .contains(&fixture.root.to_string_lossy().to_string()));
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "crash-original");
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("Main.uxml")).unwrap(),
+            "crash-original"
+        );
+        drop(held);
+    }
+
     struct Fixture {
         root: PathBuf,
     }
