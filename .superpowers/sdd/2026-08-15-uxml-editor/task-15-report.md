@@ -4,6 +4,40 @@
 
 Implemented on `agent/uxml-editor` from base `a139972`. The desktop runtime now uses a real `TauriHost`; the browser runtime continues to use `BrowserHost`. Rust is the sole filesystem authority, native operations are limited to the current directory-picker grant, and desktop menu/close events terminate in typed, tested frontend controllers.
 
+## Fix Round 5 Addendum (2026-08-16)
+
+This addendum records every accepted finding from `task-15-fix-4-review.md` after commit `6c423e4`. It supersedes conflicting earlier statements about recovery opens, Windows file identity, blanket Windows replacement support, directory reparse traversal, and stack-like frontend command ownership. Complete RED/GREEN evidence is in `task-15-fix-5-report.md`. The accepted review is included byte-for-byte at SHA-256 `F37B977FBD0D05FF75D649C98C7DEBFD0E0B1F51D700EF783580C9A6D3A4E2C8`.
+
+### Exact recovery authority
+
+- Recovery opens both backup and target final components through the granted `cap_std::fs::Dir` with `FILE_FLAG_OPEN_REPARSE_POINT`, obtains `FileAttributeTagInfo` from the same live handle, and rejects every `FILE_ATTRIBUTE_REPARSE_POINT` object before identity can authorize deletion. The target-symlink-to-backup regression executes on this Windows host and preserves both the backup name/bytes and the target symlink.
+- Deletion authorization uses `GetFileInformationByHandleEx(FileIdInfo)` for both live handles and compares the complete `FILE_ID_INFO`: the 64-bit volume serial plus every byte of the 128-bit file ID. Missing, malformed, or zero identity proof fails closed and retains a surfaced relative backup artifact. The legacy `BY_HANDLE_FILE_INFORMATION` comparison is gone.
+- Recursive recovery and normal enumeration precheck entry metadata, then open each child directory no-follow with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`, verify directory and non-reparse attributes on that same handle, and convert it directly with `File::into_std` and `Dir::from_std_file`. No checked child pathname is reopened for traversal.
+- Every recovery failure after a backup is identified, including backup/target open, metadata, attribute, identity, comparison, restore, and cleanup failures, names the relative retained recovery artifact without exposing the project root. Unauthenticated matching temporary names remain untouched.
+
+### Truthful replacement negotiation
+
+- A selected Windows root advertises `best-effort-safe-write` only when `GetVolumeInformationByHandleW` succeeds on the live granted directory handle and reports NTFS. This handle-derived check intentionally rejects ReFS, SMB/UNC, mapped or remote roots, unknown filesystems, and API failures as `unsupported`.
+- The replacement command rechecks the grant's stored support before normalizing/opening the target or entering atomic-save code. Unsupported roots therefore fail closed before creating a temporary or mutating project bytes. Non-Windows remains explicitly `unsupported`.
+- Supported local NTFS replacement retains the round-4 live-handle, no-replace, incompatible-sharing protocol. This remains a narrowly reported Windows safe-write boundary, not a portable linearizable hash compare-and-swap guarantee.
+
+### Monotonic workflow ownership
+
+- Separate Tauri binding wrappers now carry one opaque `commandAuthority` identity supplied by the underlying runtime/transport; production wrappers share a module-stable authority object.
+- The App command gate is a `WeakMap` keyed by that authority and stores monotonic `highWater` plus the current owner. Retiring the newest generation leaves a tombstone instead of reactivating an older retained listener. A late older registration cannot supersede a newer generation, and retained listeners across distinct wrappers execute Save, Edit, and View commands exactly once on the current owner.
+- Task 16's file workflow and `CommandRegistry` remain unimplemented. Unbound Save, Save All, and Close Project behavior and the typed lifecycle hook remain unchanged.
+
+### Round 5 verification
+
+- Focused Rust atomic/scoped/command suites: 47 tests passed.
+- Focused TypeScript host/lifecycle/command/App/runtime/save suites: 6 files / 135 tests passed.
+- `npm test`: 40 files / 606 tests passed; `npm run test:e2e`: 13 passed.
+- `npm run build`, Cargo fmt/check/strict clippy, `cargo test` (78 tests), and `npx tauri build --no-bundle` passed.
+- The rebuilt 10,075,136-byte release executable remained live for the five-second hidden smoke.
+- `npm audit --omit=dev`: 0 vulnerabilities. Dependency/license/notice, capability, forbidden-surface, review-hash, configuration-delta, and diff audits passed.
+
+Round 5 changes no package version, manifest, lockfile, notice, CSP, Tauri capability, or generated configuration. The runtime still owns exactly one `TauriHost`, browser fallback is unchanged, and no shell/fs plugin, broad path permission, process execution, window-close permission, or `app.capabilities` field was added.
+
 ## Fix Round 4 Addendum (2026-08-16)
 
 This addendum records the accepted fixes from `task-15-fix-3-review.md` after commit `515f25e`. It supersedes conflicting earlier statements about pathname-based quarantine/installation, temporary-artifact deletion, one-shot close delivery, watch retirement completion, and overlapping menu listeners. Full behavioral RED/GREEN evidence is in `task-15-fix-4-report.md`.

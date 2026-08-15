@@ -210,7 +210,7 @@ impl HostState {
     }
 
     pub fn replace(&self, request: &ReplaceTextRequest) -> Result<RevisionDto, HostError> {
-        self.projects.with_file(
+        self.projects.with_replace_file(
             &request.project_id,
             &request.grant,
             &request.relative_path,

@@ -22,6 +22,7 @@ static NEXT_BACKUP: AtomicU64 = AtomicU64::new(1);
 
 type QuarantineHook<'a> = Option<&'a mut dyn FnMut(&Path) -> std::io::Result<()>>;
 type ResultHook<'a> = Option<&'a mut dyn FnMut(&Path) -> std::io::Result<()>>;
+type RecoveryTargetOpenHook<'a> = Option<&'a mut dyn FnMut(&Path) -> std::io::Result<()>>;
 
 #[cfg(test)]
 type QuarantineHookResult = (
@@ -764,10 +765,33 @@ pub(crate) fn revision_for_bytes(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn recover_atomic_artifacts(root: &Dir) -> Result<(), HostError> {
-    recover_atomic_artifacts_in(root, Path::new(""))
+    recover_atomic_artifacts_in(root, Path::new(""), &mut RecoveryHooks::default())
 }
 
-fn recover_atomic_artifacts_in(directory: &Dir, prefix: &Path) -> Result<(), HostError> {
+#[cfg(all(test, windows))]
+fn recover_atomic_artifacts_with_target_open_hook(
+    root: &Dir,
+    hook: &mut dyn FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), HostError> {
+    recover_atomic_artifacts_in(
+        root,
+        Path::new(""),
+        &mut RecoveryHooks {
+            before_target_open: Some(hook),
+        },
+    )
+}
+
+#[derive(Default)]
+struct RecoveryHooks<'a> {
+    before_target_open: RecoveryTargetOpenHook<'a>,
+}
+
+fn recover_atomic_artifacts_in(
+    directory: &Dir,
+    prefix: &Path,
+    hooks: &mut RecoveryHooks<'_>,
+) -> Result<(), HostError> {
     let mut files = Vec::new();
     let mut directories = Vec::new();
     for entry in directory.entries().map_err(|error| {
@@ -784,20 +808,30 @@ fn recover_atomic_artifacts_in(directory: &Dir, prefix: &Path) -> Result<(), Hos
                 &error,
             )
         })?;
+        let file_name = entry.file_name();
         let file_type = entry.file_type().map_err(|error| {
-            HostError::io(
-                "replace-failed",
+            recovery_entry_io_error(
+                prefix,
+                &file_name,
                 "Could not inspect an atomic-save recovery entry type",
                 &error,
             )
         })?;
-        if file_type.is_symlink() {
+        let metadata = entry.metadata().map_err(|error| {
+            recovery_entry_io_error(
+                prefix,
+                &file_name,
+                "Could not inspect an atomic-save recovery entry",
+                &error,
+            )
+        })?;
+        if file_type.is_symlink() || recovery_metadata_is_reparse(&metadata) {
             continue;
         }
         if file_type.is_dir() {
-            directories.push(entry.file_name());
+            directories.push(file_name);
         } else if file_type.is_file() {
-            files.push(entry.file_name());
+            files.push(file_name);
         }
     }
     files.sort();
@@ -810,7 +844,13 @@ fn recover_atomic_artifacts_in(directory: &Dir, prefix: &Path) -> Result<(), Hos
         let Some(target_name) = atomic_artifact_target(name, ".bak") else {
             continue;
         };
-        recover_backup(directory, prefix, Path::new(name), Path::new(target_name))?;
+        recover_backup(
+            directory,
+            prefix,
+            Path::new(name),
+            Path::new(target_name),
+            hooks,
+        )?;
     }
     for file_name in &files {
         let Some(name) = file_name.to_str() else {
@@ -822,16 +862,85 @@ fn recover_atomic_artifacts_in(directory: &Dir, prefix: &Path) -> Result<(), Hos
         recover_temporary(directory, prefix, Path::new(name), Path::new(target_name))?;
     }
     for directory_name in directories {
-        let child = directory.open_dir(&directory_name).map_err(|error| {
-            HostError::io(
-                "replace-failed",
-                "Could not open a project directory during atomic-save recovery",
-                &error,
-            )
-        })?;
-        recover_atomic_artifacts_in(&child, &prefix.join(directory_name))?;
+        let child = open_recovery_child_directory(directory, Path::new(&directory_name)).map_err(
+            |error| {
+                HostError::io(
+                    "replace-failed",
+                    "Could not open a project directory during atomic-save recovery",
+                    &error,
+                )
+            },
+        )?;
+        recover_atomic_artifacts_in(&child, &prefix.join(directory_name), hooks)?;
     }
     Ok(())
+}
+
+fn recovery_entry_io_error(
+    prefix: &Path,
+    file_name: &std::ffi::OsStr,
+    message: &str,
+    error: &std::io::Error,
+) -> HostError {
+    if let Some(name) = file_name.to_str() {
+        if atomic_artifact_target(name, ".bak").is_some() {
+            return HostError::new(
+                "replace-failed",
+                format!("{message} {}: {error}", prefix.join(file_name).display()),
+            );
+        }
+    }
+    HostError::io("replace-failed", message, error)
+}
+
+fn recovery_metadata_is_reparse(metadata: &cap_std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+
+        windows_file_attributes_are_reparse(metadata.file_attributes())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+#[cfg(windows)]
+fn open_recovery_child_directory(parent: &Dir, name: &Path) -> std::io::Result<Dir> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = CapOpenOptions::new();
+    options
+        .read(true)
+        .access_mode(FILE_GENERIC_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let file = parent.open_with(name, &options)?;
+    let attributes = file_attribute_tag_info(&file)?;
+    if windows_file_attributes_are_reparse(attributes.FileAttributes) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "recovery directory is a reparse object",
+        ));
+    }
+    if attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "recovery entry is not a directory",
+        ));
+    }
+    Ok(Dir::from_std_file(file.into_std()))
+}
+
+#[cfg(not(windows))]
+fn open_recovery_child_directory(parent: &Dir, name: &Path) -> std::io::Result<Dir> {
+    parent.open_dir(name)
 }
 
 fn recover_backup(
@@ -839,12 +948,13 @@ fn recover_backup(
     prefix: &Path,
     backup_name: &Path,
     target_name: &Path,
+    hooks: &mut RecoveryHooks<'_>,
 ) -> Result<(), HostError> {
     let artifact = prefix.join(backup_name);
 
     #[cfg(not(windows))]
     {
-        let _ = (directory, target_name);
+        let _ = (directory, target_name, hooks);
         return Err(HostError::new(
             "unsupported",
             format!(
@@ -855,67 +965,75 @@ fn recover_backup(
     }
 
     #[cfg(windows)]
-    match directory.symlink_metadata(target_name) {
-        Ok(_) => {
-            let backup = open_recovery_identity_file(directory, backup_name).map_err(|error| {
-                HostError::new(
-                    "replace-failed",
-                    format!(
-                        "Could not open retained recovery artifact {}: {}",
-                        artifact.display(),
-                        error.message
-                    ),
+    {
+        let backup = open_recovery_identity_file(directory, backup_name).map_err(|error| {
+            recovery_artifact_io_error(
+                &artifact,
+                "Could not open retained recovery artifact",
+                &error,
+            )
+        })?;
+        if let Some(hook) = hooks.before_target_open.as_deref_mut() {
+            hook(target_name).map_err(|error| {
+                recovery_artifact_io_error(
+                    &artifact,
+                    "Recovery target changed before deletion-grade acquisition",
+                    &error,
                 )
             })?;
-            let target = open_recovery_identity_file(directory, target_name)?;
-            if !same_file_identity(&backup, &target)? {
-                return Err(HostError::new(
-                    "replace-failed",
-                    format!(
-                        "Atomic-save recovery found both a target and different recovery artifact {}.",
-                        artifact.display()
-                    ),
-                ));
+        }
+        match open_recovery_identity_file(directory, target_name) {
+            Ok(target) => {
+                let same_identity = same_file_identity(&backup, &target).map_err(|error| {
+                    recovery_artifact_io_error(
+                        &artifact,
+                        "Could not establish deletion-grade recovery identity",
+                        &error,
+                    )
+                })?;
+                if !same_identity {
+                    return Err(HostError::new(
+                        "replace-failed",
+                        format!(
+                            "Atomic-save recovery found both a target and different recovery artifact {}.",
+                            artifact.display()
+                        ),
+                    ));
+                }
+                mark_cap_file_deleted(&backup).map_err(|error| {
+                    recovery_artifact_io_error(
+                        &artifact,
+                        "Could not clean same-identity recovery artifact",
+                        &error,
+                    )
+                })?;
+                Ok(())
             }
-            mark_cap_file_deleted(&backup).map_err(|error| {
-                HostError::new(
-                    "replace-failed",
-                    format!(
-                        "Could not clean same-identity recovery artifact {}: {error}",
-                        artifact.display()
-                    ),
-                )
-            })?;
-            Ok(())
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                rename_cap_file(&backup, directory, target_name).map_err(|error| {
+                    recovery_artifact_io_error(
+                        &artifact,
+                        "Could not restore absent target from recovery artifact",
+                        &error,
+                    )
+                })?;
+                Ok(())
+            }
+            Err(error) => Err(recovery_artifact_io_error(
+                &artifact,
+                "Could not open recovery target while retaining artifact",
+                &error,
+            )),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let backup = open_checked_target(directory, backup_name).map_err(|error| {
-                HostError::new(
-                    "replace-failed",
-                    format!(
-                        "Could not open retained recovery artifact {}: {}",
-                        artifact.display(),
-                        error.message
-                    ),
-                )
-            })?;
-            rename_cap_file(&backup, directory, target_name).map_err(|error| {
-                HostError::new(
-                    "replace-failed",
-                    format!(
-                        "Could not restore absent target from recovery artifact {}: {error}",
-                        artifact.display()
-                    ),
-                )
-            })?;
-            Ok(())
-        }
-        Err(error) => Err(HostError::io(
-            "replace-failed",
-            "Could not inspect an atomic-save recovery target",
-            &error,
-        )),
     }
+}
+
+#[cfg(windows)]
+fn recovery_artifact_io_error(artifact: &Path, message: &str, error: &std::io::Error) -> HostError {
+    HostError::new(
+        "replace-failed",
+        format!("{message} {}: {error}", artifact.display()),
+    )
 }
 
 fn recover_temporary(
@@ -936,47 +1054,115 @@ fn recover_temporary(
 }
 
 #[cfg(windows)]
-fn open_recovery_identity_file(parent: &Dir, name: &Path) -> Result<CapFile, HostError> {
+fn open_recovery_identity_file(parent: &Dir, name: &Path) -> std::io::Result<CapFile> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        DELETE, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
     };
 
     let mut options = CapOpenOptions::new();
     options
         .read(true)
         .access_mode(FILE_GENERIC_READ | DELETE)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
-    parent
-        .open_with(name, &options)
-        .map_err(|error| read_error(name, &error))
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = parent.open_with(name, &options)?;
+    let attributes = file_attribute_tag_info(&file)?;
+    if windows_file_attributes_are_reparse(attributes.FileAttributes) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "recovery entry is a reparse object",
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(windows)]
-fn same_file_identity(left: &CapFile, right: &CapFile) -> Result<bool, HostError> {
-    fn identity(file: &CapFile) -> Result<(u32, u64), HostError> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        };
+fn file_attribute_tag_info(
+    file: &CapFile,
+) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TAG_INFO> {
+    use std::{mem, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+    };
 
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: `information` is a valid output buffer for the live file handle.
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
-            let error = std::io::Error::last_os_error();
-            return Err(HostError::io(
-                "replace-failed",
-                "Could not inspect recovery file identity",
-                &error,
-            ));
-        }
-        Ok((
-            information.dwVolumeSerialNumber,
-            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
-        ))
+    let mut information = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: `information` is the exact writable buffer for FileAttributeTagInfo.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut information).cast(),
+            mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(information)
+}
 
-    Ok(identity(left)? == identity(right)?)
+#[cfg(windows)]
+fn windows_file_attributes_are_reparse(attributes: u32) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(windows)]
+fn same_file_identity(left: &CapFile, right: &CapFile) -> std::io::Result<bool> {
+    let left = recovery_file_identity(left)?;
+    let right = recovery_file_identity(right)?;
+    Ok(recovery_identities_match(
+        left.VolumeSerialNumber,
+        left.FileId.Identifier,
+        right.VolumeSerialNumber,
+        right.FileId.Identifier,
+    ))
+}
+
+#[cfg(windows)]
+fn recovery_file_identity(
+    file: &CapFile,
+) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::FILE_ID_INFO> {
+    use std::{mem, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    };
+
+    let mut information = FILE_ID_INFO::default();
+    // SAFETY: `information` is the exact writable buffer for FileIdInfo.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut information).cast(),
+            mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if information.FileId.Identifier == [0_u8; 16] {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "recovery file identity is empty",
+        ));
+    }
+    Ok(information)
+}
+
+#[cfg(windows)]
+fn recovery_identities_match(
+    left_volume: u64,
+    left_id: [u8; 16],
+    right_volume: u64,
+    right_id: [u8; 16],
+) -> bool {
+    left_id != [0_u8; 16]
+        && right_id != [0_u8; 16]
+        && left_volume == right_volume
+        && left_id == right_id
 }
 
 fn atomic_artifact_target<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
@@ -1166,6 +1352,11 @@ mod tests {
         replace_text_atomically_with_quarantine_interval_hook as replace_capability_file_with_quarantine_interval_hook,
         replace_text_atomically_with_result_hook as replace_capability_file_with_result_hook,
         FaultPhase, QuarantineHookResult,
+    };
+    #[cfg(windows)]
+    use super::{
+        open_recovery_child_directory, recover_atomic_artifacts_with_target_open_hook,
+        recovery_entry_io_error, recovery_identities_match, windows_file_attributes_are_reparse,
     };
     use cap_std::{ambient_authority, fs::Dir};
     use std::{
@@ -1666,6 +1857,110 @@ mod tests {
 
         assert_eq!(fs::read(&target).unwrap(), b"new");
         fixture.assert_no_artifacts();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_identity_compares_the_full_volume_serial_and_all_128_file_id_bits() {
+        let mut identity = [0_u8; 16];
+        identity[0] = 1;
+        let mut different_high_bits = identity;
+        different_high_bits[15] = 1;
+
+        assert!(recovery_identities_match(7, identity, 7, identity));
+        assert!(!recovery_identities_match(
+            7,
+            identity,
+            7,
+            different_high_bits,
+        ));
+        assert!(!recovery_identities_match(7, identity, 8, identity));
+        assert!(!recovery_identities_match(7, [0_u8; 16], 7, [0_u8; 16]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_rejects_every_reparse_attribute_independent_of_tag_shape() {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+        assert!(windows_file_attributes_are_reparse(
+            FILE_ATTRIBUTE_REPARSE_POINT
+        ));
+        assert!(windows_file_attributes_are_reparse(
+            FILE_ATTRIBUTE_REPARSE_POINT | 0x10
+        ));
+        assert!(!windows_file_attributes_are_reparse(0x10));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_metadata_errors_name_the_relative_retained_backup_artifact() {
+        let error = recovery_entry_io_error(
+            std::path::Path::new("Assets"),
+            std::ffi::OsStr::new(".Main.uxml.uxml-editor-42-16.bak"),
+            "Could not inspect recovery metadata",
+            &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        );
+
+        assert_eq!(error.code, "replace-failed");
+        assert!(error.message.contains(".Main.uxml.uxml-editor-42-16.bak"));
+        assert!(error.message.contains("Assets"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_child_directory_authority_is_opened_nofollow_and_never_reopened_by_name() {
+        let fixture = Fixture::new();
+        let child = fixture.root.join("Child");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("inside.txt"), b"inside").unwrap();
+        let root = Dir::open_ambient_dir(&fixture.root, ambient_authority()).unwrap();
+
+        let opened = open_recovery_child_directory(&root, std::path::Path::new("Child")).unwrap();
+        assert_eq!(opened.read_to_string("inside.txt").unwrap(), "inside");
+
+        let link = fixture.root.join("Linked");
+        if std::os::windows::fs::symlink_dir(&child, &link).is_err() {
+            return;
+        }
+        let error =
+            open_recovery_child_directory(&root, std::path::Path::new("Linked")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_target_swap_between_handle_opens_is_rejected_without_deleting_backup_bytes() {
+        let fixture = Fixture::new();
+        let probe = fixture.write("probe.txt", b"probe");
+        let probe_link = fixture.root.join("probe-link.txt");
+        if std::os::windows::fs::symlink_file(&probe, &probe_link).is_err() {
+            return;
+        }
+        fs::remove_file(&probe_link).unwrap();
+
+        let backup_name = ".Main.uxml.uxml-editor-42-15.bak";
+        let backup = fixture.write(backup_name, b"sole-original");
+        let target = fixture.write("Main.uxml", b"installed-result");
+        let root = Dir::open_ambient_dir(&fixture.root, ambient_authority()).unwrap();
+        let mut swapped = false;
+        let mut hook = |_target_name: &std::path::Path| {
+            fs::remove_file(&target)?;
+            std::os::windows::fs::symlink_file(std::path::Path::new(backup_name), &target)?;
+            swapped = true;
+            Ok(())
+        };
+
+        let error = recover_atomic_artifacts_with_target_open_hook(&root, &mut hook).unwrap_err();
+
+        assert!(swapped);
+        assert_eq!(error.code, "replace-failed");
+        assert!(error.message.contains(backup_name));
+        assert_eq!(fs::read(&backup).unwrap(), b"sole-original");
+        assert!(fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     struct Fixture {

@@ -2,6 +2,7 @@ import type { AppDesktopPorts } from './App';
 import { TauriHost, type TauriEvent, type TauriTimerPorts } from '../core/host/TauriHost';
 
 export interface RawTauriRuntimePorts {
+  readonly commandAuthority: object;
   readonly invoke: (command: string, payload?: unknown) => Promise<unknown>;
   readonly listen: (
     eventName: string,
@@ -20,6 +21,7 @@ export function createTauriRuntimeBindings(raw: RawTauriRuntimePorts): TauriRunt
   return Object.freeze({
     host: new TauriHost(raw),
     desktop: Object.freeze({
+      commandAuthority: raw.commandAuthority,
       events: Object.freeze({ listen: raw.listen }),
       confirm: Object.freeze({
         confirmClose: async () => {

@@ -27,6 +27,7 @@ export interface AppProps {
 }
 
 export interface AppDesktopPorts {
+  readonly commandAuthority: object;
   readonly events: DesktopEventPort;
   readonly confirm: { confirmClose(): CloseChoice | Promise<CloseChoice> };
   readonly window: {
@@ -161,7 +162,7 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
 }
 
 let workflowSequence = 1;
-const commandGenerationGates = new WeakMap<AppDesktopPorts, DesktopCommandGenerationGate>();
+const commandGenerationGates = new WeakMap<object, DesktopCommandGenerationGate>();
 
 interface DesktopCommandGenerationGate {
   register(generation: WorkflowGeneration): void;
@@ -170,22 +171,22 @@ interface DesktopCommandGenerationGate {
 }
 
 function commandGenerationGate(desktop: AppDesktopPorts): DesktopCommandGenerationGate {
-  const existing = commandGenerationGates.get(desktop);
+  const existing = commandGenerationGates.get(desktop.commandAuthority);
   if (existing !== undefined) return existing;
-  const active: WorkflowGeneration[] = [];
+  let highWater: WorkflowGeneration | undefined;
+  let current: WorkflowGeneration | undefined;
   const gate = Object.freeze({
     register: (generation: WorkflowGeneration) => {
-      const prior = active.indexOf(generation);
-      if (prior >= 0) active.splice(prior, 1);
-      active.push(generation);
+      if (highWater !== undefined && generation <= highWater) return;
+      highWater = generation;
+      current = generation;
     },
     retire: (generation: WorkflowGeneration) => {
-      const index = active.indexOf(generation);
-      if (index >= 0) active.splice(index, 1);
+      if (current === generation) current = undefined;
     },
-    isCurrent: (generation: WorkflowGeneration) => active.at(-1) === generation,
+    isCurrent: (generation: WorkflowGeneration) => current === generation,
   });
-  commandGenerationGates.set(desktop, gate);
+  commandGenerationGates.set(desktop.commandAuthority, gate);
   return gate;
 }
 

@@ -13,6 +13,7 @@ describe('App desktop integration', () => {
     let releaseMenu!: () => void;
     const menuBlocked = new Promise<void>((resolve) => { releaseMenu = resolve; });
     const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: {
@@ -42,6 +43,7 @@ describe('App desktop integration', () => {
     const menuStates: boolean[] = [];
     const errors: unknown[] = [];
     const desktop = {
+      commandAuthority: Object.freeze({}),
       events: { listen: async () => { throw new Error('listen failed'); } },
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: { setLifecycleReady: async () => undefined, resolveClose: async () => undefined, abandonClose: async () => undefined },
@@ -66,6 +68,7 @@ describe('App desktop integration', () => {
     const events = new FakeDesktopEvents();
     const menuStates: boolean[] = [];
     const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: {
@@ -95,6 +98,7 @@ describe('App desktop integration', () => {
     let disableAttempts = 0;
     let saves = 0;
     const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: {
@@ -138,6 +142,7 @@ describe('App desktop integration', () => {
     let latestGeneration = -1;
     let enabled = false;
     const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: {
@@ -184,6 +189,7 @@ describe('App desktop integration', () => {
     const errors: unknown[] = [];
     let disableAttempts = 0;
     const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: {
@@ -227,10 +233,179 @@ describe('App desktop integration', () => {
     expect(errors).toHaveLength(1);
     rendered.unmount();
   });
+
+  it('never resurrects a retained older listener after its successor retires', async () => {
+    const events = new FakeDesktopEvents();
+    const errors: unknown[] = [];
+    let disableAttempts = 0;
+    let oldSaves = 0;
+    let currentSaves = 0;
+    const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: {
+        setFileWorkflowEnabled: async (_generation, enabled) => {
+          if (!enabled) {
+            disableAttempts += 1;
+            if (disableAttempts === 1) throw new Error('old disable response lost');
+          }
+        },
+      },
+      errors: { report: (error) => { errors.push(error); } },
+    };
+    const store = new EditorStore({ viewport: { width: 1024, height: 768 } });
+    const dispatch = vi.spyOn(store, 'dispatch');
+    const rendered = render(<App
+      store={store}
+      desktop={desktop}
+      task16FileLifecycle={task16Lifecycle({ save: () => { oldSaves += 1; } })}
+    />);
+    await listenersReady(events);
+
+    rendered.rerender(<App
+      store={store}
+      desktop={desktop}
+      task16FileLifecycle={task16Lifecycle({ save: () => { currentSaves += 1; } })}
+    />);
+    for (let attempt = 0; attempt < 12 && events.listenerCount('uxml://menu-command') < 2; attempt += 1) {
+      await act(() => Promise.resolve());
+    }
+    expect(events.listenerCount('uxml://menu-command')).toBe(2);
+
+    rendered.unmount();
+    for (let attempt = 0; attempt < 12 && events.listenerCount('uxml://menu-command') !== 1; attempt += 1) {
+      await act(() => Promise.resolve());
+    }
+    expect(events.listenerCount('uxml://menu-command')).toBe(1);
+    await act(() => events.emit('uxml://menu-command', { commandId: 'file.save' }));
+    await act(() => events.emit('uxml://menu-command', { commandId: 'edit.undo' }));
+    await act(() => events.emit('uxml://menu-command', { commandId: 'view.zoom-in' }));
+
+    expect(oldSaves).toBe(0);
+    expect(currentSaves).toBe(0);
+    expect(dispatch.mock.calls.filter(([action]) => action.type === 'command/undo')).toHaveLength(0);
+    expect(dispatch.mock.calls.filter(([action]) => action.type === 'command/zoom-in')).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+    await (errors[0] as { retry(): Promise<void> }).retry();
+    expect(events.listenerCount('uxml://menu-command')).toBe(0);
+  });
+
+  it('executes commands once across distinct desktop wrappers sharing one transport authority', async () => {
+    const events = new FakeDesktopEvents();
+    const commandAuthority = Object.freeze({});
+    const desktop = (): AppDesktopPorts => ({
+      commandAuthority,
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: { setFileWorkflowEnabled: async () => undefined },
+      errors: { report: () => undefined },
+    } as AppDesktopPorts);
+    const oldStore = new EditorStore({ viewport: { width: 1024, height: 768 } });
+    const currentStore = new EditorStore({ viewport: { width: 1024, height: 768 } });
+    const oldDispatch = vi.spyOn(oldStore, 'dispatch');
+    const currentDispatch = vi.spyOn(currentStore, 'dispatch');
+    let oldSaves = 0;
+    let currentSaves = 0;
+    const old = render(<App
+      store={oldStore}
+      desktop={desktop()}
+      task16FileLifecycle={task16Lifecycle({ save: () => { oldSaves += 1; } })}
+    />);
+    const current = render(<App
+      store={currentStore}
+      desktop={desktop()}
+      task16FileLifecycle={task16Lifecycle({ save: () => { currentSaves += 1; } })}
+    />);
+    for (let attempt = 0; attempt < 12 && events.listenerCount('uxml://menu-command') < 2; attempt += 1) {
+      await act(() => Promise.resolve());
+    }
+
+    await act(() => events.emit('uxml://menu-command', { commandId: 'file.save' }));
+    await act(() => events.emit('uxml://menu-command', { commandId: 'edit.undo' }));
+    await act(() => events.emit('uxml://menu-command', { commandId: 'view.zoom-in' }));
+
+    expect(oldSaves).toBe(0);
+    expect(currentSaves).toBe(1);
+    expect(oldDispatch.mock.calls.filter(([action]) => action.type === 'command/undo')).toHaveLength(0);
+    expect(oldDispatch.mock.calls.filter(([action]) => action.type === 'command/zoom-in')).toHaveLength(0);
+    expect(currentDispatch.mock.calls.filter(([action]) => action.type === 'command/undo')).toHaveLength(1);
+    expect(currentDispatch.mock.calls.filter(([action]) => action.type === 'command/zoom-in')).toHaveLength(1);
+    old.unmount();
+    current.unmount();
+  });
+
+  it('does not let a late older listener registration supersede a newer generation', async () => {
+    const events = new FakeDesktopEvents();
+    const commandAuthority = Object.freeze({});
+    let releaseOldMenu!: () => void;
+    const oldMenuBlocked = new Promise<void>((resolve) => { releaseOldMenu = resolve; });
+    const oldDesktop = {
+      commandAuthority,
+      events: {
+        listen: async (
+          eventName: string,
+          listener: (event: DesktopEvent<unknown>) => void | Promise<void>,
+        ) => {
+          if (eventName === 'uxml://menu-command') await oldMenuBlocked;
+          return events.listen(eventName, listener);
+        },
+      },
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation: string, ready: boolean) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: { setFileWorkflowEnabled: async () => undefined },
+      errors: { report: () => undefined },
+    } as AppDesktopPorts;
+    const currentDesktop = { ...oldDesktop, events } as AppDesktopPorts;
+    let oldSaves = 0;
+    let currentSaves = 0;
+    const old = render(<App
+      store={new EditorStore({ viewport: { width: 1024, height: 768 } })}
+      desktop={oldDesktop}
+      task16FileLifecycle={task16Lifecycle({ save: () => { oldSaves += 1; } })}
+    />);
+    await act(() => Promise.resolve());
+    const current = render(<App
+      store={new EditorStore({ viewport: { width: 1024, height: 768 } })}
+      desktop={currentDesktop}
+      task16FileLifecycle={task16Lifecycle({ save: () => { currentSaves += 1; } })}
+    />);
+    for (let attempt = 0; attempt < 12 && events.listenerCount('uxml://menu-command') < 1; attempt += 1) {
+      await act(() => Promise.resolve());
+    }
+    releaseOldMenu();
+    await act(() => oldMenuBlocked);
+    for (let attempt = 0; attempt < 12 && events.listenerCount('uxml://menu-command') < 2; attempt += 1) {
+      await act(() => Promise.resolve());
+    }
+
+    await act(() => events.emit('uxml://menu-command', { commandId: 'file.save' }));
+
+    expect(oldSaves).toBe(0);
+    expect(currentSaves).toBe(1);
+    old.unmount();
+    current.unmount();
+  });
+
   it('mounts current menu commands and clean close handling, then disposes native listeners', async () => {
     const events = new FakeDesktopEvents();
     let closes = 0;
     const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: {
@@ -260,6 +435,7 @@ describe('App desktop integration', () => {
     const events = new FakeDesktopEvents();
     let closes = 0;
     const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'discard' },
       window: {

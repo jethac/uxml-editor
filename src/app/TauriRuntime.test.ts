@@ -1,10 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import { createTauriRuntimeBindings, type RawTauriRuntimePorts } from './TauriRuntime';
 
+const TEST_COMMAND_AUTHORITY = Object.freeze({});
+
 describe('createTauriRuntimeBindings', () => {
+  it('preserves one explicit command authority across separate binding wrappers', () => {
+    const commandAuthority = Object.freeze({ transport: 'tauri' });
+    const raw = {
+      commandAuthority,
+      invoke: async () => null,
+      listen: async () => () => undefined,
+      timers: {
+        now: () => 0,
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+    } as RawTauriRuntimePorts & { readonly commandAuthority: object };
+
+    const first = createTauriRuntimeBindings(raw);
+    const second = createTauriRuntimeBindings(raw);
+
+    expect((first.desktop as unknown as { commandAuthority: object }).commandAuthority)
+      .toBe(commandAuthority);
+    expect((second.desktop as unknown as { commandAuthority: object }).commandAuthority)
+      .toBe(commandAuthority);
+  });
+
   it('resolves an exact close lease with one native command and exposes file-workflow menu enablement', async () => {
     const calls: Array<{ command: string; payload: unknown }> = [];
     const runtime = createTauriRuntimeBindings({
+      commandAuthority: TEST_COMMAND_AUTHORITY,
       invoke: async (command, payload) => {
         calls.push({ command, payload });
         return null;
@@ -42,6 +67,7 @@ describe('createTauriRuntimeBindings', () => {
   it('shares injected invoke/listen/timers with TauriHost and resolves close through native authority', async () => {
     const calls: Array<{ command: string; payload: unknown }> = [];
     const raw: RawTauriRuntimePorts = {
+      commandAuthority: TEST_COMMAND_AUTHORITY,
       invoke: async (command, payload) => {
         calls.push({ command, payload });
         if (command === 'desktop_confirm_close') return 'discard';
@@ -74,6 +100,7 @@ describe('createTauriRuntimeBindings', () => {
 
   it.each([null, 'yes', {}, 'SAVE'])('rejects malformed close decisions from untrusted IPC: %j', async (decision) => {
     const runtime = createTauriRuntimeBindings({
+      commandAuthority: TEST_COMMAND_AUTHORITY,
       invoke: async () => decision,
       listen: async () => () => undefined,
       timers: {
@@ -88,6 +115,7 @@ describe('createTauriRuntimeBindings', () => {
 
   it('rejects an unexpected native close resolution result', async () => {
     const runtime = createTauriRuntimeBindings({
+      commandAuthority: TEST_COMMAND_AUTHORITY,
       invoke: async () => ({ authorized: true }),
       listen: async () => () => undefined,
       timers: {
@@ -107,6 +135,7 @@ describe('createTauriRuntimeBindings', () => {
   it('uses no separable authorization or revocation command when native close resolution fails', async () => {
     const commands: string[] = [];
     const runtime = createTauriRuntimeBindings({
+      commandAuthority: TEST_COMMAND_AUTHORITY,
       invoke: async (command) => {
         commands.push(command);
         throw new Error('native close failed');
@@ -130,6 +159,7 @@ describe('createTauriRuntimeBindings', () => {
   it('rejects malformed lifecycle and workflow generations before native invocation', async () => {
     const commands: string[] = [];
     const runtime = createTauriRuntimeBindings({
+      commandAuthority: TEST_COMMAND_AUTHORITY,
       invoke: async (command) => { commands.push(command); return null; },
       listen: async () => () => undefined,
       timers: {

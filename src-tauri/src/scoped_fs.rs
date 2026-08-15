@@ -68,6 +68,22 @@ struct Grant {
     root: PathBuf,
     project_id: String,
     token: String,
+    atomic_replace: AtomicReplaceSupport,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicReplaceSupport {
+    BestEffortSafeWrite,
+    Unsupported,
+}
+
+impl AtomicReplaceSupport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BestEffortSafeWrite => "best-effort-safe-write",
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 pub struct PreparedGrant {
@@ -93,7 +109,7 @@ impl ScopedProjects {
     }
 
     pub fn prepare_selected(&self, root: &Path) -> Result<PreparedGrant, HostError> {
-        self.prepare_selected_impl(root, None)
+        self.prepare_selected_impl(root, None, None)
     }
 
     #[cfg(test)]
@@ -102,7 +118,17 @@ impl ScopedProjects {
         root: &Path,
         hook: impl FnOnce(),
     ) -> Result<PreparedGrant, HostError> {
-        self.prepare_selected_impl(root, Some(Box::new(hook)))
+        self.prepare_selected_impl(root, Some(Box::new(hook)), None)
+    }
+
+    #[cfg(test)]
+    fn grant_selected_with_atomic_replace_support(
+        &self,
+        root: &Path,
+        support: AtomicReplaceSupport,
+    ) -> Result<ProjectRootDto, HostError> {
+        let prepared = self.prepare_selected_impl(root, None, Some(support))?;
+        self.install_selected(prepared)
     }
 
     fn prepare_selected_impl(
@@ -111,6 +137,7 @@ impl ScopedProjects {
         #[cfg_attr(not(test), allow(unused_variables))] after_validation: Option<
             Box<dyn FnOnce() + '_>,
         >,
+        replacement_support: Option<AtomicReplaceSupport>,
     ) -> Result<PreparedGrant, HostError> {
         let authority = Dir::open_ambient_dir(root, ambient_authority()).map_err(|error| {
             HostError::io(
@@ -158,6 +185,8 @@ impl ScopedProjects {
                 "The selected project directory changed while it was being granted.",
             ));
         }
+        let atomic_replace =
+            replacement_support.unwrap_or_else(|| atomic_replace_support(&authority));
         recover_atomic_artifacts(&authority)?;
         let display_name = canonical
             .file_name()
@@ -177,6 +206,7 @@ impl ScopedProjects {
             root: canonical,
             project_id: project_id.clone(),
             token: token.clone(),
+            atomic_replace,
         };
         Ok(PreparedGrant {
             grant,
@@ -184,7 +214,7 @@ impl ScopedProjects {
                 project_id,
                 display_name,
                 grant: token,
-                atomic_replace: atomic_replace_capability(),
+                atomic_replace: atomic_replace.as_str(),
             },
         })
     }
@@ -268,6 +298,26 @@ impl ScopedProjects {
         })
     }
 
+    pub fn with_replace_file<T>(
+        &self,
+        project_id: &str,
+        token: &str,
+        relative_path: &str,
+        operation: impl FnOnce((&Dir, &Path)) -> Result<T, HostError>,
+    ) -> Result<T, HostError> {
+        self.with_grant(project_id, token, |grant| {
+            if grant.atomic_replace != AtomicReplaceSupport::BestEffortSafeWrite {
+                return Err(HostError::new(
+                    "unsupported",
+                    "Native conditional replacement is unsupported for this project root.",
+                ));
+            }
+            let normalized = NormalizedRelativePath::parse(relative_path)?;
+            let (parent, file_name) = open_existing_file_parent(grant, &normalized)?;
+            operation((&parent, file_name.as_path()))
+        })
+    }
+
     pub fn current_root(&self, project_id: &str) -> Result<PathBuf, HostError> {
         self.with_project(project_id, |grant| Ok(grant.root.clone()))
     }
@@ -326,13 +376,49 @@ impl ScopedProjects {
 }
 
 #[cfg(windows)]
-fn atomic_replace_capability() -> &'static str {
-    "best-effort-safe-write"
+fn atomic_replace_support(authority: &Dir) -> AtomicReplaceSupport {
+    let filesystem = filesystem_name_from_handle(authority);
+    atomic_replace_capability_from_filesystem(filesystem.as_deref())
 }
 
 #[cfg(not(windows))]
-fn atomic_replace_capability() -> &'static str {
-    "unsupported"
+fn atomic_replace_support(_authority: &Dir) -> AtomicReplaceSupport {
+    AtomicReplaceSupport::Unsupported
+}
+
+fn atomic_replace_capability_from_filesystem(filesystem: Option<&str>) -> AtomicReplaceSupport {
+    #[cfg(windows)]
+    if filesystem.is_some_and(|name| name.eq_ignore_ascii_case("NTFS")) {
+        return AtomicReplaceSupport::BestEffortSafeWrite;
+    }
+    let _ = filesystem;
+    AtomicReplaceSupport::Unsupported
+}
+
+#[cfg(windows)]
+fn filesystem_name_from_handle(authority: &Dir) -> Option<String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+
+    let mut filesystem = [0_u16; 32];
+    // SAFETY: the directory handle remains live and `filesystem` is a writable UTF-16 buffer.
+    let succeeded = unsafe {
+        GetVolumeInformationByHandleW(
+            authority.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return None;
+    }
+    let length = filesystem.iter().position(|unit| *unit == 0)?;
+    String::from_utf16(&filesystem[..length]).ok()
 }
 
 #[cfg(unix)]
@@ -432,7 +518,10 @@ fn collect_files(directory: &Dir, prefix: &Path, paths: &mut Vec<String>) -> Res
         let file_type = entry
             .file_type()
             .map_err(|error| read_error(Path::new(&file_name), &error))?;
-        if file_type.is_symlink() {
+        let metadata = entry
+            .metadata()
+            .map_err(|error| read_error(Path::new(&file_name), &error))?;
+        if file_type.is_symlink() || is_reparse_point(&metadata) {
             return Err(HostError::new(
                 "invalid-path",
                 "Project entry is a symbolic link or reparse point.",
@@ -440,8 +529,7 @@ fn collect_files(directory: &Dir, prefix: &Path, paths: &mut Vec<String>) -> Res
         }
         let relative = prefix.join(&file_name);
         if file_type.is_dir() {
-            let child = entry
-                .open_dir()
+            let child = open_project_child_directory(directory, Path::new(&file_name))
                 .map_err(|error| read_error(&relative, &error))?;
             collect_files(&child, &relative, paths)?;
         } else if file_type.is_file() {
@@ -451,6 +539,56 @@ fn collect_files(directory: &Dir, prefix: &Path, paths: &mut Vec<String>) -> Res
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn open_project_child_directory(parent: &Dir, name: &Path) -> std::io::Result<Dir> {
+    use cap_std::fs::{OpenOptions, OpenOptionsExt};
+    use std::{mem, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .access_mode(FILE_GENERIC_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let file = parent.open_with(name, &options)?;
+    let mut information = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: `information` is the exact writable buffer for FileAttributeTagInfo.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut information).cast(),
+            mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "project directory is a reparse object",
+        ));
+    }
+    if information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "project entry is not a directory",
+        ));
+    }
+    Ok(Dir::from_std_file(file.into_std()))
+}
+
+#[cfg(not(windows))]
+fn open_project_child_directory(parent: &Dir, name: &Path) -> std::io::Result<Dir> {
+    parent.open_dir(name)
 }
 
 fn open_existing_file_parent(
@@ -548,7 +686,10 @@ fn is_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_unique_paths, NormalizedRelativePath, ScopedProjects};
+    use super::{
+        atomic_replace_capability_from_filesystem, validate_unique_paths, AtomicReplaceSupport,
+        NormalizedRelativePath, ScopedProjects,
+    };
     use sha2::{Digest, Sha256};
     use std::{
         fs,
@@ -610,6 +751,10 @@ mod tests {
             fixture.root.file_name().unwrap().to_string_lossy()
         );
         assert!(root.project_id.starts_with("project:v1:"));
+        #[cfg(windows)]
+        assert_eq!(root.atomic_replace, "best-effort-safe-write");
+        #[cfg(not(windows))]
+        assert_eq!(root.atomic_replace, "unsupported");
         assert!(!root
             .project_id
             .contains(&fixture.root.to_string_lossy().to_string()));
@@ -680,6 +825,51 @@ mod tests {
             let error = validate_unique_paths(&paths).unwrap_err();
             assert_eq!(error.code, "read-failed");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_capability_requires_a_successful_handle_derived_ntfs_classification() {
+        assert_eq!(
+            atomic_replace_capability_from_filesystem(Some("NTFS")),
+            AtomicReplaceSupport::BestEffortSafeWrite
+        );
+        for filesystem in [None, Some("ReFS"), Some("SMB"), Some(""), Some("unknown")] {
+            assert_eq!(
+                atomic_replace_capability_from_filesystem(filesystem),
+                AtomicReplaceSupport::Unsupported,
+                "filesystem: {filesystem:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsupported_grant_rejects_replacement_before_entering_the_mutation_closure() {
+        let fixture = Fixture::new();
+        fixture.write("Main.uxml", "original");
+        let projects = ScopedProjects::default();
+        let root = projects
+            .grant_selected_with_atomic_replace_support(
+                &fixture.root,
+                AtomicReplaceSupport::Unsupported,
+            )
+            .unwrap();
+        let entered = std::cell::Cell::new(false);
+
+        let error = projects
+            .with_replace_file(&root.project_id, &root.grant, "Main.uxml", |_| {
+                entered.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert_eq!(root.atomic_replace, "unsupported");
+        assert_eq!(error.code, "unsupported");
+        assert!(!entered.get());
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("Main.uxml")).unwrap(),
+            "original"
+        );
     }
 
     #[test]
@@ -817,6 +1007,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn project_acquisition_restores_an_absent_target_from_a_crash_quarantine() {
         let fixture = Fixture::new();
@@ -835,6 +1026,7 @@ mod tests {
             .exists());
     }
 
+    #[cfg(windows)]
     #[test]
     fn project_acquisition_surfaces_a_target_backup_conflict_without_deleting_either() {
         let fixture = Fixture::new();
@@ -877,6 +1069,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn interrupted_absent_target_recovery_is_idempotent_when_names_share_identity() {
         let fixture = Fixture::new();
@@ -903,6 +1096,61 @@ mod tests {
                 .text,
             "crash-original"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_backup_recovery_is_unsupported_and_never_mutates_artifacts() {
+        for with_target in [false, true] {
+            let fixture = Fixture::new();
+            let backup_name = ".Main.uxml.uxml-editor-42-14.bak";
+            fixture.write(backup_name, "retained-original");
+            if with_target {
+                fixture.write("Main.uxml", "installed-result");
+            }
+            let projects = ScopedProjects::default();
+
+            let error = projects.grant_selected(&fixture.root).unwrap_err();
+
+            assert_eq!(error.code, "unsupported");
+            assert!(error.message.contains(backup_name));
+            assert_eq!(
+                fs::read_to_string(fixture.root.join(backup_name)).unwrap(),
+                "retained-original"
+            );
+            if with_target {
+                assert_eq!(
+                    fs::read_to_string(fixture.root.join("Main.uxml")).unwrap(),
+                    "installed-result"
+                );
+            } else {
+                assert!(!fixture.root.join("Main.uxml").exists());
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_acquisition_never_follows_a_target_symlink_to_authorize_backup_deletion() {
+        let fixture = Fixture::new();
+        let backup_name = ".Main.uxml.uxml-editor-42-12.bak";
+        let backup = fixture.root.join(backup_name);
+        let target = fixture.root.join("Main.uxml");
+        fixture.write(backup_name, "sole-original-bytes");
+        if std::os::windows::fs::symlink_file(Path::new(backup_name), &target).is_err() {
+            return;
+        }
+        let projects = ScopedProjects::default();
+
+        let error = projects.grant_selected(&fixture.root).unwrap_err();
+
+        assert_eq!(error.code, "replace-failed");
+        assert!(error.message.contains(backup_name));
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "sole-original-bytes");
+        assert!(fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(windows)]
@@ -936,6 +1184,37 @@ mod tests {
             "crash-original"
         );
         drop(held);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_recovery_target_open_names_and_retains_the_relative_backup_artifact() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let fixture = Fixture::new();
+        let backup_name = ".Main.uxml.uxml-editor-42-13.bak";
+        let backup = fixture.root.join(backup_name);
+        let target = fixture.root.join("Main.uxml");
+        fixture.write(backup_name, "retained-original");
+        fixture.write("Main.uxml", "installed-result");
+        let held_target = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&target)
+            .unwrap();
+        let projects = ScopedProjects::default();
+
+        let error = projects.grant_selected(&fixture.root).unwrap_err();
+
+        assert_eq!(error.code, "replace-failed");
+        assert!(error.message.contains(backup_name));
+        assert!(!error
+            .message
+            .contains(&fixture.root.to_string_lossy().to_string()));
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "retained-original");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "installed-result");
+        drop(held_target);
     }
 
     struct Fixture {
