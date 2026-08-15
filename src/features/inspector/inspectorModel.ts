@@ -8,7 +8,7 @@ import type { DocumentSession } from '../../core/documents/DocumentSession';
 import type { ElementLocator } from '../../core/documents/ElementLocator';
 import { styleTargetsFor, type StyleTarget } from '../../core/documents/StyleTarget';
 import type { EditorActiveStateEntry, EditorSnapshot } from '../../core/store/EditorStoreContracts';
-import { equalActiveStateLocator } from '../../core/store/EditorStoreContracts';
+import { activeStateEntryFor } from '../../core/store/ActiveStateLocator';
 import type { InspectorPropertyDefinition } from './propertyCatalog';
 import type { StyleEditTarget } from './inspectorTransactions';
 
@@ -78,10 +78,11 @@ export function styleFieldModel(
 }
 
 export function activeStatesFor(
+  root: EditorElement,
   activeStates: readonly EditorActiveStateEntry[],
   locator: ElementLocator,
 ): readonly string[] {
-  return activeStates.find((entry) => equalActiveStateLocator(entry.locator, locator))?.states ?? Object.freeze([]);
+  return activeStateEntryFor(root, activeStates, locator)?.states ?? Object.freeze([]);
 }
 
 function observeStyle(
@@ -90,7 +91,7 @@ function observeStyle(
   activeStateEntries: readonly EditorActiveStateEntry[],
   definition: InspectorPropertyDefinition,
 ): StyleObservation {
-  const state = activeStatesFor(activeStateEntries, selection.locator);
+  const state = activeStatesFor(session.document.root, activeStateEntries, selection.locator);
   const options = state.length === 0 ? undefined : explanationOptions(session.document.root, selection.node, state);
   const explanation = session.adapter.explain(session.document, selection.node.id, definition.property, options);
   let targets: readonly StyleTarget[] = Object.freeze([]);
@@ -123,15 +124,43 @@ function choicesFor(observations: readonly StyleObservation[]): readonly Inspect
     });
     if (edits.some((edit) => edit === null)) continue;
     seen.add(key);
-    const described = describeTarget(requested);
     choices.push(Object.freeze({
       id: key,
-      label: described.label,
-      ...(described.title === undefined ? {} : { title: described.title }),
+      label: '',
       edits: Object.freeze(edits as StyleEditTarget[]),
     }));
   }
-  return disambiguateChoiceLabels(choices);
+  return disambiguateChoiceLabels(describeChoices(choices));
+}
+
+function describeChoices(choices: readonly InspectorStyleChoice[]): readonly InspectorStyleChoice[] {
+  const distinctPaths = [...new Set(choices.map((choice) => choice.edits[0]?.target.path).filter((path): path is string => path !== undefined))];
+  return Object.freeze(choices.map((choice) => {
+    const targets = choice.edits.map((edit) => edit.target);
+    const primary = targets[0];
+    if (primary === undefined) return choice;
+    const path = shortestUniquePathSuffix(primary.path, distinctPaths);
+    if (primary.kind === 'inline') return Object.freeze({ ...choice, label: 'Inline style', title: primary.path });
+    if (primary.kind === 'new-rule') {
+      const selectors = [...new Set(targets.flatMap((target) => target.kind === 'new-rule' ? [target.selector] : []))];
+      const label = selectors.length === 1
+        ? `New rule: ${path} · ${selectors[0]}`
+        : `New rules: ${path} · ${selectors.length} selectors`;
+      return Object.freeze({ ...choice, label, title: primary.path });
+    }
+    const selector = primary.sourceSnapshot.slice(primary.selectorSource.start, primary.selectorSource.end).trim();
+    return Object.freeze({ ...choice, label: `${path} · ${selector}`, title: primary.path });
+  }));
+}
+
+function shortestUniquePathSuffix(path: string, paths: readonly string[]): string {
+  const normalized = path.replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  for (let depth = 1; depth <= segments.length; depth += 1) {
+    const suffix = segments.slice(-depth).join('/');
+    if (paths.every((candidate) => candidate === path || !candidate.replace(/\\/g, '/').endsWith(`/${suffix}`))) return suffix;
+  }
+  return normalized;
 }
 
 function disambiguateChoiceLabels(choices: readonly InspectorStyleChoice[]): readonly InspectorStyleChoice[] {
@@ -180,15 +209,6 @@ function destinationKey(target: StyleTarget): string {
   if (target.kind === 'rule') return JSON.stringify(['rule', target.path, target.itemIndex, target.declarationIndex, target.originDeclarationIndex]);
   if (target.kind === 'inline') return 'inline';
   return JSON.stringify(['new-rule', target.path]);
-}
-
-function describeTarget(target: StyleTarget): InspectorOrigin {
-  if (target.kind === 'inline') return { label: 'Inline style', title: target.path };
-  if (target.kind === 'new-rule') {
-    return { label: `New rule: ${fileName(target.path)} · ${target.selector}`, title: target.path };
-  }
-  const selector = target.sourceSnapshot.slice(target.selectorSource.start, target.selectorSource.end).trim();
-  return { label: `${fileName(target.path)} · ${selector}`, title: target.path };
 }
 
 function describeOrigin(session: DocumentSession, origin: StyleExplanationOrigin): InspectorOrigin {

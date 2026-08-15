@@ -2,6 +2,7 @@ import type { EditorDiagnostic, EditorDiagnosticKind, EditorNodeId } from '../ad
 import type { DocumentSession } from '../documents/DocumentSession';
 import type { ElementLocator } from '../documents/ElementLocator';
 import type { HostPort } from '../host/HostPort';
+import type { ProjectAsset } from './ProjectAssetCatalog';
 import type {
   EditorLayoutStorage,
   EditorViewport,
@@ -36,6 +37,7 @@ export interface EditorSnapshot {
   readonly host: HostPort | null;
   readonly selection: readonly EditorNodeId[];
   readonly activeStates: readonly EditorActiveStateEntry[];
+  readonly projectAssets: readonly ProjectAsset[];
   readonly diagnostics: readonly EditorDiagnostic[];
   readonly viewport: EditorViewport;
   readonly panes: PaneDimensions;
@@ -51,6 +53,7 @@ export type EditorAction =
   | Readonly<{ type: 'session/sync' }>
   | Readonly<{ type: 'selection/set'; selection: readonly EditorNodeId[] }>
   | Readonly<{ type: 'active-states/toggle'; locator: ElementLocator; state: EditorPseudoState }>
+  | Readonly<{ type: 'project-assets/set'; paths: readonly string[] }>
   | Readonly<{ type: 'diagnostics/set'; diagnostics: readonly EditorDiagnostic[] }>
   | Readonly<{ type: 'viewport/set'; width: number; height: number }>
   | Readonly<{ type: 'panes/resize'; pane: PaneName; size: number; persist: boolean }>
@@ -69,6 +72,7 @@ export interface EditorStoreOptions {
   readonly host?: HostPort | null;
   readonly storage?: EditorLayoutStorage | null;
   readonly viewport?: EditorViewport;
+  readonly projectAssets?: readonly string[];
 }
 
 export type EditorStoreErrorCode = 'invalid-action' | 'invalid-options';
@@ -106,6 +110,9 @@ export function normalizeEditorAction(candidate: EditorAction): EditorAction {
           locator: copyElementLocator(candidate.locator),
           state: candidate.state,
         });
+      case 'project-assets/set':
+        if (!Array.isArray(candidate.paths)) return invalidAction('Project asset paths must be an array.');
+        return Object.freeze({ type: candidate.type, paths: Object.freeze([...candidate.paths]) });
       case 'diagnostics/set':
         return Object.freeze({ type: candidate.type, diagnostics: copyEditorDiagnostics(candidate.diagnostics) });
       case 'viewport/set': {
@@ -214,15 +221,6 @@ export function equalElementLocator(left: ElementLocator, right: ElementLocator)
     && left.attributeHints.every((hint, index) =>
       hint.name === right.attributeHints[index].name && hint.value === right.attributeHints[index].value
     );
-}
-
-export function equalActiveStateLocator(left: ElementLocator, right: ElementLocator): boolean {
-  if (left.authoredName !== undefined || right.authoredName !== undefined) {
-    return left.authoredName !== undefined
-      && left.authoredName === right.authoredName
-      && left.qualifiedTag === right.qualifiedTag;
-  }
-  return equalElementLocator(left, right);
 }
 
 function copyElementLocator(candidate: unknown): ElementLocator {

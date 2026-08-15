@@ -41,7 +41,11 @@ describe('InspectorPanel', () => {
     await user.clear(screen.getByLabelText('Width'));
     await user.type(screen.getByLabelText('Width'), '240px');
 
+    expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
+    await pressEnter();
     expect(await screen.findByRole('menu', { name: 'Write width to' })).toBeVisible();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
   });
 
   it('rejects an unsupported numeric unit before mutating source', async () => {
@@ -71,6 +75,7 @@ describe('InspectorPanel', () => {
 
     await user.clear(screen.getByLabelText('Width'));
     await user.type(screen.getByLabelText('Width'), '240px');
+    await pressEnter();
     await user.click(await screen.findByRole('menuitem', { name: 'Inline style' }));
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -85,15 +90,135 @@ describe('InspectorPanel', () => {
 
     await user.clear(screen.getByLabelText('Width'));
     await user.type(screen.getByLabelText('Width'), '240px');
+    await pressEnter();
     const locator = session.locatorFor(nodeByName(session.document.root, 'secondary').id)!;
     session.history.execute(setAttribute(session, locator, 'tooltip', 'changed elsewhere'));
     const before = session.snapshot().files.get(SHEET_PATH)?.text;
 
     await user.click(await screen.findByRole('menuitem', { name: 'theme.uss · .primary' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(/stale|changed|current/i);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(session.snapshot().files.get(SHEET_PATH)?.text).toBe(before);
     expect(session.history.undoDepth).toBe(1);
+  });
+
+  it('cancels a pending target choice when selection changes to an equal-valued element', async () => {
+    const user = userEvent.setup();
+    const equalUss = `.primary { width: 180px; }
+.secondary { width: 180px; }
+`;
+    const { session, store } = renderInspector(['primary'], new Map([[ENTRY_PATH, UXML], [SHEET_PATH, equalUss]]));
+    const beforeUxml = session.snapshot().files.get(ENTRY_PATH)!.text;
+    const beforeUss = session.snapshot().files.get(SHEET_PATH)!.text;
+    const width = screen.getByLabelText('Width');
+    await user.clear(width);
+    await user.type(width, '240px');
+    await pressEnter();
+    const staleChoice = await screen.findByRole('menuitem', { name: 'Inline style' });
+
+    const secondary = nodeByName(session.document.root, 'secondary').id;
+    act(() => store.dispatch({ type: 'selection/set', selection: [secondary] }));
+    fireEvent.click(staleChoice);
+
+    expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(beforeUxml);
+    expect(session.snapshot().files.get(SHEET_PATH)?.text).toBe(beforeUss);
+    expect(session.history.undoDepth).toBe(0);
+  });
+
+  it('cancels a pending target choice when active pseudo-state context changes', async () => {
+    const user = userEvent.setup();
+    const { session, store } = renderInspector(['primary']);
+    const beforeUxml = session.snapshot().files.get(ENTRY_PATH)!.text;
+    const beforeUss = session.snapshot().files.get(SHEET_PATH)!.text;
+    const width = screen.getByLabelText('Width');
+    await user.clear(width);
+    await user.type(width, '240px');
+    await pressEnter();
+    const staleChoice = await screen.findByRole('menuitem', { name: 'Inline style' });
+    const primary = session.locatorFor(nodeByName(session.document.root, 'primary').id)!;
+
+    act(() => store.dispatch({ type: 'active-states/toggle', locator: primary, state: 'hover' }));
+    fireEvent.click(staleChoice);
+
+    expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(beforeUxml);
+    expect(session.snapshot().files.get(SHEET_PATH)?.text).toBe(beforeUss);
+    expect(session.history.undoDepth).toBe(0);
+  });
+
+  it('cancels a pending target choice when context changes to an identical replacement authority', async () => {
+    const user = userEvent.setup();
+    const { session, store } = renderInspector(['primary']);
+    const width = screen.getByLabelText('Width');
+    await user.clear(width);
+    await user.type(width, '240px');
+    await pressEnter();
+    const staleChoice = await screen.findByRole('menuitem', { name: 'Inline style' });
+    const replacement = DocumentSession.open(
+      new Map([[ENTRY_PATH, UXML], [SHEET_PATH, USS]]),
+      ENTRY_PATH,
+      new UxmlPreviewAdapter(),
+    );
+    replacement.setSelection([replacement.locatorFor(nodeByName(replacement.document.root, 'primary').id)!]);
+
+    act(() => store.dispatch({ type: 'context/set', session: replacement, host: null }));
+    fireEvent.click(staleChoice);
+
+    expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(UXML);
+    expect(replacement.snapshot().files.get(ENTRY_PATH)?.text).toBe(UXML);
+    expect(session.history.undoDepth).toBe(0);
+    expect(replacement.history.undoDepth).toBe(0);
+  });
+
+  it('resets equal-valued text-like drafts when selection identity changes', () => {
+    const equalUxml = UXML
+      .replace('class="secondary" text="Cancel" focusable="false"', 'class="primary action" text="Save" focusable="false" custom-mode="legacy"');
+    const equalUss = `.primary { width: 180px; }
+`;
+    const { session, store } = renderInspector(['primary'], new Map([[ENTRY_PATH, equalUxml], [SHEET_PATH, equalUss]]));
+    fireEvent.change(screen.getByLabelText('Width'), { target: { value: '240p' } });
+    fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Draft text' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Classes' }), { target: { value: 'draft-class' } });
+    fireEvent.change(screen.getByLabelText('custom-mode value'), { target: { value: 'draft-mode' } });
+
+    const secondary = nodeByName(session.document.root, 'secondary').id;
+    act(() => store.dispatch({ type: 'selection/set', selection: [secondary] }));
+
+    expect(screen.getByLabelText('Width')).toHaveValue('180px');
+    expect(screen.getByLabelText('Text')).toHaveValue('Save');
+    expect(screen.getByRole('textbox', { name: 'Classes' })).toHaveValue('primary action');
+    expect(screen.getByLabelText('custom-mode value')).toHaveValue('legacy');
+  });
+
+  it('resets equal-valued drafts when pseudo-state, generation, or session identity changes', () => {
+    const sameStateUss = USS.replace('.primary:hover { width: 200px; }', '.primary:hover { width: 180px; }');
+    const rendered = renderInspector(['primary'], new Map([[ENTRY_PATH, UXML], [SHEET_PATH, sameStateUss]]));
+    const primary = rendered.session.locatorFor(nodeByName(rendered.session.document.root, 'primary').id)!;
+    fireEvent.change(screen.getByLabelText('Width'), { target: { value: '240p' } });
+    act(() => rendered.store.dispatch({ type: 'active-states/toggle', locator: primary, state: 'hover' }));
+    expect(screen.getByLabelText('Width')).toHaveValue('180px');
+
+    fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Generation draft' } });
+    act(() => {
+      rendered.session.history.execute(setAttribute(rendered.session, primary, 'tooltip', 'generation change'));
+      rendered.store.dispatch({ type: 'session/sync' });
+    });
+    expect(screen.getByLabelText('Text')).toHaveValue('Save');
+
+    fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Session draft' } });
+    const replacement = DocumentSession.open(
+      new Map([[ENTRY_PATH, UXML], [SHEET_PATH, sameStateUss]]),
+      ENTRY_PATH,
+      new UxmlPreviewAdapter(),
+    );
+    replacement.setSelection([replacement.locatorFor(nodeByName(replacement.document.root, 'primary').id)!]);
+    act(() => rendered.store.dispatch({ type: 'context/set', session: replacement, host: null }));
+    expect(screen.getByLabelText('Text')).toHaveValue('Save');
   });
 
   it('shares locator-backed pseudo state with the canvas and clears it on session replacement', async () => {
@@ -123,6 +248,26 @@ describe('InspectorPanel', () => {
     expect(store.getSnapshot().activeStates).toHaveLength(0);
   });
 
+  it('shares the strict same-name tag replacement policy with canvas state resolution', () => {
+    const { session, store } = renderInspector(['primary'], undefined, true);
+    fireEvent.click(screen.getByLabelText('Hover'));
+    expect(screen.getByLabelText('Width')).toHaveValue('200px');
+    const start = UXML.indexOf('ui:Button');
+
+    act(() => {
+      session.history.execute({
+        id: 'replace-inspector-state-tag',
+        label: 'Replace inspector state tag',
+        patchesByFile: new Map([[ENTRY_PATH, [{ start, end: start + 'ui:Button'.length, replacement: 'ui:Label' }]]]),
+      });
+      store.dispatch({ type: 'session/sync' });
+    });
+
+    expect(store.getSnapshot().activeStates).toEqual([]);
+    expect(screen.getByText('Base state')).toBeVisible();
+    expect(screen.getByLabelText('Width')).toHaveValue('180px');
+  });
+
   it('exposes typed controls for layout, appearance, typography, assets, attributes, classes, and text', () => {
     renderInspector(['primary']);
 
@@ -134,7 +279,7 @@ describe('InspectorPanel', () => {
     expect(screen.getByLabelText('Background color swatch')).toHaveStyle({ backgroundColor: '#123456' });
     expect(screen.getByLabelText('Background image')).toHaveValue('url("Assets/UI/icon.png")');
     expect(screen.getByRole('button', { name: 'Available background image values' }).querySelector('svg')).toBeInTheDocument();
-    expect(screen.getByLabelText('Asset source')).toHaveAttribute('list', 'inspector-attribute-src-values');
+    expect(screen.getByRole('button', { name: 'Available asset source values' })).toHaveAttribute('aria-haspopup', 'dialog');
     expect(screen.getByLabelText('Opacity')).toHaveValue('0.5');
     expect(screen.getByLabelText('Font size')).toHaveValue('16px');
     expect(screen.getByLabelText('Font style')).toHaveValue('bold');
@@ -151,6 +296,7 @@ describe('InspectorPanel', () => {
     const authored = renderInspector(['primary']);
     await user.clear(screen.getByLabelText('Width'));
     await user.type(screen.getByLabelText('Width'), '260px');
+    await pressEnter();
     await user.click(await screen.findByRole('menuitem', { name: 'theme.uss · .primary' }));
     expect(authored.session.snapshot().files.get(SHEET_PATH)?.text).toContain('.primary { width: 260px;');
     expect(authored.session.history.undoDepth).toBe(1);
@@ -158,9 +304,41 @@ describe('InspectorPanel', () => {
 
     const added = renderInspector(['primary']);
     await user.type(screen.getByLabelText('Height'), '48px');
+    await pressEnter();
     await user.click(await screen.findByRole('menuitem', { name: 'New rule: theme.uss · #primary' }));
     expect(added.session.snapshot().files.get(SHEET_PATH)?.text).toContain('#primary {\n  height: 48px;\n}');
     expect(added.session.history.undoDepth).toBe(1);
+  });
+
+  it('uses shortest unique path suffixes for same-basename authored destinations', async () => {
+    const user = userEvent.setup();
+    const uxml = UXML.replace(
+      '  <Style src="theme.uss" />',
+      '  <Style src="../A/theme.uss" />\n  <Style src="../B/theme.uss" />',
+    );
+    renderInspector(['primary'], new Map([
+      [ENTRY_PATH, uxml],
+      ['Assets/A/theme.uss', '.primary { width: 120px; }\n'],
+      ['Assets/B/theme.uss', '.primary { width: 180px; }\n'],
+    ]));
+    const width = screen.getByLabelText('Width');
+    await user.clear(width);
+    await user.type(width, '250px');
+    await pressEnter();
+
+    const menu = await screen.findByRole('menu', { name: 'Write width to' });
+    expect(within(menu).getByRole('menuitem', { name: 'A/theme.uss · .primary' })).toBeVisible();
+    expect(within(menu).getByRole('menuitem', { name: 'B/theme.uss · .primary' })).toBeVisible();
+  });
+
+  it('describes every selector represented by a multi-selection new-rule choice', async () => {
+    const user = userEvent.setup();
+    renderInspector(['primary', 'secondary']);
+    const height = screen.getByLabelText('Height');
+    await user.type(height, '48px');
+    await pressEnter();
+
+    expect(await screen.findByRole('menuitem', { name: 'New rules: theme.uss · 2 selectors' })).toBeVisible();
   });
 
   it('disambiguates repeated authored selectors in the write-target menu', async () => {
@@ -172,6 +350,7 @@ describe('InspectorPanel', () => {
 
     await user.clear(screen.getByLabelText('Width'));
     await user.type(screen.getByLabelText('Width'), '250px');
+    await pressEnter();
 
     const menu = await screen.findByRole('menu', { name: 'Write width to' });
     expect(within(menu).getByRole('menuitem', { name: 'theme.uss · .primary · line 1' })).toBeVisible();
@@ -188,6 +367,7 @@ describe('InspectorPanel', () => {
     const { session } = renderInspector(['duplicate'], new Map([[ENTRY_PATH, duplicateNames]]));
 
     await user.type(screen.getByLabelText('Height'), '40px');
+    await pressEnter();
 
     expect(screen.queryByRole('menu', { name: 'Write height to' })).not.toBeInTheDocument();
     expect(session.snapshot().files.get(ENTRY_PATH)?.text).toContain('style="height: 40px;"');
@@ -216,6 +396,7 @@ describe('InspectorPanel', () => {
     const before = session.snapshot().files.get(ENTRY_PATH)?.text;
 
     await user.type(screen.getByLabelText('Width'), '300px');
+    await pressEnter();
     await user.click(await screen.findByRole('menuitem', { name: 'Inline style' }));
 
     expect(session.snapshot().files.get(ENTRY_PATH)?.text.match(/style="width: 300px;"/g)).toHaveLength(2);
@@ -223,6 +404,105 @@ describe('InspectorPanel', () => {
     session.history.undo();
     expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(before);
   });
+
+  it('treats present and absent unknown attributes as mixed and edits every selected element atomically', () => {
+    const { session } = renderInspector(['primary', 'secondary']);
+    const before = session.snapshot().files.get(ENTRY_PATH)!.text;
+    const value = screen.getByLabelText('custom-mode value');
+    expect(value).toHaveValue('');
+    expect(value).toHaveAttribute('placeholder', 'Mixed');
+
+    fireEvent.change(value, { target: { value: 'modern' } });
+    fireEvent.blur(value);
+
+    const expected = before
+      .replace('custom-mode="legacy"', 'custom-mode="modern"')
+      .replace('text="Cancel" focusable="false"', 'text="Cancel" focusable="false" custom-mode="modern"');
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(expected);
+    expect(session.history.undoDepth).toBe(1);
+    session.history.undo();
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(before);
+  });
+
+  it('removes a mixed unknown attribute only from selected elements that author it', async () => {
+    const user = userEvent.setup();
+    const { session } = renderInspector(['primary', 'secondary']);
+    const before = session.snapshot().files.get(ENTRY_PATH)!.text;
+
+    await user.click(screen.getByRole('button', { name: 'Remove custom-mode' }));
+
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(before.replace(' custom-mode="legacy"', ''));
+    expect(session.history.undoDepth).toBe(1);
+  });
+
+  it.each([
+    ['Width', 'width', '240px'],
+    ['Opacity', 'opacity', '0.75'],
+    ['Background color', 'background-color', '#abcdef'],
+    ['Background image', 'background-image', 'url("Assets/UI/new.png")'],
+    ['Overflow position', '-unity-text-overflow-position', 'end'],
+  ])('commits %s only on Enter and creates one history entry', async (label, property, requested) => {
+    const user = userEvent.setup();
+    const { session } = renderInspector(['primary']);
+    const input = screen.getByLabelText(label);
+    await user.clear(input);
+    await user.type(input, requested);
+
+    expect(screen.queryByRole('menu', { name: `Write ${property} to` })).not.toBeInTheDocument();
+    expect(session.history.undoDepth).toBe(0);
+    await pressEnter();
+    const menu = await screen.findByRole('menu', { name: `Write ${property} to` });
+    await user.click(within(menu).getByRole('menuitem', { name: 'Inline style' }));
+
+    expect(session.history.undoDepth).toBe(1);
+    expect(input).toHaveFocus();
+  });
+
+  it('does not commit a valid short hex prefix while a longer color is being typed', async () => {
+    const user = userEvent.setup();
+    const { session } = renderInspector(['primary']);
+    const color = screen.getByLabelText('Color');
+    await user.clear(color);
+    await user.type(color, '#123');
+    expect(screen.queryByRole('menu', { name: 'Write color to' })).not.toBeInTheDocument();
+    expect(session.history.undoDepth).toBe(0);
+    await user.type(color, '456');
+    expect(screen.queryByRole('menu', { name: 'Write color to' })).not.toBeInTheDocument();
+    await pressEnter();
+    expect(await screen.findByRole('menu', { name: 'Write color to' })).toBeVisible();
+  });
+
+  it('commits a complete text-like style draft on blur and focuses the target menu', async () => {
+    const user = userEvent.setup();
+    const { session } = renderInspector(['primary']);
+    const width = screen.getByLabelText('Width');
+    await user.clear(width);
+    await user.type(width, '245px');
+    expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
+    await user.tab();
+
+    const menu = await screen.findByRole('menu', { name: 'Write width to' });
+    expect(within(menu).getAllByRole('menuitem')[0]).toHaveFocus();
+    expect(session.history.undoDepth).toBe(0);
+  });
+
+  it.each(['#1234567', 'rgb(256, 0, 0)', 'rgba(0, 0, 0, 1.1)'])(
+    'rejects invalid color %s without mutation',
+    async (requested) => {
+      const user = userEvent.setup();
+      const { session } = renderInspector(['primary']);
+      const before = session.snapshot().files.get(SHEET_PATH)!.text;
+      const color = screen.getByLabelText('Background color');
+      await user.clear(color);
+      await user.type(color, requested);
+      await pressEnter();
+
+      expect(color).toHaveAttribute('aria-invalid', 'true');
+      expect(screen.queryByRole('menu', { name: 'Write background-color to' })).not.toBeInTheDocument();
+      expect(session.snapshot().files.get(SHEET_PATH)?.text).toBe(before);
+      expect(session.history.undoDepth).toBe(0);
+    },
+  );
 
   it('edits and removes unknown authored attributes without changing unrelated source', async () => {
     const user = userEvent.setup();
@@ -261,6 +541,52 @@ describe('InspectorPanel', () => {
     expect(source).toHaveAttribute('aria-invalid', 'true');
     expect(asset.session.snapshot().files.get(ENTRY_PATH)?.text).toBe(before);
     expect(asset.session.history.undoDepth).toBe(0);
+  });
+
+  it('chooses catalog assets for style values in explicit path and resource modes', async () => {
+    const user = userEvent.setup();
+    const assets = ['Assets/UI/Logo.png', 'Assets/Resources/Icons/Save.png'];
+    const pathEdit = renderInspector(['primary'], undefined, false, assets);
+    await user.click(screen.getByRole('button', { name: 'Available background image values' }));
+    const pathPicker = await screen.findByRole('combobox', { name: 'Background image project asset' });
+    expect(within(pathPicker).getByRole('option', { name: 'Assets/UI/Logo.png' })).toBeInTheDocument();
+    expect(within(pathPicker).getByRole('option', { name: 'Assets/Resources/Icons/Save.png' })).toBeInTheDocument();
+    await user.selectOptions(pathPicker, 'Assets/UI/Logo.png');
+    await user.click(screen.getByRole('button', { name: 'Use background image asset' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Inline style' }));
+    expect(pathEdit.session.snapshot().files.get(ENTRY_PATH)?.text).toContain('background-image: url(&quot;Assets/UI/Logo.png&quot;);');
+    expect(pathEdit.session.history.undoDepth).toBe(1);
+    pathEdit.view.unmount();
+
+    const resourceEdit = renderInspector(['primary'], undefined, false, assets);
+    await user.click(screen.getByRole('button', { name: 'Available background image values' }));
+    await user.click(screen.getByRole('radio', { name: 'Resource' }));
+    const resourcePicker = screen.getByRole('combobox', { name: 'Background image project asset' });
+    expect(within(resourcePicker).queryByRole('option', { name: 'Assets/UI/Logo.png' })).not.toBeInTheDocument();
+    await user.selectOptions(resourcePicker, 'Assets/Resources/Icons/Save.png');
+    await user.click(screen.getByRole('button', { name: 'Use background image asset' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Inline style' }));
+    expect(resourceEdit.session.snapshot().files.get(ENTRY_PATH)?.text).toContain('background-image: resource(&quot;Icons/Save&quot;);');
+    expect(resourceEdit.session.history.undoDepth).toBe(1);
+  });
+
+  it('formats catalog choices as path or resource attribute src values', async () => {
+    const user = userEvent.setup();
+    const assets = ['Assets/UI/Logo.png', 'Assets/Resources/Icons/Save.png'];
+    const pathEdit = renderInspector(['primary'], undefined, false, assets);
+    await user.click(screen.getByRole('button', { name: 'Available asset source values' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Asset source project asset' }), 'Assets/UI/Logo.png');
+    await user.click(screen.getByRole('button', { name: 'Use asset source asset' }));
+    expect(pathEdit.session.snapshot().files.get(ENTRY_PATH)?.text).toContain('src="Assets/UI/Logo.png"');
+    expect(pathEdit.session.history.undoDepth).toBe(1);
+    pathEdit.view.unmount();
+
+    const resourceEdit = renderInspector(['primary'], undefined, false, assets);
+    await user.click(screen.getByRole('button', { name: 'Available asset source values' }));
+    await user.click(screen.getByRole('radio', { name: 'Resource' }));
+    await user.click(screen.getByRole('button', { name: 'Use asset source asset' }));
+    expect(resourceEdit.session.snapshot().files.get(ENTRY_PATH)?.text).toContain('src="resource://Icons/Save"');
+    expect(resourceEdit.session.history.undoDepth).toBe(1);
   });
 
   it('rejects malformed class tokens and missing namespaces before any mutation', async () => {
@@ -303,14 +629,38 @@ describe('InspectorPanel', () => {
     const width = screen.getByLabelText('Width');
     await user.clear(width);
     await user.type(width, '250px');
+    await pressEnter();
     const menu = await screen.findByRole('menu', { name: 'Write width to' });
     const items = within(menu).getAllByRole('menuitem');
+    expect(items[0]).toHaveFocus();
+    await user.keyboard('{End}');
+    expect(within(menu).getByRole('menuitem', { name: 'Cancel' })).toHaveFocus();
+    await user.keyboard('{Home}');
     expect(items[0]).toHaveFocus();
     await user.keyboard('{ArrowDown}');
     expect(items[1]).toHaveFocus();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
     expect(width).toHaveFocus();
+  });
+
+  it('offers pointer cancellation and restores field focus after cancel or successful choice', async () => {
+    const user = userEvent.setup();
+    const { session } = renderInspector(['primary']);
+    const width = screen.getByLabelText('Width');
+    await user.clear(width);
+    await user.type(width, '250px');
+    await pressEnter();
+    const cancel = await screen.findByRole('menuitem', { name: 'Cancel' });
+    await user.click(cancel);
+    expect(screen.queryByRole('menu', { name: 'Write width to' })).not.toBeInTheDocument();
+    expect(width).toHaveFocus();
+    expect(session.history.undoDepth).toBe(0);
+
+    await pressEnter();
+    await user.click(await screen.findByRole('menuitem', { name: 'Inline style' }));
+    expect(width).toHaveFocus();
+    expect(session.history.undoDepth).toBe(1);
   });
 
   it('renders the inspector in the compact Workbench tool pane', () => {
@@ -323,8 +673,13 @@ describe('InspectorPanel', () => {
   });
 });
 
-function renderInspector(names: readonly string[], files?: ReadonlyMap<string, string>, withCanvas = false) {
-  const created = createInspector(names, files);
+function renderInspector(
+  names: readonly string[],
+  files?: ReadonlyMap<string, string>,
+  withCanvas = false,
+  projectAssets: readonly string[] = [],
+) {
+  const created = createInspector(names, files, undefined, projectAssets);
   const view = render(withCanvas ? <CanvasInspectorHarness store={created.store} /> : <InspectorHarness store={created.store} />);
   return { ...created, view };
 }
@@ -332,7 +687,8 @@ function renderInspector(names: readonly string[], files?: ReadonlyMap<string, s
 function createInspector(
   names: readonly string[],
   files: ReadonlyMap<string, string> = new Map([[ENTRY_PATH, UXML], [SHEET_PATH, USS]]),
-  viewport = { width: 1366, height: 768 },
+  viewport: Readonly<{ width: number; height: number }> | undefined = { width: 1366, height: 768 },
+  projectAssets: readonly string[] = [],
 ) {
   const session = DocumentSession.open(
     files,
@@ -341,7 +697,7 @@ function createInspector(
   );
   const selection = names.map((name) => nodeByName(session.document.root, name).id);
   session.setSelection(selection.map((nodeId) => session.locatorFor(nodeId)!));
-  const store = new EditorStore({ session, viewport });
+  const store = new EditorStore({ session, viewport, projectAssets });
   return { session, store };
 }
 
@@ -357,6 +713,14 @@ function CanvasInspectorHarness({ store }: { readonly store: EditorStore }) {
       <InspectorHarness store={store} />
     </>
   );
+}
+
+async function pressEnter() {
+  if (!(document.activeElement instanceof HTMLElement)) throw new Error('Expected an active inspector control.');
+  const activeElement = document.activeElement;
+  await act(async () => {
+    activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
 }
 
 function nodeByName(root: EditorElement, name: string): EditorElement {

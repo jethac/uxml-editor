@@ -98,6 +98,50 @@ describe('EditorStore snapshots', () => {
     expect(Object.isFrozen(store.getSnapshot().diagnostics[0])).toBe(true);
     expect(Object.isFrozen(store.getSnapshot().diagnostics[0].source)).toBe(true);
   });
+
+  it('validates, derives, and deeply freezes deterministic project asset metadata', () => {
+    const paths = [
+      'Assets/UI/Icon.png',
+      'Assets/Resources/Icons/Save.png',
+      'Packages/com.example.ui/Resources/Themes/Dark.asset',
+    ];
+    const store = new EditorStore({ projectAssets: paths });
+    paths[0] = 'Assets/changed.png';
+
+    expect(store.getSnapshot().projectAssets).toEqual([
+      { path: 'Assets/UI/Icon.png' },
+      { path: 'Assets/Resources/Icons/Save.png', resourceKey: 'Icons/Save' },
+      { path: 'Packages/com.example.ui/Resources/Themes/Dark.asset', resourceKey: 'Themes/Dark' },
+    ]);
+    expect(Object.isFrozen(store.getSnapshot().projectAssets)).toBe(true);
+    expect(store.getSnapshot().projectAssets.every(Object.isFrozen)).toBe(true);
+  });
+
+  it('replaces project assets through a validated action and clears them with authority replacement', () => {
+    const first = openSession();
+    const second = openSession();
+    const store = new EditorStore({ session: first, projectAssets: ['Assets/Resources/Old.asset'] });
+
+    store.dispatch({ type: 'project-assets/set', paths: ['Assets/Resources/New.asset', 'Assets/UI/New.png'] });
+    expect(store.getSnapshot().projectAssets).toEqual([
+      { path: 'Assets/Resources/New.asset', resourceKey: 'New' },
+      { path: 'Assets/UI/New.png' },
+    ]);
+
+    store.dispatch({ type: 'context/set', session: second, host: null });
+    expect(store.getSnapshot().projectAssets).toEqual([]);
+    expect(() => store.dispatch({ type: 'project-assets/set', paths: ['../outside.png'] })).toThrow(EditorStoreError);
+    expect(store.getSnapshot().projectAssets).toEqual([]);
+  });
+
+  it.each([
+    { projectAssets: ['../outside.png'] },
+    { projectAssets: ['Assets/UI/no-extension'] },
+    { projectAssets: ['Assets/UI/unsafe"name.png'] },
+    { projectAssets: ['Assets/UI/Icon.png', 'Assets/UI/Icon.png'] },
+  ])('rejects malformed project asset options before publishing a snapshot: $projectAssets', ({ projectAssets }) => {
+    expect(() => new EditorStore({ projectAssets })).toThrow(EditorStoreError);
+  });
 });
 
 describe('EditorStore subscriptions', () => {
@@ -315,6 +359,29 @@ describe('EditorStore command state', () => {
     expect(store.getSnapshot().selection).not.toBe(session.selectedNodeIds);
     expect(store.getSnapshot().diagnostics).toEqual(session.diagnostics);
     expect(store.getSnapshot().diagnostics).not.toBe(session.diagnostics);
+  });
+
+  it('clears active state when the same authored name resolves to a different qualified tag', () => {
+    const source = '<UXML><Button name="target"></Button></UXML>';
+    const session = openSession(source);
+    const target = session.document.root.children[0];
+    const locator = session.locatorFor(target.id)!;
+    const store = new EditorStore({ session });
+    store.dispatch({ type: 'active-states/toggle', locator, state: 'hover' });
+    expect(store.getSnapshot().activeStates).toHaveLength(1);
+
+    const start = source.indexOf('Button');
+    session.history.execute({
+      id: 'replace-tag',
+      label: 'Replace tag',
+      patchesByFile: new Map([['Assets/UI/Main.uxml', [
+        { start, end: start + 'Button'.length, replacement: 'Label' },
+        { start: source.lastIndexOf('Button'), end: source.lastIndexOf('Button') + 'Button'.length, replacement: 'Label' },
+      ]]]),
+    });
+    store.dispatch({ type: 'session/sync' });
+
+    expect(store.getSnapshot().activeStates).toEqual([]);
   });
 
   it('invokes host project selection only when the command is available', async () => {

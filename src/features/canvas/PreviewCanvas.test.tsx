@@ -482,6 +482,30 @@ describe('PreviewCanvas rendering and viewport controls', () => {
     await waitFor(() => expect(adapter.renderOptions.at(-1)?.states).toBeUndefined());
   });
 
+  it('clears pseudo states when the same authored name is replaced by a different tag', async () => {
+    const user = userEvent.setup();
+    const adapter = new ControlledPreviewPort('tag replacement states', []);
+    const session = openSession(adapter);
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} />);
+    await user.click(await screen.findByText('tag replacement states preview'));
+    await user.click(screen.getByLabelText('Hover'));
+    await waitFor(() => expect(adapter.renderOptions.at(-1)?.states).toEqual({ '#target': ['hover'] }));
+
+    const start = UXML.indexOf('ui:Button');
+    act(() => {
+      session.history.execute({
+        id: 'replace-state-tag',
+        label: 'Replace state tag',
+        patchesByFile: new Map([[ENTRY, [{ start, end: start + 'ui:Button'.length, replacement: 'ui:Label' }]]]),
+      });
+      store.dispatch({ type: 'session/sync' });
+    });
+
+    await waitFor(() => expect(adapter.renderOptions.at(-1)?.states).toBeUndefined());
+    expect(store.getSnapshot().activeStates).toEqual([]);
+  });
+
   it('escapes authored names for pseudo states without targeting sibling identifiers', async () => {
     const user = userEvent.setup();
     const adapter = new ControlledPreviewPort('escaped states', [], false, '-1state');

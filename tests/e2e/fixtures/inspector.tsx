@@ -29,6 +29,7 @@ session.setSelection([session.locatorFor(selected.id)!]);
 const store = new EditorStore({
   session,
   viewport: { width: window.innerWidth, height: window.innerHeight },
+  projectAssets: ['Assets/UI/Logo.png', 'Assets/Resources/Icons/Save.png'],
 });
 store.dispatch({ type: 'panel/set', panel: 'inspector' });
 

@@ -40,12 +40,11 @@ import type {
 import type { EditorStore } from '../../core/store/EditorStore';
 import {
   EDITOR_PSEUDO_STATES,
-  equalActiveStateLocator,
   type EditorActiveStateEntry,
   type EditorPseudoState,
 } from '../../core/store/EditorStoreContracts';
+import { activeStateEntryFor, resolveActiveStateLocator } from '../../core/store/ActiveStateLocator';
 import type { DocumentSession } from '../../core/documents/DocumentSession';
-import { resolveElementLocator } from '../../core/documents/ElementLocator';
 import type { ClipboardPort } from '../../core/commands/ClipboardService';
 import {
   layoutCommands,
@@ -117,7 +116,7 @@ export function PreviewCanvas({
   const selectedLocator = session === null || selectedNodeId === null ? null : session.locatorFor(selectedNodeId);
   const selectedStates = selectedLocator === null
     ? undefined
-    : snapshot.activeStates.find((entry) => equalActiveStateLocator(entry.locator, selectedLocator))?.states;
+    : sessionDocument === null ? undefined : activeStateEntryFor(sessionDocument.root, snapshot.activeStates, selectedLocator)?.states;
   const selectedSelector = sessionDocument === null || selectedNodeId === null
     ? null
     : narrowStateSelector(sessionDocument.root, selectedNodeId);
@@ -588,7 +587,7 @@ function narrowStateSelector(root: EditorElement, target: EditorNodeId): string 
 function stateOptions(root: EditorElement, entries: readonly EditorActiveStateEntry[]): Readonly<Record<string, readonly string[]>> | undefined {
   const options: Record<string, readonly string[]> = {};
   for (const { locator, states } of entries) {
-    const nodeId = resolveElementLocator(root, locator);
+    const nodeId = resolveActiveStateLocator(root, locator);
     if (nodeId === null) continue;
     const selector = narrowStateSelector(root, nodeId);
     if (selector !== null && states.length > 0) {

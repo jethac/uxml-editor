@@ -1,34 +1,54 @@
-import { FolderSearch } from 'lucide-react';
-import { useEffect, useState, type ChangeEvent, type FocusEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import type { ProjectAsset } from '../../core/store/ProjectAssetCatalog';
 import type { InspectorStyleFieldModel } from './inspectorModel';
 import { colorSwatchValue, validateInspectorValue } from './propertyCatalog';
+import { AssetPicker } from './AssetPicker';
 
 export interface StylePropertyFieldProps {
   readonly field: InspectorStyleFieldModel;
+  readonly draftContext: unknown;
+  readonly projectAssets: readonly ProjectAsset[];
   readonly onEdit: (field: InspectorStyleFieldModel, value: string) => void;
 }
 
-export function StylePropertyField({ field, onEdit }: StylePropertyFieldProps) {
+export function StylePropertyField({ field, draftContext, projectAssets, onEdit }: StylePropertyFieldProps) {
   const { definition } = field;
   const inputId = `inspector-style-${definition.property}`;
   const [draft, setDraft] = useState(field.value);
   const [error, setError] = useState<string | null>(null);
+  const skipBlurCommit = useRef(false);
   useEffect(() => {
     setDraft(field.value);
     setError(null);
-  }, [field.value, field.mixed]);
+  }, [draftContext, field.value, field.mixed]);
 
-  const update = (value: string, commitWhenValid: boolean) => {
+  const update = (value: string) => {
     setDraft(value);
     const validation = value.length === 0 ? null : validateInspectorValue(definition, value);
     setError(validation);
-    if (commitWhenValid && validation === null && value.length > 0 && (field.mixed || value !== field.value)) onEdit(field, value);
   };
-  const blur = (event: FocusEvent<HTMLInputElement>) => {
-    const validation = validateInspectorValue(definition, event.currentTarget.value);
+  const commit = (value: string) => {
+    const validation = validateInspectorValue(definition, value);
     setError(validation);
+    if (validation === null && (field.mixed || value !== field.value)) onEdit(field, value);
   };
-  const change = (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => update(event.target.value, true);
+  const blur = () => {
+    if (skipBlurCommit.current) return;
+    commit(draft);
+  };
+  const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    skipBlurCommit.current = true;
+    commit(event.currentTarget.value);
+    queueMicrotask(() => { skipBlurCommit.current = false; });
+  };
+  const enumChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const value = event.target.value;
+    setDraft(value);
+    setError(null);
+    if (value.length > 0 && (field.mixed || value !== field.value)) onEdit(field, value);
+  };
 
   return (
     <div className="inspector-field" data-property={definition.property}>
@@ -36,7 +56,7 @@ export function StylePropertyField({ field, onEdit }: StylePropertyFieldProps) {
       <div className="inspector-control">
         {definition.kind === 'enum'
           ? (
-              <select id={inputId} aria-label={definition.label} value={draft} aria-invalid={error !== null} onChange={change}>
+              <select id={inputId} aria-label={definition.label} value={draft} aria-invalid={error !== null} onChange={enumChange}>
                 {(field.mixed || !definition.values?.includes(draft)) && <option value="">{field.mixed ? 'Mixed' : 'Unavailable'}</option>}
                 {definition.values?.map((value) => <option key={value} value={value}>{value}</option>)}
               </select>
@@ -57,17 +77,22 @@ export function StylePropertyField({ field, onEdit }: StylePropertyFieldProps) {
                   placeholder={field.mixed ? 'Mixed' : undefined}
                   aria-invalid={error !== null}
                   aria-describedby={`${inputId}-origin${error === null ? '' : ` ${inputId}-error`}`}
-                  list={definition.kind === 'asset' ? `${inputId}-values` : undefined}
-                  onChange={change}
+                  onChange={(event) => update(event.target.value)}
                   onBlur={blur}
+                  onKeyDown={keyDown}
                 />
                 {definition.kind === 'asset' && (
-                  <>
-                    <datalist id={`${inputId}-values`}><option value="none" />{field.value.length > 0 && <option value={field.value} />}</datalist>
-                    <button type="button" aria-label={`Available ${definition.label.toLowerCase()} values`} title="Available asset values" onClick={() => document.getElementById(inputId)?.focus()}>
-                      <FolderSearch aria-hidden="true" />
-                    </button>
-                  </>
+                  <AssetPicker
+                    label={definition.label}
+                    assets={projectAssets}
+                    valueKind="style"
+                    resetKey={draftContext}
+                    onSelect={(value) => {
+                      setDraft(value);
+                      setError(null);
+                      if (field.mixed || value !== field.value) onEdit(field, value);
+                    }}
+                  />
                 )}
               </div>
             )}

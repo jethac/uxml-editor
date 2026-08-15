@@ -1,6 +1,11 @@
 import type { DocumentSession } from '../documents/DocumentSession';
 import type { HostPort } from '../host/HostPort';
-import { resolveElementLocator } from '../documents/ElementLocator';
+import { activeStateEntryFor, resolveActiveStateLocator } from './ActiveStateLocator';
+import {
+  copyProjectAssetCatalog,
+  emptyProjectAssetCatalog,
+  equalProjectAssetCatalog,
+} from './ProjectAssetCatalog';
 import {
   DEFAULT_VIEWPORT,
   clampPaneDimension,
@@ -18,7 +23,6 @@ import {
   emptyEditorSelection,
   equalEditorDiagnostics,
   equalEditorSelection,
-  equalActiveStateLocator,
   normalizeEditorAction,
   normalizeEditorViewport,
   validateEditorContext,
@@ -65,6 +69,7 @@ export class EditorStore {
       host,
       selection: session === null ? emptyEditorSelection() : copyEditorSelection(session.selectedNodeIds),
       activeStates: emptyEditorActiveStates(),
+      projectAssets: copyProjectAssets(options.projectAssets ?? [], 'invalid-options'),
       diagnostics: session === null ? emptyEditorDiagnostics() : copyEditorDiagnostics(session.diagnostics),
       viewport,
       panes: restorePaneDimensions(this.storage),
@@ -128,6 +133,8 @@ export class EditorStore {
           : this.replace({ selection: action.selection });
       case 'active-states/toggle':
         return this.toggleActiveState(action.locator, action.state);
+      case 'project-assets/set':
+        return this.withProjectAssets(action.paths);
       case 'diagnostics/set':
         return equalEditorDiagnostics(this.snapshot.diagnostics, action.diagnostics)
           ? this.snapshot
@@ -177,7 +184,10 @@ export class EditorStore {
       host,
       selection,
       diagnostics,
-      ...(session === this.snapshot.session ? {} : { activeStates: emptyEditorActiveStates() }),
+      ...(session === this.snapshot.session && host === this.snapshot.host ? {} : {
+        activeStates: emptyEditorActiveStates(),
+        projectAssets: emptyProjectAssetCatalog(),
+      }),
     });
   }
 
@@ -229,9 +239,10 @@ export class EditorStore {
 
   private toggleActiveState(locator: EditorActiveStateEntry['locator'], state: EditorActiveStateEntry['states'][number]): EditorSnapshot {
     const session = this.snapshot.session;
-    if (session === null || resolveActiveStateLocator(session, locator) === null) return this.snapshot;
+    if (session === null || resolveActiveStateLocator(session.document.root, locator) === null) return this.snapshot;
     const entries = this.snapshot.activeStates.map((entry) => ({ locator: entry.locator, states: [...entry.states] }));
-    const index = entries.findIndex((entry) => equalActiveStateLocator(entry.locator, locator));
+    const existing = activeStateEntryFor(session.document.root, entries, locator);
+    const index = existing === undefined ? -1 : entries.findIndex((entry) => entry === existing);
     if (index === -1) entries.push({ locator, states: [state] });
     else {
       const states = entries[index].states;
@@ -241,6 +252,13 @@ export class EditorStore {
       if (states.length === 0) entries.splice(index, 1);
     }
     return this.replace({ activeStates: copyEditorActiveStates(entries) });
+  }
+
+  private withProjectAssets(paths: readonly string[]): EditorSnapshot {
+    const projectAssets = copyProjectAssets(paths, 'invalid-action');
+    return equalProjectAssetCatalog(projectAssets, this.snapshot.projectAssets)
+      ? this.snapshot
+      : this.replace({ projectAssets });
   }
 
   private replace(changes: Partial<EditorSnapshot>): EditorSnapshot {
@@ -265,6 +283,7 @@ function createSnapshot(state: Omit<EditorSnapshot, 'commands'> | EditorSnapshot
     host: state.host,
     selection: state.selection,
     activeStates: state.activeStates,
+    projectAssets: state.projectAssets,
     diagnostics: state.diagnostics,
     viewport: state.viewport,
     panes: state.panes,
@@ -280,27 +299,16 @@ function reconcileActiveStates(
   session: DocumentSession,
   entries: readonly EditorActiveStateEntry[],
 ): readonly EditorActiveStateEntry[] {
-  const valid = entries.filter((entry) => resolveActiveStateLocator(session, entry.locator) !== null);
+  const valid = entries.filter((entry) => resolveActiveStateLocator(session.document.root, entry.locator) !== null);
   return valid.length === entries.length ? entries : copyEditorActiveStates(valid);
 }
 
-function resolveActiveStateLocator(
-  session: DocumentSession,
-  locator: EditorActiveStateEntry['locator'],
-): string | null {
-  const nodeId = resolveElementLocator(session.document.root, locator);
-  if (nodeId === null || locator.authoredName === undefined) return nodeId;
-  const pending = [session.document.root];
-  while (pending.length > 0) {
-    const current = pending.shift()!;
-    if (current.id === nodeId) {
-      return current.attributes.some((attribute) => attribute.name === 'name' && attribute.value === locator.authoredName)
-        ? nodeId
-        : null;
-    }
-    pending.push(...current.children);
+function copyProjectAssets(paths: unknown, code: 'invalid-action' | 'invalid-options') {
+  try {
+    return copyProjectAssetCatalog(paths);
+  } catch (error) {
+    throw new EditorStoreError(code, 'Project asset paths are malformed.', error);
   }
-  return null;
 }
 
 function commandAvailability(

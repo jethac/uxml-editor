@@ -12,6 +12,7 @@ test('desktop inspector stays contained and writes the chosen authored rule at 1
   await expectInspectorGeometry(page);
 
   await width.fill('240px');
+  await width.press('Enter');
   const menu = page.getByRole('menu', { name: 'Write width to' });
   await expect(menu).toBeVisible();
   await menu.getByRole('menuitem', { name: 'task-13.uss · .primary' }).click();
@@ -54,6 +55,37 @@ test('compact inspector is full width, scrollable, and contained at 720x768', as
   expect(geometry.paneRight).toBeCloseTo(geometry.toolsRight, 0);
   expect(geometry.scrollable).toBe(true);
   expect(geometry.horizontalOverflow).toBe(false);
+
+  const assetButton = page.getByRole('button', { name: 'Available background image values' });
+  await assetButton.scrollIntoViewIfNeeded();
+  await assetButton.click();
+  await expectAssetPickerContained(page, 'viewport');
+});
+
+test('browser asset picker commits catalog path and resource modes', async ({ page }) => {
+  await openInspector(page, { width: 1366, height: 768 });
+  const background = page.getByRole('textbox', { name: 'Background image' });
+  await background.scrollIntoViewIfNeeded();
+  await page.getByRole('button', { name: 'Available background image values' }).click();
+  await expectAssetPickerContained(page, 'pane');
+  const backgroundAssets = page.getByRole('combobox', { name: 'Background image project asset' });
+  await expect(backgroundAssets.getByRole('option', { name: 'Assets/UI/Logo.png' })).toBeAttached();
+  await expect(backgroundAssets.getByRole('option', { name: 'Assets/Resources/Icons/Save.png' })).toBeAttached();
+  await backgroundAssets.selectOption('Assets/UI/Logo.png');
+  await page.getByRole('button', { name: 'Use background image asset' }).click();
+  await page.getByRole('menuitem', { name: 'Inline style' }).click();
+  await expect.poll(() => source(page, 'Assets/UI/task-13.uxml')).toContain('background-image: url(&quot;Assets/UI/Logo.png&quot;);');
+
+  const font = page.getByRole('textbox', { name: 'Font asset' });
+  await font.scrollIntoViewIfNeeded();
+  await page.getByRole('button', { name: 'Available font asset values' }).click();
+  await page.getByRole('radio', { name: 'Resource' }).click();
+  await page.getByRole('combobox', { name: 'Font asset project asset' }).selectOption('Assets/Resources/Icons/Save.png');
+  await page.getByRole('button', { name: 'Use font asset asset' }).click();
+  await page.getByRole('menuitem', { name: 'Inline style' }).click();
+
+  await expect.poll(() => source(page, 'Assets/UI/task-13.uxml')).toContain('-unity-font: resource(&quot;Icons/Save&quot;);');
+  expect(await undoDepth(page)).toBe(2);
 });
 
 async function openInspector(page: Page, viewport: Readonly<{ width: number; height: number }>) {
@@ -98,6 +130,33 @@ async function expectInspectorGeometry(page: Page) {
   expect(geometry.contained).toBe(true);
   expect(geometry.labelsClear).toBe(true);
   expect(geometry.bodyScrollWidth).toBeLessThanOrEqual(geometry.bodyClientWidth + 1);
+}
+
+async function expectAssetPickerContained(page: Page, boundary: 'pane' | 'viewport') {
+  const geometry = await page.evaluate((requestedBoundary) => {
+    const picker = document.querySelector<HTMLElement>('.inspector-asset-picker');
+    const pane = document.querySelector<HTMLElement>('[data-testid="right-pane"]');
+    if (picker === null || pane === null) throw new Error('Missing asset picker geometry.');
+    const pickerBox = picker.getBoundingClientRect();
+    const paneBox = pane.getBoundingClientRect();
+    const bounds = requestedBoundary === 'pane'
+      ? paneBox
+      : { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
+    return {
+      left: pickerBox.left,
+      right: pickerBox.right,
+      top: pickerBox.top,
+      bottom: pickerBox.bottom,
+      boundsLeft: bounds.left,
+      boundsRight: bounds.right,
+      boundsTop: bounds.top,
+      boundsBottom: bounds.bottom,
+    };
+  }, boundary);
+  expect(geometry.left).toBeGreaterThanOrEqual(geometry.boundsLeft - 1);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.boundsRight + 1);
+  expect(geometry.top).toBeGreaterThanOrEqual(geometry.boundsTop - 1);
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.boundsBottom + 1);
 }
 
 async function source(page: Page, path: string): Promise<string> {

@@ -152,8 +152,15 @@ function text(property: string, label: string, section: InspectorStyleSection): 
 }
 
 function isColor(value: string): boolean {
-  if (/^#[0-9a-fA-F]{3,4}(?:[0-9a-fA-F]{3,4})?$/.test(value)) return true;
-  if (/^rgba?\(\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$/.test(value)) return true;
+  if (/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(value)) return true;
+  const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/.exec(value);
+  if (rgb !== null) return rgb.slice(1).every((channel) => Number(channel) <= 255);
+  const rgba = /^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d+(?:\.\d+)?|\.\d+)\s*\)$/.exec(value);
+  if (rgba !== null) {
+    return rgba.slice(1, 4).every((channel) => Number(channel) <= 255)
+      && Number(rgba[4]) >= 0
+      && Number(rgba[4]) <= 1;
+  }
   return ['transparent', 'black', 'white', 'red', 'green', 'blue', 'gray', 'grey', 'yellow', 'magenta', 'cyan'].includes(value.toLowerCase());
 }
 
