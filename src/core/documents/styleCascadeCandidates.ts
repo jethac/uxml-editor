@@ -18,6 +18,7 @@ export const SHORTHAND_LONGHANDS: Readonly<Record<string, readonly string[]>> = 
     'border-bottom-right-radius',
     'border-bottom-left-radius',
   ]),
+  flex: Object.freeze(['flex-grow', 'flex-shrink', 'flex-basis']),
 });
 
 export interface IssuedStyleCandidate {

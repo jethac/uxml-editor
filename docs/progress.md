@@ -430,3 +430,25 @@ replaceable.
   inconsistent nullable fields, and the `-0` canonicalization edge. Focused
   Task 6 tests now pass 30 cases; adapter tests pass 15; the full suite passes
   170 tests; and the TypeScript/Vite build passes.
+
+## Task 6 Review Fix Round 2
+
+- The explicit editor-owned aggregate shorthand table now exactly matches every
+  expansion in pinned `uxml-preview@0.4.0`: margin, padding, border width,
+  border color, border radius, and flex. Flex contributes `flex-grow`,
+  `flex-shrink`, and `flex-basis`; a real-adapter characterization test covers
+  every shorthand/longhand relation and guards the table's exact key set.
+- Flex longhand requests now retain winning and losing authored `flex` origins
+  as local override targets, while exact `flex` requests retain exact authored
+  declaration targets. `setDeclaration` inserts only the requested longhand and
+  leaves the authored shorthand bytes unchanged.
+- Inline declaration-tail tokenization records an exact nullable semicolon
+  offset. CSS whitespace before a terminator is preserved byte-for-byte and
+  insertion occurs after the actual semicolon; without one, the command adds a
+  terminator at the parser-owned content boundary without consuming trailing
+  whitespace or comments.
+- Regression coverage includes spaces, tabs, form feed, LF, CRLF, immediate and
+  trailing comments, no-semicolon tails, exact patch bytes, undo/redo, duplicate
+  semicolons, and nontrivia rejection. Focused Task 6 plus adapter verification
+  passes 54 tests; the full suite passes 13 files and 179 tests; and the
+  TypeScript/Vite build passes with 16 transformed modules.

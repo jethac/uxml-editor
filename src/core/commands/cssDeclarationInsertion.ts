@@ -18,13 +18,14 @@ export function planInlineDeclarationInsertion(
   const declaration = `${property}: ${value};`;
 
   if (last !== undefined) {
-    const insertion = tailStart + (tail.hasSemicolon ? 1 : 0);
-    const leadingTrivia = tailText.slice(tail.hasSemicolon ? 1 : 0, tail.firstComment ?? tailText.length);
+    const semicolonEnd = tail.semicolonOffset === null ? null : tail.semicolonOffset + 1;
+    const insertion = tailStart + (semicolonEnd ?? 0);
+    const leadingTrivia = tailText.slice(semicolonEnd ?? 0, tail.firstComment ?? tailText.length);
     const layout = multilineLayout(leadingTrivia, source, last.source.start);
     return Object.freeze({
       start: insertion,
       end: insertion,
-      replacement: `${tail.hasSemicolon ? '' : ';'}${layout ?? ' '}${declaration}`,
+      replacement: `${semicolonEnd === null ? ';' : ''}${layout ?? ' '}${declaration}`,
     });
   }
 
@@ -72,7 +73,7 @@ export function planRuleDeclarationInsertion(
   }
   const last = rule.declarations[rule.declarations.length - 1];
   const tailStart = last?.source.end ?? rule.selectorSource.end;
-  tokenizeTail(path, source.slice(tailStart, close), true);
+  tokenizeTail(path, source.slice(tailStart, close));
 
   const closeLineStart = lineStart(source, close);
   const closingIndent = source.slice(closeLineStart, close);
@@ -96,20 +97,17 @@ export function planRuleDeclarationInsertion(
 }
 
 interface TailTokens {
-  readonly hasSemicolon: boolean;
+  readonly semicolonOffset: number | null;
   readonly firstComment: number | null;
 }
 
-function tokenizeTail(path: string, source: string, allowClosingRuleTrivia = false): TailTokens {
+function tokenizeTail(path: string, source: string): TailTokens {
   let cursor = 0;
-  let hasSemicolon = false;
+  let semicolonOffset: number | null = null;
   let firstComment: number | null = null;
   while (isCssWhitespace(source[cursor])) cursor += 1;
   if (source[cursor] === ';') {
-    if (cursor !== 0 && !allowClosingRuleTrivia) {
-      throw unsafeTail(path, 'A declaration semicolon is separated from its parser-owned declaration span.');
-    }
-    hasSemicolon = true;
+    semicolonOffset = cursor;
     cursor += 1;
   }
   while (cursor < source.length) {
@@ -126,7 +124,7 @@ function tokenizeTail(path: string, source: string, allowClosingRuleTrivia = fal
     }
     throw unsafeTail(path, 'The trailing declaration region contains nontrivia tokens.');
   }
-  return Object.freeze({ hasSemicolon, firstComment });
+  return Object.freeze({ semicolonOffset, firstComment });
 }
 
 function multilineLayout(

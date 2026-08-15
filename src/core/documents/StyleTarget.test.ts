@@ -189,6 +189,49 @@ describe('styleTargetsFor', () => {
     ]);
   });
 
+  it('orders winning and losing flex shorthand origins and collects exact flex targets', () => {
+    const session = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`,
+      [SHEET_PATH]: 'Button { flex: 1 1 0; }\n#save { flex-grow: 2; flex: 3 4 10px; }\n',
+    });
+    const button = nodeByName(session.document.root, 'save');
+
+    const grow = styleTargetsFor(session, button, 'flex-grow', []).filter((target) => target.kind === 'rule');
+    const exact = styleTargetsFor(session, button, 'flex', []).filter((target) => target.kind === 'rule');
+
+    expect(grow).toEqual([
+      expect.objectContaining({
+        itemIndex: 1,
+        declarationIndex: null,
+        authoredProperty: 'flex',
+        originDeclarationIndex: 1,
+        winner: true,
+      }),
+      expect.objectContaining({
+        itemIndex: 1,
+        declarationIndex: 0,
+        authoredProperty: 'flex-grow',
+        winner: false,
+      }),
+      expect.objectContaining({
+        itemIndex: 0,
+        declarationIndex: null,
+        authoredProperty: 'flex',
+        originDeclarationIndex: 0,
+        winner: false,
+      }),
+    ]);
+    expect(exact).toEqual([
+      expect.objectContaining({ itemIndex: 1, declarationIndex: 1, authoredProperty: 'flex', value: '3 4 10px' }),
+      expect.objectContaining({ itemIndex: 0, declarationIndex: 0, authoredProperty: 'flex', value: '1 1 0' }),
+    ]);
+    expect(grow.map((target) => target.id)).toEqual(
+      styleTargetsFor(session, button, 'flex-grow', [])
+        .filter((target) => target.kind === 'rule')
+        .map((target) => target.id),
+    );
+  });
+
   it('points inherited values at the real authored inline origin without inventing builtin or default sources', () => {
     const session = openSession({
       [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:VisualElement name="parent" style='color: #123456'>\n    <ui:VisualElement name="child" />\n    <ui:Button name="button" />\n  </ui:VisualElement>\n</ui:UXML>\n`,

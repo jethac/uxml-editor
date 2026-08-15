@@ -415,6 +415,32 @@ describe('USS commands', () => {
     expect(session.history.canUndo).toBe(false);
   });
 
+  it('inserts only the requested flex longhand while preserving the authored flex shorthand', () => {
+    const sheetPath = 'Assets/UI/styles/screen.uss';
+    const source = '#save {\n  flex: 2 3 10px;\n  color: red;\n}\n';
+    const session = openSession({
+      [ENTRY_PATH]: `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <Style src="styles/screen.uss" />\n  <ui:Button name="save" />\n</ui:UXML>\n`,
+      [sheetPath]: source,
+    });
+    const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'flex-basis', [])
+      .find((candidate): candidate is RuleStyleTarget =>
+        candidate.kind === 'rule' && candidate.authoredProperty === 'flex'
+      )!;
+
+    const transaction = setDeclaration(session, target, '25px');
+
+    expect(transaction.patchesByFile.get(sheetPath)).toEqual([{
+      start: source.lastIndexOf('}'),
+      end: source.lastIndexOf('}'),
+      replacement: '  flex-basis: 25px;\n',
+    }]);
+    session.history.execute(transaction);
+    expect(session.snapshot().files.get(sheetPath)?.text).toBe(
+      '#save {\n  flex: 2 3 10px;\n  color: red;\n  flex-basis: 25px;\n}\n',
+    );
+    expect(session.snapshot().files.get(sheetPath)?.text).toContain('flex: 2 3 10px;');
+  });
+
   it('inserts inline longhand overrides before exact trailing comment trivia', () => {
     const fixtures = [
       {
@@ -463,8 +489,82 @@ describe('USS commands', () => {
     }
   });
 
+  it.each([
+    {
+      name: 'spaces before semicolon with immediate and trailing comments',
+      style: 'opacity: 0.5   ;/* immediate */ /* trailing */',
+      expected: 'opacity: 0.5   ; width: 20px;/* immediate */ /* trailing */',
+      insertionOffset: 'opacity: 0.5   ;'.length,
+      replacement: ' width: 20px;',
+    },
+    {
+      name: 'tab and form-feed before semicolon',
+      style: 'opacity: 0.5\t\f;\t/* tail */',
+      expected: 'opacity: 0.5\t\f; width: 20px;\t/* tail */',
+      insertionOffset: 'opacity: 0.5\t\f;'.length,
+      replacement: ' width: 20px;',
+    },
+    {
+      name: 'LF before semicolon',
+      style: '\n    opacity: 0.5\n    ;\n    /* tail */\n  ',
+      expected: '\n    opacity: 0.5\n    ;\n    width: 20px;\n    /* tail */\n  ',
+      insertionOffset: '\n    opacity: 0.5\n    ;'.length,
+      replacement: '\n    width: 20px;',
+    },
+    {
+      name: 'CRLF before semicolon',
+      style: '\r\n\topacity: 0.5\r\n\t;\r\n\t/* tail */\r\n  ',
+      expected: '\r\n\topacity: 0.5\r\n\t;\r\n\twidth: 20px;\r\n\t/* tail */\r\n  ',
+      insertionOffset: '\r\n\topacity: 0.5\r\n\t;'.length,
+      replacement: '\r\n\twidth: 20px;',
+    },
+    {
+      name: 'no semicolon with horizontal whitespace and comment',
+      style: 'opacity: 0.5 \t/* tail */',
+      expected: 'opacity: 0.5; width: 20px; \t/* tail */',
+      insertionOffset: 'opacity: 0.5'.length,
+      replacement: '; width: 20px;',
+    },
+    {
+      name: 'no semicolon with multiline trivia',
+      style: '\r\n    opacity: 0.5\r\n    /* tail */\r\n  ',
+      expected: '\r\n    opacity: 0.5;\r\n    width: 20px;\r\n    /* tail */\r\n  ',
+      insertionOffset: '\r\n    opacity: 0.5'.length,
+      replacement: ';\r\n    width: 20px;',
+    },
+  ])('inserts after the exact inline semicolon offset: $name', ({
+    style,
+    expected,
+    insertionOffset,
+    replacement,
+  }) => {
+    const source = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Button name="save" style="${style}" data-note="keep" />\n</ui:UXML>\n`;
+    const session = openSession({ [ENTRY_PATH]: source });
+    const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'width', [])
+      .find((candidate): candidate is InlineStyleTarget => candidate.kind === 'inline')!;
+    const transaction = setInlineStyle(session, target, '20px');
+    const insertion = source.indexOf(style) + insertionOffset;
+
+    expect(transaction.patchesByFile.get(ENTRY_PATH)).toEqual([{
+      start: insertion,
+      end: insertion,
+      replacement,
+    }]);
+    session.history.execute(transaction);
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(source.replace(style, expected));
+    session.history.undo();
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(source);
+    session.history.redo();
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(source.replace(style, expected));
+  });
+
   it('rejects malformed inline declaration tails without changing source or history', () => {
-    for (const style of ['opacity: 0.5; /* unterminated', 'opacity: 0.5; stray /* tail */']) {
+    for (const style of [
+      'opacity: 0.5; /* unterminated',
+      'opacity: 0.5; stray /* tail */',
+      'opacity: 0.5 ;; /* duplicate */',
+      'opacity: 0.5 \t; stray /* tail */',
+    ]) {
       const source = `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Button name="save" style="${style}" />\n</ui:UXML>\n`;
       const session = openSession({ [ENTRY_PATH]: source });
       const target = styleTargetsFor(session, nodeByName(session.document.root, 'save'), 'width', [])
