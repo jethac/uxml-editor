@@ -104,6 +104,88 @@ describe('PreviewCanvas frame lifecycle and selection', () => {
 });
 
 describe('PreviewCanvas rendering and viewport controls', () => {
+  it('exposes manipulation commands and persists modified keyboard nudging through history', async () => {
+    const absolute = UXML.replace(
+      'name="target" text="Choose"',
+      'name="target" text="Choose" style="position: absolute; left: 0px; top: 0px; width: 90px; height: 28px;"',
+    );
+    const adapter = new ControlledPreviewPort('manipulate', []);
+    const session = openSession(adapter, absolute);
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} />);
+    fireEvent.click(await screen.findByText('manipulate preview'));
+
+    expect(screen.getByRole('button', { name: 'Align left' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Distribute horizontally' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Bring to front' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy selection' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Paste' })).toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByTestId('canvas-field'), { key: 'ArrowRight', shiftKey: true });
+
+    expect(
+      session.snapshot().files.get(ENTRY)?.text,
+      screen.queryByRole('status')?.textContent ?? 'no interaction diagnostic',
+    ).toContain('left: 10px; top: 0px;');
+    expect(session.history.undoDepth).toBe(1);
+  });
+
+  it('drags and resizes an absolute selection through the interactive canvas layer', async () => {
+    const absolute = UXML.replace(
+      'name="target" text="Choose"',
+      'name="target" text="Choose" style="position: absolute; left: 0px; top: 0px; width: 90px; height: 28px;"',
+    );
+    const adapter = new ControlledPreviewPort('direct gesture', []);
+    const session = openSession(adapter, absolute);
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} />);
+    const target = await screen.findByText('direct gesture preview');
+    const field = screen.getByTestId('canvas-field');
+
+    fireEvent.pointerDown(target, { button: 0, pointerId: 7, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(field, { pointerId: 7, clientX: 30, clientY: 20 });
+    fireEvent.pointerUp(field, { pointerId: 7, clientX: 30, clientY: 20 });
+
+    expect(session.snapshot().files.get(ENTRY)?.text).toContain('left: 20px; top: 10px;');
+    expect(session.history.undoDepth).toBe(1);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Resize selection' })).toBeVisible());
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Resize selection' }), {
+      button: 0, pointerId: 8, clientX: 100, clientY: 100,
+    });
+    fireEvent.pointerMove(field, { pointerId: 8, clientX: 110, clientY: 105 });
+    fireEvent.pointerUp(field, { pointerId: 8, clientX: 110, clientY: 105 });
+
+    expect(session.snapshot().files.get(ENTRY)?.text).toContain('width: 100px; height: 33px;');
+    expect(session.history.undoDepth).toBe(2);
+    expect(await screen.findByTestId('canvas-overlay')).toHaveStyle({ pointerEvents: 'none' });
+  });
+
+  it('cancels an active manipulation when the authoritative session changes', async () => {
+    const absolute = UXML.replace(
+      'name="target" text="Choose"',
+      'name="target" text="Choose" style="position: absolute; left: 0px; top: 0px; width: 90px; height: 28px;"',
+    );
+    const firstAdapter = new ControlledPreviewPort('first gesture session', []);
+    const first = openSession(firstAdapter, absolute);
+    const secondAdapter = new ControlledPreviewPort('second gesture session', []);
+    const second = openSession(secondAdapter, absolute);
+    const store = new EditorStore({ session: first });
+    render(<PreviewCanvas store={store} />);
+    const target = await screen.findByText('first gesture session preview');
+    const field = screen.getByTestId('canvas-field');
+
+    fireEvent.pointerDown(target, { button: 0, pointerId: 9, clientX: 10, clientY: 10 });
+    act(() => store.dispatch({ type: 'context/set', session: second, host: null }));
+    await screen.findByText('second gesture session preview');
+    fireEvent.pointerMove(field, { pointerId: 9, clientX: 30, clientY: 20 });
+
+    expect(first.snapshot().files.get(ENTRY)?.text).toBe(absolute);
+    expect(second.snapshot().files.get(ENTRY)?.text).toBe(absolute);
+    expect(first.history.undoDepth).toBe(0);
+    expect(second.history.undoDepth).toBe(0);
+  });
+
   it('keeps renderer dimensions fixed while zoom transforms only the outer surface', async () => {
     const adapter = new ControlledPreviewPort('fixed', []);
     const store = new EditorStore({ session: openSession(adapter) });
@@ -483,6 +565,14 @@ class ControlledPreviewPort implements UxmlPreviewPort {
 
   serializeEntry(document: ParsedPreviewDocument) {
     return this.base.serializeEntry(document);
+  }
+
+  parseStylesheet(path: string, source: string) {
+    return this.base.parseStylesheet(path, source);
+  }
+
+  parseDeclarationList(path: string, source: string, start: number, end: number) {
+    return this.base.parseDeclarationList(path, source, start, end);
   }
 
   explain(

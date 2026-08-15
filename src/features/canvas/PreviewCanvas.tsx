@@ -5,11 +5,30 @@ import {
   useState,
   useSyncExternalStore,
   type ChangeEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type WheelEvent as ReactWheelEvent,
 } from 'react';
-import { Maximize2, RotateCw, Scan } from 'lucide-react';
+import {
+  AlignHorizontalJustifyCenter,
+  AlignHorizontalJustifyEnd,
+  AlignHorizontalJustifyStart,
+  AlignHorizontalSpaceBetween,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd,
+  AlignVerticalJustifyStart,
+  AlignVerticalSpaceBetween,
+  BringToFront,
+  ClipboardPaste,
+  Copy,
+  CopyPlus,
+  Maximize2,
+  RotateCw,
+  Scan,
+  SendToBack,
+} from 'lucide-react';
 import type {
   EditorElement,
   EditorNodeId,
@@ -21,13 +40,24 @@ import type {
 import type { EditorStore } from '../../core/store/EditorStore';
 import type { DocumentSession } from '../../core/documents/DocumentSession';
 import type { ElementLocator } from '../../core/documents/ElementLocator';
+import { ClipboardService, type ClipboardItemLike, type ClipboardPort } from '../../core/commands/ClipboardService';
+import {
+  layoutCommands,
+  type Alignment,
+  type Distribution,
+  type LayoutCommandResult,
+  type SourceOrder,
+} from '../../core/commands/layoutCommands';
 import { CanvasOverlay } from './CanvasOverlay';
+import { CanvasInteractionLayer } from './CanvasInteractionLayer';
+import { ManipulationController, type SnapGuide } from './ManipulationController';
 import { ViewportModel } from './ViewportModel';
 
 export interface PreviewCanvasProps {
   readonly store: EditorStore;
   readonly resolveAsset?: (path: string, form: 'url' | 'resource') => string | null;
   readonly measureText?: MeasurePreviewText;
+  readonly clipboardPort?: ClipboardPort;
 }
 
 const DEFAULT_PANEL_SIZE = Object.freeze({ width: 640, height: 480 });
@@ -56,16 +86,24 @@ export function PreviewCanvas({
   store,
   resolveAsset = defaultResolveAsset,
   measureText = defaultMeasureText,
+  clipboardPort,
 }: PreviewCanvasProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const session = snapshot.session;
   const sessionDocument = session?.document ?? null;
   const rendererRef = useRef<HTMLDivElement>(null);
   const fieldRef = useRef<HTMLDivElement>(null);
+  const transformRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<PreviewFrame | null>(null);
   const generationRef = useRef(0);
   const stateSessionRef = useRef<DocumentSession | null>(session);
   const panGestureRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const manipulationRef = useRef<{ pointerId: number; controller: ManipulationController } | null>(null);
+  const clipboardItemRef = useRef<ClipboardItemLike | null>(null);
+  const clipboardService = useMemo(
+    () => new ClipboardService(clipboardPort ?? browserClipboardPort()),
+    [clipboardPort],
+  );
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [panelSize, setPanelSize] = useState<PreviewSize>(DEFAULT_PANEL_SIZE);
   const [widthDraft, setWidthDraft] = useState(String(DEFAULT_PANEL_SIZE.width));
@@ -75,9 +113,17 @@ export function PreviewCanvas({
   const [hoveredNodeId, setHoveredNodeId] = useState<EditorNodeId | null>(null);
   const [showSafeArea, setShowSafeArea] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
+  const [interactionDiagnostic, setInteractionDiagnostic] = useState<string | null>(null);
+  const [snapGuides, setSnapGuides] = useState<readonly SnapGuide[]>(Object.freeze([]));
   const [pseudoStateStore, setPseudoStateStore] = useState<PseudoStateStore | null>(null);
 
   const selectedNodeId = snapshot.selection[0] ?? null;
+  const selectedNodes = sessionDocument === null
+    ? []
+    : snapshot.selection.flatMap((nodeId) => {
+      const node = elementById(sessionDocument.root, nodeId);
+      return node === null ? [] : [node];
+    });
   const selectedParentNodeId = sessionDocument === null || selectedNodeId === null
     ? null
     : parentNodeId(sessionDocument.root, selectedNodeId);
@@ -99,6 +145,15 @@ export function PreviewCanvas({
 
   useEffect(() => {
     if (stateSessionRef.current === session) return;
+    const manipulation = manipulationRef.current;
+    manipulation?.controller.cancel();
+    manipulationRef.current = null;
+    panGestureRef.current = null;
+    if (manipulation !== null) {
+      try { fieldRef.current?.releasePointerCapture?.(manipulation.pointerId); } catch { /* Capture may already be released. */ }
+    }
+    setSnapGuides(Object.freeze([]));
+    setInteractionDiagnostic(null);
     stateSessionRef.current = session;
     setPseudoStateStore(null);
   }, [session]);
@@ -174,16 +229,7 @@ export function PreviewCanvas({
     if (session === null) return;
     const nodeId = nodeForTarget(event.target);
     if (nodeId === null) return;
-    const locator = session.locatorFor(nodeId);
-    if (locator === null) return;
-    session.setSelection([locator]);
-    store.dispatch({ type: 'session/sync' });
-    if (frameRef.current !== null) {
-      store.dispatch({
-        type: 'diagnostics/set',
-        diagnostics: [...session.diagnostics, ...frameRef.current.diagnostics],
-      });
-    }
+    selectNode(session, nodeId, event.shiftKey);
   };
 
   const choosePreset = (event: ChangeEvent<HTMLSelectElement>) => {
@@ -222,26 +268,136 @@ export function PreviewCanvas({
     store.dispatch({ type: 'zoom/set', zoom: next.zoom });
   };
 
-  const beginPan = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (snapshot.activeTool !== 'pan' && event.button !== 1) return;
-    panGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  const beginPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (snapshot.activeTool === 'pan' || event.button === 1) {
+      panGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+      return;
+    }
+    if (event.button !== 0 || session === null || frameRef.current === null) return;
+    const nodeId = nodeForTarget(event.target);
+    const node = nodeId === null ? null : elementById(session.document.root, nodeId);
+    if (node === null) return;
+    selectNode(session, node.id, event.shiftKey);
+    const controller = new ManipulationController(session, frameRef.current, { onCommit: syncAfterMutation });
+    const started = controller.start(node, canvasPoint(event.clientX, event.clientY));
+    if (!started.ok) {
+      setInteractionDiagnostic(started.diagnostic.message);
+      return;
+    }
+    setInteractionDiagnostic(null);
+    manipulationRef.current = { pointerId: event.pointerId, controller };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     event.preventDefault();
   };
 
-  const movePan = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const movePointer = (event: ReactPointerEvent<HTMLDivElement>) => {
     const gesture = panGestureRef.current;
-    if (gesture === null || gesture.pointerId !== event.pointerId) return;
-    const dx = event.clientX - gesture.x;
-    const dy = event.clientY - gesture.y;
-    panGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-    setPan((current) => new ViewportModel({ zoom: snapshot.zoom, pan: current }).panBy({ x: dx, y: dy }).pan);
+    if (gesture !== null && gesture.pointerId === event.pointerId) {
+      const dx = event.clientX - gesture.x;
+      const dy = event.clientY - gesture.y;
+      panGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      setPan((current) => new ViewportModel({ zoom: snapshot.zoom, pan: current }).panBy({ x: dx, y: dy }).pan);
+      return;
+    }
+    const manipulation = manipulationRef.current;
+    if (manipulation === null || manipulation.pointerId !== event.pointerId) return;
+    const result = manipulation.controller.update(canvasPoint(event.clientX, event.clientY));
+    if (!result.ok) {
+      setInteractionDiagnostic(result.diagnostic.message);
+      setSnapGuides(Object.freeze([]));
+    } else {
+      setInteractionDiagnostic(null);
+      setSnapGuides(result.guides ?? Object.freeze([]));
+    }
   };
 
-  const endPan = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (panGestureRef.current?.pointerId !== event.pointerId) return;
-    panGestureRef.current = null;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  const endPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    let handled = false;
+    if (panGestureRef.current?.pointerId === event.pointerId) {
+      panGestureRef.current = null;
+      handled = true;
+    }
+    if (manipulationRef.current?.pointerId === event.pointerId) {
+      manipulationRef.current.controller.finish();
+      manipulationRef.current = null;
+      setSnapGuides(Object.freeze([]));
+      handled = true;
+    }
+    if (handled) event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
+
+  const beginResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const node = selectedNodes.length === 1 ? selectedNodes[0] : null;
+    if (session === null || node === null || frameRef.current === null || fieldRef.current === null) return;
+    const controller = new ManipulationController(session, frameRef.current, { onCommit: syncAfterMutation });
+    const started = controller.startResize(node, canvasPoint(event.clientX, event.clientY));
+    if (!started.ok) {
+      setInteractionDiagnostic(started.diagnostic.message);
+      return;
+    }
+    manipulationRef.current = { pointerId: event.pointerId, controller };
+    fieldRef.current.setPointerCapture?.(event.pointerId);
+    setInteractionDiagnostic(null);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const handleNudge = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const direction = arrowDelta(event.key);
+    if (direction === null || session === null || selectedNodes.length === 0) return;
+    event.preventDefault();
+    const amount = event.shiftKey ? 10 : 1;
+    executeLayout(layoutCommands.nudge(session, selectedNodes, {
+      x: direction.x * amount,
+      y: direction.y * amount,
+    }));
+  };
+
+  const alignSelection = (alignment: Alignment) => {
+    if (session === null || frameRef.current === null) return;
+    executeLayout(layoutCommands.align(session, selectedNodes, alignment, frameRef.current));
+  };
+
+  const distributeSelection = (direction: Distribution) => {
+    if (session === null || frameRef.current === null) return;
+    executeLayout(layoutCommands.distribute(session, selectedNodes, direction, frameRef.current));
+  };
+
+  const orderSelection = (destination: SourceOrder) => {
+    if (session === null) return;
+    executeLayout(layoutCommands.order(session, selectedNodes, destination));
+  };
+
+  const copySelection = async () => {
+    if (session === null || selectedNodes.length === 0) return;
+    const copied = clipboardService.copy(session, selectedNodes);
+    if (!copied.ok) {
+      setInteractionDiagnostic(copied.diagnostic.message);
+      return;
+    }
+    clipboardItemRef.current = copied.item;
+    const written = await clipboardService.writeCopy(session, selectedNodes);
+    setInteractionDiagnostic(written.ok || written.diagnostic.code === 'CLIPBOARD_IO_FAILED'
+      ? null
+      : written.diagnostic.message);
+  };
+
+  const pasteSelection = async () => {
+    if (session === null) return;
+    const parent = selectedNodes[0] ?? session.document.root;
+    const locator = session.locatorFor(parent.id);
+    if (locator === null) return;
+    const result = clipboardItemRef.current === null
+      ? await clipboardService.readPaste(session, locator, parent.children.length)
+      : await clipboardService.paste(session, locator, parent.children.length, clipboardItemRef.current);
+    executeClipboard(result);
+  };
+
+  const duplicateSelection = async () => {
+    if (session === null || selectedNodes.length === 0) return;
+    executeClipboard(await clipboardService.duplicate(session, selectedNodes));
   };
 
   const toggleState = (state: PseudoState) => {
@@ -287,6 +443,23 @@ export function PreviewCanvas({
         <button type="button" className="canvas-tool-button" aria-label="Actual size" title="Actual size (100%)" onClick={() => store.dispatch({ type: 'zoom/set', zoom: 1 })}>
           <Scan aria-hidden="true" /><span>100%</span>
         </button>
+        <div className="canvas-command-group" role="group" aria-label="Alignment commands">
+          <CommandButton label="Align left" disabled={selectedNodes.length < 2} onClick={() => alignSelection('left')}><AlignHorizontalJustifyStart /></CommandButton>
+          <CommandButton label="Align horizontal centers" disabled={selectedNodes.length < 2} onClick={() => alignSelection('horizontal-center')}><AlignHorizontalJustifyCenter /></CommandButton>
+          <CommandButton label="Align right" disabled={selectedNodes.length < 2} onClick={() => alignSelection('right')}><AlignHorizontalJustifyEnd /></CommandButton>
+          <CommandButton label="Align top" disabled={selectedNodes.length < 2} onClick={() => alignSelection('top')}><AlignVerticalJustifyStart /></CommandButton>
+          <CommandButton label="Align vertical centers" disabled={selectedNodes.length < 2} onClick={() => alignSelection('vertical-center')}><AlignVerticalJustifyCenter /></CommandButton>
+          <CommandButton label="Align bottom" disabled={selectedNodes.length < 2} onClick={() => alignSelection('bottom')}><AlignVerticalJustifyEnd /></CommandButton>
+          <CommandButton label="Distribute horizontally" disabled={selectedNodes.length < 3} onClick={() => distributeSelection('horizontal')}><AlignHorizontalSpaceBetween /></CommandButton>
+          <CommandButton label="Distribute vertically" disabled={selectedNodes.length < 3} onClick={() => distributeSelection('vertical')}><AlignVerticalSpaceBetween /></CommandButton>
+        </div>
+        <div className="canvas-command-group" role="group" aria-label="Ordering and clipboard commands">
+          <CommandButton label="Bring to front" disabled={selectedNodes.length === 0} onClick={() => orderSelection('front')}><BringToFront /></CommandButton>
+          <CommandButton label="Send to back" disabled={selectedNodes.length === 0} onClick={() => orderSelection('back')}><SendToBack /></CommandButton>
+          <CommandButton label="Copy selection" disabled={selectedNodes.length === 0} onClick={() => { void copySelection(); }}><Copy /></CommandButton>
+          <CommandButton label="Paste" disabled={session === null} onClick={() => { void pasteSelection(); }}><ClipboardPaste /></CommandButton>
+          <CommandButton label="Duplicate selection" disabled={selectedNodes.length === 0} onClick={() => { void duplicateSelection(); }}><CopyPlus /></CommandButton>
+        </div>
         <label className="canvas-check canvas-check--safe">
           <input type="checkbox" checked={showSafeArea} onChange={(event) => setShowSafeArea(event.target.checked)} />
           <span>Show safe area</span>
@@ -301,21 +474,24 @@ export function PreviewCanvas({
           ))}
         </fieldset>
         {stateControlDescription !== null && <p id="canvas-state-description" role="status">{stateControlDescription}</p>}
+        {interactionDiagnostic !== null && <p className="canvas-interaction-status" role="status">{interactionDiagnostic}</p>}
       </div>
       <div
         ref={fieldRef}
         className={`canvas-field${snapshot.activeTool === 'pan' ? ' canvas-field--pan' : ''}`}
         data-testid="canvas-field"
+        tabIndex={0}
         onWheel={handleWheel}
-        onPointerDown={beginPan}
-        onPointerMove={movePan}
-        onPointerUp={endPan}
-        onPointerCancel={endPan}
+        onKeyDown={handleNudge}
+        onPointerDown={beginPointer}
+        onPointerMove={movePointer}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
       >
         {session === null && <span className="pane-empty">No document</span>}
         {renderError !== null && <div className="canvas-render-error" role="alert">Preview unavailable: {renderError}</div>}
         {session !== null && (
-          <div className="canvas-transform" data-testid="canvas-transform" style={{ width: panelSize.width, height: panelSize.height, transform: `translate(${pan.x}px, ${pan.y}px) scale(${snapshot.zoom})` }}>
+          <div ref={transformRef} className="canvas-transform" data-testid="canvas-transform" style={{ width: panelSize.width, height: panelSize.height, transform: `translate(${pan.x}px, ${pan.y}px) scale(${snapshot.zoom})` }}>
             <div
               ref={rendererRef}
               className="canvas-renderer"
@@ -326,7 +502,15 @@ export function PreviewCanvas({
               onMouseLeave={() => setHoveredNodeId(null)}
             />
             {frame !== null && (
-              <CanvasOverlay frame={frame} panelSize={panelSize} hoveredNodeId={hoveredNodeId} selectedNodeId={selectedNodeId} selectedParentNodeId={selectedParentNodeId} showSafeArea={showSafeArea} />
+              <>
+                <CanvasOverlay frame={frame} panelSize={panelSize} hoveredNodeId={hoveredNodeId} selectedNodeId={selectedNodeId} selectedParentNodeId={selectedParentNodeId} showSafeArea={showSafeArea} />
+                <CanvasInteractionLayer
+                  panelSize={panelSize}
+                  selectedBox={selectedNodeId === null ? null : frame.boxes.get(selectedNodeId) ?? null}
+                  guides={snapGuides}
+                  onResizePointerDown={beginResize}
+                />
+              </>
             )}
           </div>
         )}
@@ -339,6 +523,88 @@ export function PreviewCanvas({
     setWidthDraft(String(size.width));
     setHeightDraft(String(size.height));
   }
+
+  function selectNode(currentSession: DocumentSession, nodeId: EditorNodeId, additive: boolean) {
+    const locator = currentSession.locatorFor(nodeId);
+    if (locator === null) return;
+    if (!additive) {
+      currentSession.setSelection([locator]);
+    } else {
+      const existing = currentSession.selectedNodeIds;
+      const next = existing.includes(nodeId)
+        ? existing.filter((selected) => selected !== nodeId)
+        : [...existing, nodeId];
+      currentSession.setSelection(next.flatMap((selected) => {
+        const selectedLocator = currentSession.locatorFor(selected);
+        return selectedLocator === null ? [] : [selectedLocator];
+      }));
+    }
+    syncAfterMutation();
+  }
+
+  function executeLayout(result: LayoutCommandResult) {
+    if (session === null) return;
+    if (!result.ok) {
+      setInteractionDiagnostic(result.diagnostic.message);
+      return;
+    }
+    try {
+      session.history.execute(result.transaction);
+      setInteractionDiagnostic(null);
+      syncAfterMutation();
+    } catch (error) {
+      setInteractionDiagnostic(errorMessage(error));
+    }
+  }
+
+  function executeClipboard(result: Awaited<ReturnType<ClipboardService['paste']>>) {
+    if (session === null) return;
+    if (!result.ok) {
+      setInteractionDiagnostic(result.diagnostic.message);
+      return;
+    }
+    try {
+      session.history.execute(result.transaction);
+      setInteractionDiagnostic(null);
+      syncAfterMutation();
+    } catch (error) {
+      setInteractionDiagnostic(errorMessage(error));
+    }
+  }
+
+  function syncAfterMutation() {
+    if (session === null) return;
+    store.dispatch({ type: 'session/sync' });
+    const currentFrame = frameRef.current;
+    store.dispatch({
+      type: 'diagnostics/set',
+      diagnostics: currentFrame === null ? session.diagnostics : [...session.diagnostics, ...currentFrame.diagnostics],
+    });
+  }
+
+  function canvasPoint(clientX: number, clientY: number) {
+    const bounds = transformRef.current?.getBoundingClientRect();
+    if (bounds === undefined) return { x: clientX, y: clientY };
+    return {
+      x: (clientX - bounds.left) / snapshot.zoom,
+      y: (clientY - bounds.top) / snapshot.zoom,
+    };
+  }
+}
+
+interface CommandButtonProps {
+  readonly label: string;
+  readonly disabled: boolean;
+  readonly onClick: () => void;
+  readonly children: ReactNode;
+}
+
+function CommandButton({ label, disabled, onClick, children }: CommandButtonProps) {
+  return (
+    <button type="button" className="canvas-tool-button canvas-tool-button--icon" aria-label={label} title={label} disabled={disabled} onClick={onClick}>
+      {children}
+    </button>
+  );
 }
 
 function parentNodeId(root: EditorElement, target: EditorNodeId): EditorNodeId | null {
@@ -348,6 +614,48 @@ function parentNodeId(root: EditorElement, target: EditorNodeId): EditorNodeId |
     if (nested !== null) return nested;
   }
   return null;
+}
+
+function elementById(root: EditorElement, target: EditorNodeId): EditorElement | null {
+  if (root.id === target) return root;
+  for (const child of root.children) {
+    const nested = elementById(child, target);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+function arrowDelta(key: string): { readonly x: number; readonly y: number } | null {
+  if (key === 'ArrowLeft') return { x: -1, y: 0 };
+  if (key === 'ArrowRight') return { x: 1, y: 0 };
+  if (key === 'ArrowUp') return { x: 0, y: -1 };
+  if (key === 'ArrowDown') return { x: 0, y: 1 };
+  return null;
+}
+
+function browserClipboardPort(): ClipboardPort | undefined {
+  if (
+    typeof navigator === 'undefined'
+    || navigator.clipboard === undefined
+    || typeof navigator.clipboard.write !== 'function'
+    || typeof navigator.clipboard.read !== 'function'
+    || typeof ClipboardItem === 'undefined'
+  ) return undefined;
+  return {
+    write: async (items) => {
+      const browserItems: ClipboardItem[] = [];
+      for (const item of items) {
+        const data: Record<string, Blob> = {};
+        for (const type of item.types) {
+          const blob = await item.getType(type);
+          data[type] = blob instanceof Blob ? blob : new Blob([await blob.text()], { type });
+        }
+        browserItems.push(new ClipboardItem(data));
+      }
+      await navigator.clipboard.write(browserItems);
+    },
+    read: async () => navigator.clipboard.read(),
+  };
 }
 
 function narrowStateSelector(root: EditorElement, target: EditorNodeId): string | null {

@@ -17,6 +17,7 @@ export class CommandHistory {
 
   get canUndo(): boolean { return this.undoStack.length > 0; }
   get canRedo(): boolean { return this.redoStack.length > 0; }
+  get undoDepth(): number { return this.undoStack.length; }
   get replayLog(): readonly EditorTransaction[] { return Object.freeze(this.replayed.map(copyEditorTransaction)); }
 
   execute(transaction: EditorTransaction): CommitResult {
