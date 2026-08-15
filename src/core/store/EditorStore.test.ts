@@ -117,6 +117,47 @@ describe('EditorStore snapshots', () => {
     expect(store.getSnapshot().projectAssets.every(Object.isFrozen)).toBe(true);
   });
 
+  it('allows noncolliding path assets and preserves exact derived resource formatting', () => {
+    const store = new EditorStore({ projectAssets: [
+      'Assets/First/Icon.png',
+      'Assets/Second/Icon.png',
+      'Assets/First/Resources/Icons/Open.png',
+      'Assets/Second/Resources/Icons/Save.asset',
+    ] });
+
+    expect(store.getSnapshot().projectAssets).toEqual([
+      { path: 'Assets/First/Icon.png' },
+      { path: 'Assets/Second/Icon.png' },
+      { path: 'Assets/First/Resources/Icons/Open.png', resourceKey: 'Icons/Open' },
+      { path: 'Assets/Second/Resources/Icons/Save.asset', resourceKey: 'Icons/Save' },
+    ]);
+  });
+
+  it.each([
+    [
+      'Assets/One/Resources/Icons/Save.png',
+      'Packages/com.example.ui/Resources/Icons/Save.asset',
+      'Icons/Save',
+    ],
+    [
+      'Assets/Resources/Themes/Dark.png',
+      'Assets/Resources/Themes/Dark.asset',
+      'Themes/Dark',
+    ],
+  ])('rejects ambiguous logical resource keys for %s and %s', (first, second, resourceKey) => {
+    let message = '';
+    try {
+      new EditorStore({ projectAssets: [first, second] });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain(`Ambiguous project resource key "${resourceKey}"`);
+    expect(message).toContain(first);
+    expect(message).toContain(second);
+    expect(message).not.toMatch(/[A-Za-z]:\\/);
+  });
+
   it('replaces project assets through a validated action and clears them with authority replacement', () => {
     const first = openSession();
     const second = openSession();

@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type FocusEvent, type KeyboardEvent } from 'react';
 import type { ProjectAsset } from '../../core/store/ProjectAssetCatalog';
+import type { InspectorContextToken, InspectorDraftContext } from './InspectorContext';
 import type { InspectorStyleFieldModel } from './inspectorModel';
 import { colorSwatchValue, validateInspectorValue } from './propertyCatalog';
 import { AssetPicker } from './AssetPicker';
 
 export interface StylePropertyFieldProps {
   readonly field: InspectorStyleFieldModel;
-  readonly draftContext: unknown;
+  readonly draftContext: InspectorDraftContext;
   readonly projectAssets: readonly ProjectAsset[];
-  readonly onEdit: (field: InspectorStyleFieldModel, value: string) => void;
+  readonly onEdit: (field: InspectorStyleFieldModel, value: string, token: InspectorContextToken, origin: HTMLElement) => void;
 }
 
 export function StylePropertyField({ field, draftContext, projectAssets, onEdit }: StylePropertyFieldProps) {
@@ -17,6 +18,7 @@ export function StylePropertyField({ field, draftContext, projectAssets, onEdit 
   const [draft, setDraft] = useState(field.value);
   const [error, setError] = useState<string | null>(null);
   const skipBlurCommit = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setDraft(field.value);
     setError(null);
@@ -27,27 +29,27 @@ export function StylePropertyField({ field, draftContext, projectAssets, onEdit 
     const validation = value.length === 0 ? null : validateInspectorValue(definition, value);
     setError(validation);
   };
-  const commit = (value: string) => {
+  const commit = (value: string, origin: HTMLElement) => {
     const validation = validateInspectorValue(definition, value);
     setError(validation);
-    if (validation === null && (field.mixed || value !== field.value)) onEdit(field, value);
+    if (validation === null && (field.mixed || value !== field.value)) onEdit(field, value, draftContext.token, origin);
   };
-  const blur = () => {
+  const blur = (event: FocusEvent<HTMLInputElement>) => {
     if (skipBlurCommit.current) return;
-    commit(draft);
+    commit(event.currentTarget.value, event.currentTarget);
   };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== 'Enter') return;
     event.preventDefault();
     skipBlurCommit.current = true;
-    commit(event.currentTarget.value);
+    commit(event.currentTarget.value, event.currentTarget);
     queueMicrotask(() => { skipBlurCommit.current = false; });
   };
   const enumChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const value = event.target.value;
     setDraft(value);
     setError(null);
-    if (value.length > 0 && (field.mixed || value !== field.value)) onEdit(field, value);
+    if (value.length > 0 && (field.mixed || value !== field.value)) onEdit(field, value, draftContext.token, event.currentTarget);
   };
 
   return (
@@ -71,6 +73,7 @@ export function StylePropertyField({ field, draftContext, projectAssets, onEdit 
                   />
                 )}
                 <input
+                  ref={inputRef}
                   id={inputId}
                   aria-label={definition.label}
                   value={draft}
@@ -86,11 +89,13 @@ export function StylePropertyField({ field, draftContext, projectAssets, onEdit 
                     label={definition.label}
                     assets={projectAssets}
                     valueKind="style"
-                    resetKey={draftContext}
+                    resetKey={draftContext.key}
                     onSelect={(value) => {
                       setDraft(value);
                       setError(null);
-                      if (field.mixed || value !== field.value) onEdit(field, value);
+                      if ((field.mixed || value !== field.value) && inputRef.current !== null) {
+                        onEdit(field, value, draftContext.token, inputRef.current);
+                      }
                     }}
                   />
                 )}

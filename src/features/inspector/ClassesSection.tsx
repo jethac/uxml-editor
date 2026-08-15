@@ -1,11 +1,12 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import type { ElementLocator } from '../../core/documents/ElementLocator';
 import type { InspectorSelection } from './inspectorModel';
+import type { InspectorContextToken, InspectorDraftContext } from './InspectorContext';
 
 export interface ClassesSectionProps {
   readonly selection: readonly InspectorSelection[];
-  readonly draftContext: unknown;
-  readonly onEdit: (value: string | null, locators: readonly ElementLocator[]) => void;
+  readonly draftContext: InspectorDraftContext;
+  readonly onEdit: (value: string | null, locators: readonly ElementLocator[], token: InspectorContextToken) => void;
 }
 
 export function ClassesSection({ selection, draftContext, onEdit }: ClassesSectionProps) {
@@ -25,7 +26,9 @@ export function ClassesSection({ selection, draftContext, onEdit }: ClassesSecti
     const targets = normalized.length === 0
       ? selection.filter(({ node }) => node.attributes.some((attribute) => attribute.name === 'class')).map((item) => item.locator)
       : selection.map((item) => item.locator);
-    if (targets.length > 0 && (mixed || normalized !== value)) onEdit(normalized.length === 0 ? null : normalized, targets);
+    if (targets.length > 0 && (mixed || normalized !== value)) {
+      onEdit(normalized.length === 0 ? null : normalized, targets, draftContext.token);
+    }
   };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') { event.preventDefault(); commit(); }

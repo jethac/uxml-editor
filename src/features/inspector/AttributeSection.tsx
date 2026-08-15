@@ -4,6 +4,7 @@ import type { ElementLocator } from '../../core/documents/ElementLocator';
 import type { InspectorSelection } from './inspectorModel';
 import type { ProjectAsset } from '../../core/store/ProjectAssetCatalog';
 import { AssetPicker } from './AssetPicker';
+import type { InspectorContextToken, InspectorDraftContext } from './InspectorContext';
 
 interface AttributeDefinition {
   readonly name: string;
@@ -27,9 +28,9 @@ const ATTRIBUTES: readonly AttributeDefinition[] = Object.freeze([
 
 export interface AttributeSectionProps {
   readonly selection: readonly InspectorSelection[];
-  readonly draftContext: unknown;
+  readonly draftContext: InspectorDraftContext;
   readonly projectAssets: readonly ProjectAsset[];
-  readonly onEdit: (name: string, value: string | null, locators: readonly ElementLocator[]) => void;
+  readonly onEdit: (name: string, value: string | null, locators: readonly ElementLocator[], token: InspectorContextToken) => void;
 }
 
 export function AttributeSection({ selection, draftContext, projectAssets, onEdit }: AttributeSectionProps) {
@@ -72,7 +73,7 @@ function AttributeField({
 }: {
   readonly definition: AttributeDefinition;
   readonly selection: readonly InspectorSelection[];
-  readonly draftContext: unknown;
+  readonly draftContext: InspectorDraftContext;
   readonly projectAssets: readonly ProjectAsset[];
   readonly onEdit: AttributeSectionProps['onEdit'];
 }) {
@@ -81,7 +82,7 @@ function AttributeField({
   const value = mixed ? '' : observed[0] ?? '';
   const locators = selection.map((item) => item.locator);
   if (definition.kind === 'checkbox') {
-    return <AttributeCheckbox definition={definition} value={value} mixed={mixed} locators={locators} onEdit={onEdit} />;
+    return <AttributeCheckbox definition={definition} value={value} mixed={mixed} locators={locators} draftContext={draftContext} onEdit={onEdit} />;
   }
   return <AttributeText definition={definition} value={value} mixed={mixed} locators={locators} draftContext={draftContext} projectAssets={projectAssets} onEdit={onEdit} />;
 }
@@ -91,12 +92,14 @@ function AttributeCheckbox({
   value,
   mixed,
   locators,
+  draftContext,
   onEdit,
 }: {
   readonly definition: AttributeDefinition;
   readonly value: string;
   readonly mixed: boolean;
   readonly locators: readonly ElementLocator[];
+  readonly draftContext: InspectorDraftContext;
   readonly onEdit: AttributeSectionProps['onEdit'];
 }) {
   const ref = useRef<HTMLInputElement>(null);
@@ -110,7 +113,7 @@ function AttributeCheckbox({
         aria-label={definition.label}
         type="checkbox"
         checked={!mixed && value === 'true'}
-        onChange={(event) => onEdit(definition.name, String(event.target.checked), locators)}
+        onChange={(event) => onEdit(definition.name, String(event.target.checked), locators, draftContext.token)}
       />
       <span className="inspector-origin">{mixed ? 'Mixed' : value.length === 0 ? 'Not authored' : 'Explicit'}</span>
     </div>
@@ -130,7 +133,7 @@ function AttributeText({
   readonly value: string;
   readonly mixed: boolean;
   readonly locators: readonly ElementLocator[];
-  readonly draftContext: unknown;
+  readonly draftContext: InspectorDraftContext;
   readonly projectAssets: readonly ProjectAsset[];
   readonly onEdit: AttributeSectionProps['onEdit'];
 }) {
@@ -140,7 +143,7 @@ function AttributeText({
   const commit = () => {
     const invalid = validateAttribute(definition, draft);
     setError(invalid);
-    if (invalid === null && (mixed || draft !== value)) onEdit(definition.name, draft, locators);
+    if (invalid === null && (mixed || draft !== value)) onEdit(definition.name, draft, locators, draftContext.token);
   };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') { event.preventDefault(); commit(); }
@@ -152,7 +155,7 @@ function AttributeText({
       <div className={`inspector-input-wrap inspector-input-wrap--${definition.kind}`}>
         {definition.kind === 'enum'
           ? (
-              <select id={id} aria-label={definition.label} value={draft} onChange={(event) => { setDraft(event.target.value); onEdit(definition.name, event.target.value, locators); }}>
+              <select id={id} aria-label={definition.label} value={draft} onChange={(event) => { setDraft(event.target.value); onEdit(definition.name, event.target.value, locators, draftContext.token); }}>
                 {(mixed || draft.length === 0) && <option value="">{mixed ? 'Mixed' : 'Not authored'}</option>}
                 {definition.values?.map((option) => <option key={option} value={option}>{option}</option>)}
               </select>
@@ -163,11 +166,11 @@ function AttributeText({
             label={definition.label}
             assets={projectAssets}
             valueKind="attribute"
-            resetKey={draftContext}
+            resetKey={draftContext.key}
             onSelect={(selected) => {
               setDraft(selected);
               setError(null);
-              if (mixed || selected !== value) onEdit(definition.name, selected, locators);
+              if (mixed || selected !== value) onEdit(definition.name, selected, locators, draftContext.token);
             }}
           />
         )}
@@ -190,7 +193,7 @@ function UnknownAttributeRow({ name, selection, draftContext, onEdit }: { readon
   const commit = () => {
     const invalid = validateText(draft);
     setError(invalid);
-    if (invalid === null && (mixed || draft !== value)) onEdit(name, draft, editLocators);
+    if (invalid === null && (mixed || draft !== value)) onEdit(name, draft, editLocators, draftContext.token);
   };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') { event.preventDefault(); commit(); }
@@ -200,7 +203,7 @@ function UnknownAttributeRow({ name, selection, draftContext, onEdit }: { readon
       <th scope="row">{name}</th>
       <td><input aria-label={`${name} value`} value={draft} placeholder={mixed ? 'Mixed' : undefined} aria-invalid={error !== null} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={keyDown} /></td>
       <td>
-        <button type="button" aria-label={`Remove ${name}`} title={`Remove ${name}`} onClick={() => onEdit(name, null, removeLocators)}><Trash2 aria-hidden="true" /></button>
+        <button type="button" aria-label={`Remove ${name}`} title={`Remove ${name}`} onClick={() => onEdit(name, null, removeLocators, draftContext.token)}><Trash2 aria-hidden="true" /></button>
         {error !== null && <span className="visually-hidden" role="alert">{error}</span>}
       </td>
     </tr>

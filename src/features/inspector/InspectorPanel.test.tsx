@@ -102,6 +102,56 @@ describe('InspectorPanel', () => {
     expect(session.history.undoDepth).toBe(1);
   });
 
+  it('refuses an attribute draft after an unsynchronized session generation change', () => {
+    const { session } = renderInspector(['primary']);
+    const text = screen.getByLabelText('Text');
+    fireEvent.change(text, { target: { value: 'Stale attribute draft' } });
+    const secondary = session.locatorFor(nodeByName(session.document.root, 'secondary').id)!;
+    session.history.execute(setAttribute(session, secondary, 'tooltip', 'external generation'));
+    const afterExternal = session.snapshot().files.get(ENTRY_PATH)!.text;
+
+    fireEvent.blur(text);
+
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(afterExternal);
+    expect(session.history.undoDepth).toBe(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('refuses a class draft after an unsynchronized session generation change', async () => {
+    const { session } = renderInspector(['primary']);
+    const classes = screen.getByRole('textbox', { name: 'Classes' });
+    fireEvent.change(classes, { target: { value: 'stale-class' } });
+    classes.focus();
+    const secondary = session.locatorFor(nodeByName(session.document.root, 'secondary').id)!;
+    session.history.execute(setAttribute(session, secondary, 'tooltip', 'external generation'));
+    const afterExternal = session.snapshot().files.get(ENTRY_PATH)!.text;
+
+    await pressEnter();
+
+    expect(session.snapshot().files.get(ENTRY_PATH)?.text).toBe(afterExternal);
+    expect(session.history.undoDepth).toBe(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('suppresses a stale unavailable-target diagnostic after an unsynchronized generation change', async () => {
+    const noStyleUxml = UXML.replace('  <Style src="theme.uss" />\n', '');
+    const rendered = renderInspector(['primary'], new Map([[ENTRY_PATH, noStyleUxml]]));
+    const primary = rendered.session.locatorFor(nodeByName(rendered.session.document.root, 'primary').id)!;
+    act(() => rendered.store.dispatch({ type: 'active-states/toggle', locator: primary, state: 'hover' }));
+    const width = screen.getByLabelText('Width');
+    fireEvent.change(width, { target: { value: '12px' } });
+    width.focus();
+    const secondary = rendered.session.locatorFor(nodeByName(rendered.session.document.root, 'secondary').id)!;
+    rendered.session.history.execute(setAttribute(rendered.session, secondary, 'tooltip', 'external generation'));
+    const afterExternal = rendered.session.snapshot().files.get(ENTRY_PATH)!.text;
+
+    await pressEnter();
+
+    expect(rendered.session.snapshot().files.get(ENTRY_PATH)?.text).toBe(afterExternal);
+    expect(rendered.session.history.undoDepth).toBe(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('cancels a pending target choice when selection changes to an equal-valued element', async () => {
     const user = userEvent.setup();
     const equalUss = `.primary { width: 180px; }
@@ -173,6 +223,61 @@ describe('InspectorPanel', () => {
     expect(replacement.snapshot().files.get(ENTRY_PATH)?.text).toBe(UXML);
     expect(session.history.undoDepth).toBe(0);
     expect(replacement.history.undoDepth).toBe(0);
+  });
+
+  it('does not focus the same-id field after a stale selection callback', async () => {
+    const user = userEvent.setup();
+    const equalUss = `.primary { width: 180px; }
+.secondary { width: 180px; }
+`;
+    const { session, store } = renderInspector(['primary'], new Map([[ENTRY_PATH, UXML], [SHEET_PATH, equalUss]]));
+    const origin = screen.getByLabelText('Width');
+    await user.clear(origin);
+    await user.type(origin, '240px');
+    await pressEnter();
+    const staleChoice = await screen.findByRole('menuitem', { name: 'Inline style' });
+    const secondary = nodeByName(session.document.root, 'secondary').id;
+
+    act(() => {
+      store.dispatch({ type: 'selection/set', selection: [secondary] });
+      fireEvent.click(staleChoice);
+    });
+    await Promise.resolve();
+    const replacementField = screen.getByLabelText('Width');
+    expect(replacementField).toBe(origin);
+
+    expect(replacementField).not.toHaveFocus();
+    expect(session.history.undoDepth).toBe(0);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('does not focus the same-id field after a stale replacement-session callback', async () => {
+    const user = userEvent.setup();
+    const rendered = renderInspector(['primary']);
+    const origin = screen.getByLabelText('Width');
+    await user.clear(origin);
+    await user.type(origin, '240px');
+    await pressEnter();
+    const staleChoice = await screen.findByRole('menuitem', { name: 'Inline style' });
+    const replacement = DocumentSession.open(
+      new Map([[ENTRY_PATH, UXML], [SHEET_PATH, USS]]),
+      ENTRY_PATH,
+      new UxmlPreviewAdapter(),
+    );
+    replacement.setSelection([replacement.locatorFor(nodeByName(replacement.document.root, 'primary').id)!]);
+
+    act(() => {
+      rendered.store.dispatch({ type: 'context/set', session: replacement, host: null });
+      fireEvent.click(staleChoice);
+    });
+    await Promise.resolve();
+    const replacementField = screen.getByLabelText('Width');
+    expect(replacementField).toBe(origin);
+
+    expect(replacementField).not.toHaveFocus();
+    expect(rendered.session.history.undoDepth).toBe(0);
+    expect(replacement.history.undoDepth).toBe(0);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('resets equal-valued text-like drafts when selection identity changes', () => {
@@ -587,6 +692,55 @@ describe('InspectorPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Use asset source asset' }));
     expect(resourceEdit.session.snapshot().files.get(ENTRY_PATH)?.text).toContain('src="resource://Icons/Save"');
     expect(resourceEdit.session.history.undoDepth).toBe(1);
+  });
+
+  it('closes an open asset picker and refuses its stale callback when the catalog is cleared', async () => {
+    const user = userEvent.setup();
+    const assets = ['Assets/UI/Logo.png', 'Assets/Resources/Icons/Save.png'];
+    const rendered = renderInspector(['primary'], undefined, false, assets);
+    const before = rendered.session.snapshot().files.get(ENTRY_PATH)!.text;
+    const source = screen.getByLabelText('Asset source');
+    await user.click(screen.getByRole('button', { name: 'Available asset source values' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Asset source project asset' }), 'Assets/UI/Logo.png');
+    const staleUse = screen.getByRole('button', { name: 'Use asset source asset' });
+
+    act(() => {
+      rendered.store.dispatch({ type: 'project-assets/set', paths: [] });
+      fireEvent.click(staleUse);
+    });
+    expect(screen.queryByRole('dialog', { name: 'Choose asset source asset' })).not.toBeInTheDocument();
+    fireEvent.blur(source);
+
+    expect(rendered.session.snapshot().files.get(ENTRY_PATH)?.text).toBe(before);
+    expect(rendered.session.history.undoDepth).toBe(0);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('closes a pending asset target and refuses stale commit, diagnostic, and focus after catalog replacement', async () => {
+    const user = userEvent.setup();
+    const assets = ['Assets/UI/Logo.png', 'Assets/Resources/Icons/Save.png'];
+    const rendered = renderInspector(['primary'], undefined, false, assets);
+    const beforeUxml = rendered.session.snapshot().files.get(ENTRY_PATH)!.text;
+    const beforeUss = rendered.session.snapshot().files.get(SHEET_PATH)!.text;
+    const origin = screen.getByLabelText('Background image');
+    await user.click(screen.getByRole('button', { name: 'Available background image values' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Background image project asset' }), 'Assets/UI/Logo.png');
+    await user.click(screen.getByRole('button', { name: 'Use background image asset' }));
+    const staleChoice = await screen.findByRole('menuitem', { name: 'Inline style' });
+
+    act(() => {
+      rendered.store.dispatch({ type: 'project-assets/set', paths: ['Assets/UI/Replacement.png'] });
+      fireEvent.click(staleChoice);
+    });
+    await Promise.resolve();
+    expect(screen.queryByRole('menu', { name: 'Write background-image to' })).not.toBeInTheDocument();
+
+    expect(origin).not.toHaveFocus();
+    expect(screen.getByLabelText('Background image')).toHaveValue('url("Assets/UI/icon.png")');
+    expect(rendered.session.snapshot().files.get(ENTRY_PATH)?.text).toBe(beforeUxml);
+    expect(rendered.session.snapshot().files.get(SHEET_PATH)?.text).toBe(beforeUss);
+    expect(rendered.session.history.undoDepth).toBe(0);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('rejects malformed class tokens and missing namespaces before any mutation', async () => {

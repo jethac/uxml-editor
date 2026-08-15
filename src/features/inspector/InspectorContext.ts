@@ -7,6 +7,12 @@ export interface InspectorContextToken {
   readonly generation: number;
   readonly locators: readonly ElementLocator[];
   readonly activeStates: readonly EditorActiveStateEntry[];
+  readonly projectAssets: EditorSnapshot['projectAssets'];
+}
+
+export interface InspectorDraftContext {
+  readonly token: InspectorContextToken;
+  readonly key: string;
 }
 
 export function captureInspectorContext(
@@ -19,6 +25,7 @@ export function captureInspectorContext(
     generation: snapshot.sessionGeneration,
     locators: Object.freeze(selection.map((item) => item.locator)),
     activeStates: snapshot.activeStates,
+    projectAssets: snapshot.projectAssets,
   });
 }
 
@@ -28,10 +35,43 @@ export function inspectorContextMatches(snapshot: EditorSnapshot, token: Inspect
     || snapshot.sessionGeneration !== token.generation
     || snapshot.session.generation !== token.generation
   ) return false;
+  return inspectorAuthorityMatches(snapshot, token);
+}
+
+export function inspectorPostCommitContextMatches(
+  snapshot: EditorSnapshot,
+  token: InspectorContextToken,
+  committedGeneration: number,
+): boolean {
+  return committedGeneration === token.generation + 1
+    && snapshot.session === token.session
+    && snapshot.sessionGeneration === committedGeneration
+    && snapshot.session.generation === committedGeneration
+    && inspectorPostCommitAuthorityMatches(snapshot, token);
+}
+
+export function createInspectorDraftContext(
+  snapshot: EditorSnapshot,
+  selection: readonly InspectorSelection[],
+): InspectorDraftContext | null {
+  const token = captureInspectorContext(snapshot, selection);
+  return token === null ? null : Object.freeze({ token, key: inspectorDraftContextKey(snapshot, selection) });
+}
+
+function inspectorAuthorityMatches(snapshot: EditorSnapshot, token: InspectorContextToken): boolean {
+  if (snapshot.projectAssets !== token.projectAssets) return false;
   const locators = snapshot.selection.map((nodeId) => snapshot.session?.locatorFor(nodeId) ?? null);
   if (locators.some((locator) => locator === null) || locators.length !== token.locators.length) return false;
   if (!locators.every((locator, index) => equalElementLocator(locator!, token.locators[index]))) return false;
   return equalActiveStates(snapshot.activeStates, token.activeStates);
+}
+
+function inspectorPostCommitAuthorityMatches(snapshot: EditorSnapshot, token: InspectorContextToken): boolean {
+  if (snapshot.projectAssets !== token.projectAssets || snapshot.session === null) return false;
+  const locators = snapshot.session.selection;
+  return locators.length === token.locators.length
+    && locators.every((locator, index) => equalElementLocator(locator, token.locators[index]))
+    && equalActiveStates(snapshot.activeStates, token.activeStates);
 }
 
 export function inspectorDraftContextKey(snapshot: EditorSnapshot, selection: readonly InspectorSelection[]): string {
@@ -39,6 +79,7 @@ export function inspectorDraftContextKey(snapshot: EditorSnapshot, selection: re
     generation: snapshot.sessionGeneration,
     locators: selection.map((item) => item.locator),
     activeStates: snapshot.activeStates,
+    projectAssets: snapshot.projectAssets,
   });
 }
 

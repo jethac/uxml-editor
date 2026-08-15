@@ -17,9 +17,9 @@ import { propertiesForSection } from './propertyCatalog';
 import { StyleTargetMenu } from './StyleTargetMenu';
 import { TypographySection } from './TypographySection';
 import {
-  captureInspectorContext,
+  createInspectorDraftContext,
   inspectorContextMatches,
-  inspectorDraftContextKey,
+  inspectorPostCommitContextMatches,
   type InspectorContextToken,
 } from './InspectorContext';
 
@@ -32,7 +32,12 @@ interface PendingStyleEdit {
   readonly field: InspectorStyleFieldModel;
   readonly value: string;
   readonly token: InspectorContextToken;
+  readonly origin: HTMLElement;
 }
+
+type StyleExecutionOutcome =
+  | Readonly<{ status: 'committed'; generation: number }>
+  | Readonly<{ status: 'stale' | 'failed' }>;
 
 export function InspectorPanel({ store, snapshot }: InspectorPanelProps) {
   const session = snapshot.session;
@@ -42,11 +47,10 @@ export function InspectorPanel({ store, snapshot }: InspectorPanelProps) {
   );
   const [pending, setPending] = useState<PendingStyleEdit | null>(null);
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
-  const contextKey = useMemo(
-    () => inspectorDraftContextKey(snapshot, selection),
-    [session, selection, snapshot.activeStates, snapshot.sessionGeneration],
+  const draftContext = useMemo(
+    () => createInspectorDraftContext(snapshot, selection),
+    [session, selection, snapshot.activeStates, snapshot.projectAssets, snapshot.sessionGeneration],
   );
-  const draftContext = useMemo(() => Object.freeze({ session, key: contextKey }), [session, contextKey]);
   useEffect(() => {
     setPending(null);
     setDiagnostic(null);
@@ -63,50 +67,82 @@ export function InspectorPanel({ store, snapshot }: InspectorPanelProps) {
     ? activeStatesFor(session.document.root, snapshot.activeStates, selection[0].locator)
     : [];
 
-  const executeStyle = (field: InspectorStyleFieldModel, value: string, choice: InspectorStyleChoice, token: InspectorContextToken) => {
+  const executeStyle = (field: InspectorStyleFieldModel, value: string, choice: InspectorStyleChoice, token: InspectorContextToken): StyleExecutionOutcome => {
     const current = store.getSnapshot();
     if (!inspectorContextMatches(current, token)) {
       setPending(null);
       setDiagnostic(null);
-      return;
+      return { status: 'stale' };
     }
     try {
       token.session.history.execute(composeStyleEdit(token.session, choice.edits, value));
+      const generation = token.session.generation;
       setPending(null);
       setDiagnostic(null);
       store.dispatch({ type: 'session/sync' });
+      return { status: 'committed', generation };
     } catch (error) {
       setPending(null);
-      setDiagnostic(errorMessage(error));
+      if (inspectorContextMatches(store.getSnapshot(), token)) setDiagnostic(errorMessage(error));
+      else setDiagnostic(null);
+      return { status: 'failed' };
     }
   };
 
-  const requestStyleEdit = (field: InspectorStyleFieldModel, value: string) => {
+  const requestStyleEdit = (field: InspectorStyleFieldModel, value: string, token: InspectorContextToken, origin: HTMLElement) => {
+    if (!inspectorContextMatches(store.getSnapshot(), token)) {
+      setPending(null);
+      setDiagnostic(null);
+      return;
+    }
     setDiagnostic(null);
-    const token = captureInspectorContext(store.getSnapshot(), selection);
-    if (token === null) return;
     if (field.choices.length === 0) {
       setDiagnostic(field.unavailableReason ?? `No compatible write target is available for ${field.definition.property}.`);
     } else if (field.choices.length === 1) {
       executeStyle(field, value, field.choices[0], token);
     } else {
-      setPending({ field, value, token });
+      setPending({ field, value, token, origin });
     }
   };
 
-  const editAttribute = (name: string, value: string | null, locators: readonly ElementLocator[]) => {
-    if (session === null) return;
+  const editAttribute = (name: string, value: string | null, locators: readonly ElementLocator[], token: InspectorContextToken) => {
+    if (!inspectorContextMatches(store.getSnapshot(), token)) {
+      setPending(null);
+      setDiagnostic(null);
+      return;
+    }
     try {
-      session.history.execute(composeAttributeEdit(session, locators, name, value));
+      token.session.history.execute(composeAttributeEdit(token.session, locators, name, value));
       setDiagnostic(null);
       store.dispatch({ type: 'session/sync' });
     } catch (error) {
-      setDiagnostic(errorMessage(error));
+      if (inspectorContextMatches(store.getSnapshot(), token)) setDiagnostic(errorMessage(error));
+      else setDiagnostic(null);
     }
+  };
+
+  const cancelPendingStyle = (edit: PendingStyleEdit) => {
+    setPending(null);
+    setDiagnostic(null);
+    queueMicrotask(() => {
+      if (edit.origin.isConnected && inspectorContextMatches(store.getSnapshot(), edit.token)) edit.origin.focus();
+    });
+  };
+
+  const choosePendingStyle = (edit: PendingStyleEdit, choice: InspectorStyleChoice) => {
+    const outcome = executeStyle(edit.field, edit.value, choice, edit.token);
+    if (outcome.status !== 'committed') return;
+    queueMicrotask(() => {
+      if (
+        edit.origin.isConnected
+        && inspectorPostCommitContextMatches(store.getSnapshot(), edit.token, outcome.generation)
+      ) edit.origin.focus();
+    });
   };
 
   if (session === null) return <span className="pane-empty">No document</span>;
   if (selection.length === 0) return <span className="pane-empty">Nothing selected</span>;
+  if (draftContext === null) return <span className="pane-empty">Nothing selected</span>;
   return (
     <div className="inspector-panel">
       <div className="inspector-context" aria-label="Inspector selection context">
@@ -115,7 +151,7 @@ export function InspectorPanel({ store, snapshot }: InspectorPanelProps) {
       </div>
       {diagnostic !== null && <div className="inspector-diagnostic" role="alert">{diagnostic}</div>}
       <AttributeSection selection={selection} draftContext={draftContext} projectAssets={snapshot.projectAssets} onEdit={editAttribute} />
-      <ClassesSection selection={selection} draftContext={draftContext} onEdit={(value, locators) => editAttribute('class', value, locators)} />
+      <ClassesSection selection={selection} draftContext={draftContext} onEdit={(value, locators, token) => editAttribute('class', value, locators, token)} />
       <LayoutSection fields={fieldGroups.layout} draftContext={draftContext} projectAssets={snapshot.projectAssets} onEdit={requestStyleEdit} />
       <AppearanceSection fields={fieldGroups.appearance} draftContext={draftContext} projectAssets={snapshot.projectAssets} onEdit={requestStyleEdit} />
       <TypographySection fields={fieldGroups.typography} draftContext={draftContext} projectAssets={snapshot.projectAssets} onEdit={requestStyleEdit} />
@@ -123,9 +159,8 @@ export function InspectorPanel({ store, snapshot }: InspectorPanelProps) {
         <StyleTargetMenu
           property={pending.field.definition.property}
           choices={pending.field.choices}
-          returnFocusId={`inspector-style-${pending.field.definition.property}`}
-          onCancel={() => setPending(null)}
-          onChoose={(choice) => executeStyle(pending.field, pending.value, choice, pending.token)}
+          onCancel={() => cancelPendingStyle(pending)}
+          onChoose={(choice) => choosePendingStyle(pending, choice)}
         />
       )}
     </div>

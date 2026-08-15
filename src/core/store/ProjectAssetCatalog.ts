@@ -6,12 +6,20 @@ export interface ProjectAsset {
 export function copyProjectAssetCatalog(candidate: unknown): readonly ProjectAsset[] {
   if (!Array.isArray(candidate)) throw new TypeError('Project assets must be an array.');
   const seen = new Set<string>();
+  const resources = new Map<string, string>();
   return Object.freeze(candidate.map((value) => {
     if (typeof value !== 'string' || !isProjectAssetPath(value) || seen.has(value)) {
       throw new TypeError('Project asset paths must be unique deterministic Assets or Packages file paths.');
     }
     seen.add(value);
     const resourceKey = resourceKeyFor(value);
+    if (resourceKey !== null) {
+      const existing = resources.get(resourceKey);
+      if (existing !== undefined) {
+        throw new TypeError(`Ambiguous project resource key "${resourceKey}" is derived from "${existing}" and "${value}".`);
+      }
+      resources.set(resourceKey, value);
+    }
     return Object.freeze({ path: value, ...(resourceKey === null ? {} : { resourceKey }) });
   }));
 }

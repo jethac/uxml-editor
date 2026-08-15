@@ -6,18 +6,12 @@ export interface StyleTargetMenuProps {
   readonly choices: readonly InspectorStyleChoice[];
   readonly onChoose: (choice: InspectorStyleChoice) => void;
   readonly onCancel: () => void;
-  readonly returnFocusId: string;
 }
 
-export function StyleTargetMenu({ property, choices, onChoose, onCancel, returnFocusId }: StyleTargetMenuProps) {
+export function StyleTargetMenu({ property, choices, onChoose, onCancel }: StyleTargetMenuProps) {
   const items = useRef<Array<HTMLButtonElement | null>>([]);
   useEffect(() => { items.current[0]?.focus(); }, []);
   const actionCount = choices.length + 1;
-  const restoreFocus = () => queueMicrotask(() => document.getElementById(returnFocusId)?.focus());
-  const cancel = () => {
-    onCancel();
-    restoreFocus();
-  };
 
   const handleKey = (event: KeyboardEvent<HTMLDivElement>) => {
     const current = items.current.indexOf(document.activeElement as HTMLButtonElement);
@@ -27,7 +21,7 @@ export function StyleTargetMenu({ property, choices, onChoose, onCancel, returnF
     else if (event.key === 'Home') next = 0;
     else if (event.key === 'End') next = actionCount - 1;
     else if (event.key === 'Escape') {
-      cancel();
+      onCancel();
       event.preventDefault();
       return;
     }
@@ -45,7 +39,7 @@ export function StyleTargetMenu({ property, choices, onChoose, onCancel, returnF
           type="button"
           role="menuitem"
           title={choice.title}
-          onClick={() => { onChoose(choice); restoreFocus(); }}
+          onClick={() => onChoose(choice)}
         >
           {choice.label}
         </button>
@@ -55,7 +49,7 @@ export function StyleTargetMenu({ property, choices, onChoose, onCancel, returnF
         type="button"
         role="menuitem"
         className="inspector-target-menu__cancel"
-        onClick={cancel}
+        onClick={onCancel}
       >
         Cancel
       </button>

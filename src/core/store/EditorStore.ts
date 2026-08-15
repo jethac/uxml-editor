@@ -307,7 +307,10 @@ function copyProjectAssets(paths: unknown, code: 'invalid-action' | 'invalid-opt
   try {
     return copyProjectAssetCatalog(paths);
   } catch (error) {
-    throw new EditorStoreError(code, 'Project asset paths are malformed.', error);
+    const message = error instanceof Error && error.message.length > 0
+      ? error.message
+      : 'Project asset paths are malformed.';
+    throw new EditorStoreError(code, message, error);
   }
 }
 
