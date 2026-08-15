@@ -14,6 +14,7 @@ interface UseCanvasClipboardOptions {
   readonly session: DocumentSession | null;
   readonly selectedNodes: readonly EditorElement[];
   readonly clipboardPort?: ClipboardPort;
+  readonly isMutationAllowed: (session: DocumentSession) => boolean;
   readonly onDiagnostic: (message: string | null) => void;
   readonly onCommit: (session: DocumentSession) => void;
 }
@@ -29,6 +30,7 @@ export function useCanvasClipboard({
   session,
   selectedNodes,
   clipboardPort,
+  isMutationAllowed,
   onDiagnostic,
   onCommit,
 }: UseCanvasClipboardOptions): CanvasClipboardActions {
@@ -44,20 +46,23 @@ export function useCanvasClipboard({
 
   const currentSessionIs = (initiatingSession: DocumentSession): boolean =>
     store.getSnapshot().session === initiatingSession;
+  const canMutate = (initiatingSession: DocumentSession): boolean =>
+    currentSessionIs(initiatingSession) && isMutationAllowed(initiatingSession);
 
   const execute = (initiatingSession: DocumentSession, result: ClipboardPasteResult): void => {
-    if (!currentSessionIs(initiatingSession)) return;
+    if (!canMutate(initiatingSession)) return;
     if (!result.ok) {
       onDiagnostic(result.diagnostic.message);
       return;
     }
+    if (!canMutate(initiatingSession)) return;
     try {
       initiatingSession.history.execute(result.transaction);
-      if (!currentSessionIs(initiatingSession)) return;
+      if (!canMutate(initiatingSession)) return;
       onDiagnostic(null);
       onCommit(initiatingSession);
     } catch (error) {
-      if (currentSessionIs(initiatingSession)) onDiagnostic(errorMessage(error));
+      if (canMutate(initiatingSession)) onDiagnostic(errorMessage(error));
     }
   };
 
@@ -81,7 +86,7 @@ export function useCanvasClipboard({
     },
     paste: async () => {
       const initiatingSession = session;
-      if (initiatingSession === null) return;
+      if (initiatingSession === null || !canMutate(initiatingSession)) return;
       const parent = selectedNodes[0] ?? initiatingSession.document.root;
       const parentLocator = initiatingSession.locatorFor(parent.id);
       if (parentLocator === null) return;
@@ -89,7 +94,7 @@ export function useCanvasClipboard({
         ? fallbackRef.current.item
         : undefined;
       const read = await service.readItem(fallback);
-      if (!currentSessionIs(initiatingSession)) return;
+      if (!canMutate(initiatingSession)) return;
       if (!read.ok) {
         onDiagnostic(read.diagnostic.message);
         return;
@@ -100,15 +105,15 @@ export function useCanvasClipboard({
         parent.children.length,
         read.item,
       );
-      if (!currentSessionIs(initiatingSession)) return;
+      if (!canMutate(initiatingSession)) return;
       execute(initiatingSession, result);
     },
     duplicate: async () => {
       const initiatingSession = session;
       const requested = [...selectedNodes];
-      if (initiatingSession === null || requested.length === 0) return;
+      if (initiatingSession === null || requested.length === 0 || !canMutate(initiatingSession)) return;
       const result = await service.duplicate(initiatingSession, requested);
-      if (!currentSessionIs(initiatingSession)) return;
+      if (!canMutate(initiatingSession)) return;
       execute(initiatingSession, result);
     },
   };

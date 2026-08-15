@@ -213,6 +213,60 @@ describe('PreviewCanvas rendering and viewport controls', () => {
     expect(second.history.undoDepth).toBe(0);
   });
 
+  it.each(['drag', 'resize'] as const)(
+    'cancels an active %s when source authority becomes stale before subsequent pointer movement',
+    async (gesture) => {
+      const absolute = UXML.replace(
+        'name="target" text="Choose"',
+        'name="target" text="Choose" style="position: absolute; left: 0px; top: 0px; width: 90px; height: 28px;"',
+      );
+      const adapter = new ControlledPreviewPort(`stale ${gesture}`, []);
+      const session = openSession(adapter, absolute);
+      const scheduler = new CapturingScheduler();
+      const coordinator = new SourceEditCoordinator(session, { scheduler });
+      const store = new EditorStore({ session });
+      render(<PreviewCanvas store={store} coordinator={coordinator} />);
+      const target = await screen.findByText(`stale ${gesture} preview`);
+      const field = screen.getByTestId('canvas-field');
+      const setPointerCapture = vi.fn();
+      const releasePointerCapture = vi.fn();
+      field.setPointerCapture = setPointerCapture;
+      field.releasePointerCapture = releasePointerCapture;
+      const pointerId = gesture === 'drag' ? 41 : 42;
+
+      if (gesture === 'drag') {
+        fireEvent.pointerDown(target, { button: 0, pointerId, clientX: 10, clientY: 10 });
+      } else {
+        fireEvent.click(target);
+        const handle = await screen.findByRole('button', { name: 'Resize selection' });
+        fireEvent.pointerDown(handle, { button: 0, pointerId, clientX: 100, clientY: 100 });
+      }
+      expect(setPointerCapture).toHaveBeenCalledWith(pointerId);
+      fireEvent.pointerMove(field, {
+        pointerId,
+        clientX: gesture === 'drag' ? 30 : 110,
+        clientY: gesture === 'drag' ? 20 : 105,
+      });
+      const sourceAtStaleBoundary = session.snapshot().files.get(ENTRY)?.text;
+      expect(sourceAtStaleBoundary).not.toBe(absolute);
+      expect(session.history.undoDepth).toBe(1);
+
+      act(() => {
+        coordinator.replace('<ui:UXML xmlns:ui="UnityEngine.UIElements"><ui:Button');
+        scheduler.flush();
+      });
+      expect(coordinator.getSnapshot().status).toBe('stale');
+      expect(releasePointerCapture).toHaveBeenCalledWith(pointerId);
+
+      fireEvent.pointerMove(field, { pointerId, clientX: 130, clientY: 120 });
+      fireEvent.pointerUp(field, { pointerId, clientX: 130, clientY: 120 });
+
+      expect(session.snapshot().files.get(ENTRY)?.text).toBe(sourceAtStaleBoundary);
+      expect(session.history.undoDepth).toBe(1);
+      coordinator.dispose();
+    },
+  );
+
   it('forms a Shift multi-selection once across the pointer-down and click sequence', async () => {
     const source = [
       '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
@@ -283,6 +337,58 @@ describe('PreviewCanvas rendering and viewport controls', () => {
     expect(first.history.undoDepth).toBe(0);
     expect(second.history.undoDepth).toBe(0);
     expect(store.getSnapshot().diagnostics.map((item) => item.message)).toEqual(['current paste diagnostic']);
+  });
+
+  it('discards a deferred paste when source authority becomes stale before clipboard read resolves', async () => {
+    const sourceSession = openSession(new ControlledPreviewPort('clipboard source authority', []));
+    const sourceNode = findNode(sourceSession.document.root, nodeNamed(sourceSession.document, 'target'));
+    if (sourceNode === null) throw new Error('Missing clipboard source authority node.');
+    const copied = new ClipboardService().copy(sourceSession, [sourceNode]);
+    expect(copied.ok).toBe(true);
+    if (!copied.ok) return;
+
+    let resolveRead!: (items: readonly ClipboardItemLike[]) => void;
+    const read = vi.fn(() => new Promise<readonly ClipboardItemLike[]>((resolve) => { resolveRead = resolve; }));
+    const clipboardPort: ClipboardPort = { write: vi.fn(), read };
+    const adapter = new ControlledPreviewPort('stale clipboard authority', [], false, 'parent');
+    const session = openSession(adapter);
+    const scheduler = new CapturingScheduler();
+    const coordinator = new SourceEditCoordinator(session, { scheduler });
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} coordinator={coordinator} clipboardPort={clipboardPort} />);
+    fireEvent.click(await screen.findByText('stale clipboard authority preview'));
+    const parentId = nodeNamed(session.document, 'parent');
+    const parent = findNode(session.document.root, parentId);
+    const parentLocator = session.locatorFor(parentId);
+    if (parent === null || parentLocator === null) throw new Error('Missing paste destination authority.');
+    await expect(new ClipboardService().paste(
+      session,
+      parentLocator,
+      parent.children.length,
+      copied.item,
+    )).resolves.toMatchObject({ ok: true });
+    const paste = screen.getByRole('button', { name: 'Paste' });
+
+    paste.focus();
+    fireEvent.click(paste);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    act(() => {
+      coordinator.replace('<ui:UXML xmlns:ui="UnityEngine.UIElements"><ui:Button');
+      scheduler.flush();
+    });
+    expect(coordinator.getSnapshot().status).toBe('stale');
+    expect(paste).toHaveFocus();
+
+    await act(async () => {
+      resolveRead([copied.item]);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    expect(session.snapshot().files.get(ENTRY)?.text).toBe(UXML);
+    expect(session.history.undoDepth).toBe(0);
+    expect(store.getSnapshot().diagnostics).toEqual([]);
+    expect(paste).toHaveFocus();
+    coordinator.dispose();
   });
 
   it('re-reads the injected clipboard port after Copy and pastes its newest successful item', async () => {

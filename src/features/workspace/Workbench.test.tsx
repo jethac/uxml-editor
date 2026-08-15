@@ -660,6 +660,22 @@ describe('compact 720px layout', () => {
     expect(screen.getByTestId('bottom-pane')).toBeVisible();
     expect(screen.getAllByRole('separator')).toHaveLength(3);
   });
+
+  it('retains compact Source as the visible desktop bottom view after a responsive transition', () => {
+    const store = new EditorStore({ session: openSession(), viewport: { width: 720, height: 768 } });
+    render(<Workbench store={store} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Source' }));
+    expect(store.getSnapshot().activePanel).toBe('source');
+    expect(screen.getByTestId('source-pane')).toBeVisible();
+
+    act(() => store.dispatch({ type: 'viewport/set', width: 1024, height: 768 }));
+
+    expect(screen.getByRole('tab', { name: 'Source' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('textbox', { name: 'Assets/UI/Main.uxml source' })).toBeVisible();
+    const diagnosticsView = document.getElementById('bottom-diagnostics-view');
+    expect(diagnosticsView).not.toBeNull();
+    expect(diagnosticsView).not.toBeVisible();
+  });
 });
 
 function openSession(): DocumentSession {

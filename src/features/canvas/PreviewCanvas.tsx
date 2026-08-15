@@ -136,28 +136,40 @@ export function PreviewCanvas({
   const stateControlDescription = selectedNodeId !== null && selectedSelector === null
     ? 'A unique authored name is required for pseudo states.'
     : null;
+  const mutationAllowed = (initiatingSession: DocumentSession | null): initiatingSession is DocumentSession =>
+    initiatingSession !== null
+    && store.getSnapshot().session === initiatingSession
+    && coordinator?.getSnapshot().status !== 'stale';
+  const cancelManipulation = () => {
+    const manipulation = manipulationRef.current;
+    manipulation?.controller.cancel();
+    manipulationRef.current = null;
+    if (manipulation !== null) {
+      try { fieldRef.current?.releasePointerCapture?.(manipulation.pointerId); } catch { /* Capture may already be released. */ }
+    }
+    setSnapGuides(Object.freeze([]));
+    setInteractionDiagnostic(null);
+  };
   const clipboard = useCanvasClipboard({
     store,
     session,
     selectedNodes,
     clipboardPort,
+    isMutationAllowed: mutationAllowed,
     onDiagnostic: setInteractionDiagnostic,
     onCommit: syncAfterMutation,
   });
 
   useEffect(() => {
     if (stateSessionRef.current === session) return;
-    const manipulation = manipulationRef.current;
-    manipulation?.controller.cancel();
-    manipulationRef.current = null;
+    cancelManipulation();
     panGestureRef.current = null;
-    if (manipulation !== null) {
-      try { fieldRef.current?.releasePointerCapture?.(manipulation.pointerId); } catch { /* Capture may already be released. */ }
-    }
-    setSnapGuides(Object.freeze([]));
-    setInteractionDiagnostic(null);
     stateSessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    if (sourceStale) cancelManipulation();
+  }, [sourceStale]);
 
   useEffect(() => {
     const container = rendererRef.current;
@@ -278,8 +290,8 @@ export function PreviewCanvas({
       event.preventDefault();
       return;
     }
-    if (sourceStale) return;
-    if (event.button !== 0 || session === null || frameRef.current === null) return;
+    if (!mutationAllowed(session)) return;
+    if (event.button !== 0 || frameRef.current === null) return;
     const nodeId = nodeForTarget(event.target);
     const node = nodeId === null ? null : elementById(session.document.root, nodeId);
     if (node === null) return;
@@ -307,6 +319,10 @@ export function PreviewCanvas({
     }
     const manipulation = manipulationRef.current;
     if (manipulation === null || manipulation.pointerId !== event.pointerId) return;
+    if (!mutationAllowed(session)) {
+      cancelManipulation();
+      return;
+    }
     const result = manipulation.controller.update(canvasPoint(event.clientX, event.clientY));
     if (!result.ok) {
       setInteractionDiagnostic(result.diagnostic.message);
@@ -324,18 +340,21 @@ export function PreviewCanvas({
       handled = true;
     }
     if (manipulationRef.current?.pointerId === event.pointerId) {
-      manipulationRef.current.controller.finish();
+      if (mutationAllowed(session)) manipulationRef.current.controller.finish();
+      else manipulationRef.current.controller.cancel();
       manipulationRef.current = null;
       setSnapGuides(Object.freeze([]));
+      setInteractionDiagnostic(null);
       handled = true;
     }
-    if (handled) event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (handled) {
+      try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch { /* Capture may already be released. */ }
+    }
   };
 
   const beginResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (sourceStale) return;
     const node = selectedNodes.length === 1 ? selectedNodes[0] : null;
-    if (session === null || node === null || frameRef.current === null || fieldRef.current === null) return;
+    if (!mutationAllowed(session) || node === null || frameRef.current === null || fieldRef.current === null) return;
     const controller = new ManipulationController(session, frameRef.current, { onCommit: syncAfterMutation });
     const started = controller.startResize(node, canvasPoint(event.clientX, event.clientY));
     if (!started.ok) {

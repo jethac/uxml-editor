@@ -50,6 +50,11 @@ export function Workbench({ store }: WorkbenchProps) {
   );
   useEffect(() => () => coordinator?.dispose(), [coordinator]);
   useEffect(() => coordinator?.reconcile(), [coordinator, snapshot.sessionGeneration]);
+  useEffect(() => {
+    if (snapshot.activePanel === 'diagnostics' || snapshot.activePanel === 'source') {
+      setBottomView(snapshot.activePanel);
+    }
+  }, [snapshot.activePanel]);
   const diagnostics = sourceSnapshot?.status === 'stale'
     ? [...sourceSnapshot.diagnostics, ...snapshot.diagnostics]
     : snapshot.diagnostics;
