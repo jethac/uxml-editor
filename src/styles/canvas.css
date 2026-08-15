@@ -258,6 +258,22 @@
   white-space: nowrap;
 }
 
+.canvas-stale-status {
+  max-width: 110px;
+  margin: 0 0 0 3px;
+  padding: 2px 5px;
+  overflow: hidden;
+  border: 1px solid #c98f87;
+  border-radius: 2px;
+  color: #762f27;
+  background: #fff4f2;
+  font-size: 10px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .canvas-bounds {
   position: absolute;
   border: 1px solid;

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
+import { EditorView } from '@codemirror/view';
 import type { EditorDiagnostic } from '../../core/adapter/types';
 import { UxmlPreviewAdapter } from '../../core/adapter/UxmlPreviewAdapter';
 import { DocumentSession } from '../../core/documents/DocumentSession';
@@ -50,7 +51,7 @@ describe('Workbench regions and command bar', () => {
     expect(screen.getByTestId('right-pane')).toBeVisible();
     expect(screen.getByTestId('bottom-pane')).toBeVisible();
     expect(screen.getAllByRole('separator')).toHaveLength(3);
-    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.getByRole('tablist', { name: 'Bottom views' })).toBeVisible();
   });
 
   it('does not publish component-authored geometry as a test-only DOM contract', () => {
@@ -189,6 +190,111 @@ describe('Workbench regions and command bar', () => {
       bottom: workbench.style.getPropertyValue('--workbench-bottom-pane'),
     }).toEqual(before);
     expect(before).toEqual({ left: '240px', right: '280px', bottom: '180px' });
+  });
+
+  it('retains diagnostics and source in one desktop bottom region and opens a diagnostic at its source', async () => {
+    const user = userEvent.setup();
+    const source = '<UXML><FancyChart name="chart" /></UXML>';
+    const session = DocumentSession.open(
+      new Map([['Assets/UI/Main.uxml', source]]),
+      'Assets/UI/Main.uxml',
+      new UxmlPreviewAdapter(),
+    );
+    const store = new EditorStore({ session, viewport: { width: 1024, height: 768 } });
+    render(<Workbench store={store} />);
+    const chart = session.document.root.children[0];
+    act(() => store.dispatch({
+      type: 'diagnostics/set',
+      diagnostics: [{
+        origin: 'parse',
+        severity: 'warning',
+        kind: 'unsupported-control',
+        message: 'Unsupported FancyChart',
+        nodeId: chart.id,
+        source: chart.source,
+      }],
+    }));
+
+    const bottom = screen.getByTestId('bottom-pane');
+    expect(screen.getByRole('tab', { name: 'Diagnostics' })).toHaveAttribute('aria-selected', 'true');
+    expect(bottom.querySelectorAll('.workspace-pane')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: /unsupported FancyChart/i }));
+
+    expect(screen.getByRole('tab', { name: 'Source' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('textbox', { name: 'Assets/UI/Main.uxml source' })).toBeVisible();
+    expect(store.getSnapshot().selection).toHaveLength(1);
+    expect(screen.getAllByTestId('bottom-pane')).toHaveLength(1);
+  });
+
+  it('provides keyboard navigation between retained desktop bottom views', () => {
+    const store = new EditorStore({ session: openSession(), viewport: { width: 1024, height: 768 } });
+    render(<Workbench store={store} />);
+    const diagnostics = screen.getByRole('tab', { name: 'Diagnostics' });
+    const source = screen.getByRole('tab', { name: 'Source' });
+
+    diagnostics.focus();
+    fireEvent.keyDown(diagnostics, { key: 'ArrowRight' });
+    expect(source).toHaveFocus();
+    expect(source).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(source, { key: 'Home' });
+    expect(diagnostics).toHaveFocus();
+    expect(diagnostics).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('keeps malformed CodeMirror drafts out of session history, marks preview stale, and recovers on correction', async () => {
+    const user = userEvent.setup();
+    const session = openSession();
+    const original = session.snapshot().files.get(session.entryPath)!.text;
+    const store = new EditorStore({ session, viewport: { width: 1024, height: 768 } });
+    render(<Workbench store={store} />);
+    await user.click(screen.getByRole('tab', { name: 'Source' }));
+    const editor = screen.getByRole('textbox', { name: `${session.entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+
+    act(() => view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: '<UXML><Button' },
+    }));
+
+    expect(await screen.findByText('Stale preview', {}, { timeout: 1500 })).toBeVisible();
+    expect(screen.getByTestId('canvas-field')).toHaveAttribute('data-source-status', 'stale');
+    expect(screen.getByRole('button', { name: 'Paste' })).toBeDisabled();
+    expect(session.snapshot().files.get(session.entryPath)?.text).toBe(original);
+    expect(session.history.undoDepth).toBe(0);
+
+    act(() => view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: original.replace('Button', 'Label') },
+    }));
+
+    expect(await screen.findByText('Ready', {}, { timeout: 1500 })).toBeVisible();
+    expect(screen.getByTestId('canvas-field')).toHaveAttribute('data-source-status', 'ready');
+    expect(session.snapshot().files.get(session.entryPath)?.text).toContain('Label');
+    expect(session.history.undoDepth).toBe(1);
+  });
+
+  it('disposes a pending source edit when the authoritative session is replaced', async () => {
+    const user = userEvent.setup();
+    const first = openSession();
+    const firstOriginal = first.snapshot().files.get(first.entryPath)!.text;
+    const second = DocumentSession.open(
+      new Map([[first.entryPath, '<UXML><Label /></UXML>']]),
+      first.entryPath,
+      new UxmlPreviewAdapter(),
+    );
+    const store = new EditorStore({ session: first, viewport: { width: 1024, height: 768 } });
+    render(<Workbench store={store} />);
+    await user.click(screen.getByRole('tab', { name: 'Source' }));
+    const editor = screen.getByRole('textbox', { name: `${first.entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    act(() => view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: '<UXML><Button text="pending" /></UXML>' },
+    }));
+
+    act(() => store.dispatch({ type: 'context/set', session: second, host: null }));
+    await new Promise((resolve) => setTimeout(resolve, 320));
+
+    expect(first.snapshot().files.get(first.entryPath)?.text).toBe(firstOriginal);
+    expect(first.history.undoDepth).toBe(0);
+    expect(screen.getByRole('textbox', { name: `${second.entryPath} source` })).toHaveTextContent('Label');
   });
 });
 
@@ -474,6 +580,7 @@ describe('compact 720px layout', () => {
 
     expect(workbench).toHaveAttribute('data-layout-mode', 'desktop');
     expect(screen.queryByRole('tablist', { name: 'Tool panes' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tablist', { name: 'Bottom views' })).toBeVisible();
     expect(screen.getByTestId('left-pane')).toBeVisible();
     expect(screen.getByTestId('canvas-pane')).toBeVisible();
     expect(screen.getByTestId('right-pane')).toBeVisible();
@@ -493,6 +600,7 @@ describe('compact 720px layout', () => {
     expect(screen.getByTestId('left-pane')).toBeVisible();
     expect(screen.getByTestId('right-pane')).not.toBeVisible();
     expect(screen.getByTestId('bottom-pane')).not.toBeVisible();
+    expect(screen.getByTestId('source-pane')).not.toBeVisible();
     expect(screen.getByTestId('right-pane').style.display).toBe('none');
     expect(screen.getByTestId('bottom-pane').style.display).toBe('none');
     expect(screen.queryByRole('separator')).not.toBeInTheDocument();
@@ -504,6 +612,7 @@ describe('compact 720px layout', () => {
     const hierarchy = screen.getByRole('tab', { name: 'Hierarchy' });
     const inspector = screen.getByRole('tab', { name: 'Inspector' });
     const diagnostics = screen.getByRole('tab', { name: 'Diagnostics' });
+    const source = screen.getByRole('tab', { name: 'Source' });
 
     expect(hierarchy).toHaveAttribute('aria-selected', 'true');
     expect(hierarchy).toHaveAttribute('aria-controls', 'compact-hierarchy-panel');
@@ -518,8 +627,10 @@ describe('compact 720px layout', () => {
     expect(screen.getByTestId('right-pane')).toBeVisible();
 
     fireEvent.keyDown(inspector, { key: 'End' });
+    expect(source).toHaveFocus();
+    expect(source).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(source, { key: 'ArrowLeft' });
     expect(diagnostics).toHaveFocus();
-    expect(diagnostics).toHaveAttribute('aria-selected', 'true');
     fireEvent.keyDown(diagnostics, { key: 'Home' });
     expect(hierarchy).toHaveFocus();
   });
@@ -531,7 +642,8 @@ describe('compact 720px layout', () => {
     expect(tools).toContainElement(screen.getByTestId('left-pane'));
     expect(tools).toContainElement(screen.getByTestId('right-pane'));
     expect(tools).toContainElement(screen.getByTestId('bottom-pane'));
-    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(3);
+    expect(tools).toContainElement(screen.getByTestId('source-pane'));
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(4);
   });
 
   it('transitions between compact and desktop regions from observable viewport state', () => {
@@ -542,6 +654,7 @@ describe('compact 720px layout', () => {
     act(() => store.dispatch({ type: 'viewport/set', width: 1024, height: 768 }));
 
     expect(screen.queryByRole('tablist', { name: 'Tool panes' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tablist', { name: 'Bottom views' })).toBeVisible();
     expect(screen.getByTestId('left-pane')).toBeVisible();
     expect(screen.getByTestId('right-pane')).toBeVisible();
     expect(screen.getByTestId('bottom-pane')).toBeVisible();

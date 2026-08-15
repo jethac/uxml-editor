@@ -177,6 +177,10 @@
   grid-area: bottom;
 }
 
+.workspace-pane--source {
+  background: #f7f8f6;
+}
+
 .workspace-pane--canvas {
   grid-area: canvas;
   background: var(--color-canvas-field);
@@ -582,29 +586,296 @@
   box-shadow: 0 1px 4px rgb(31 35 33 / 24%);
 }
 
-.diagnostic-list {
+.workspace-pane--bottom .workspace-pane-body,
+.workspace-pane--source .workspace-pane-body {
+  overflow: hidden;
+}
+
+.bottom-tabs {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  border-bottom: 1px solid var(--color-tool-border);
+  background: var(--color-tool-pane-raised);
+}
+
+.bottom-tabs button {
+  min-width: 92px;
+  height: 29px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--color-tool-border);
+  color: var(--color-muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 680;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.bottom-tabs button[aria-selected='true'] {
+  color: var(--color-primary-strong);
+  background: #ffffff;
+  box-shadow: inset 0 -2px 0 var(--color-primary);
+}
+
+.bottom-tabs button:focus-visible,
+.source-tool-button:focus-visible,
+.diagnostic-row:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.bottom-views,
+.bottom-view,
+.source-panel,
+.diagnostics-panel {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.bottom-view {
+  overflow: hidden;
+}
+
+.source-panel,
+.diagnostics-panel {
   display: grid;
-  gap: 0;
+  grid-template-rows: 32px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.source-toolbar,
+.diagnostics-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 3px 5px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--color-tool-border);
+  background: #eef0ed;
+}
+
+.source-file-control {
+  flex: 1 1 260px;
+  min-width: 90px;
+}
+
+.source-file-control select,
+.diagnostics-toolbar select,
+.diagnostics-search input {
+  width: 100%;
+  min-width: 0;
+  height: 25px;
+  border: 1px solid #adb4af;
+  border-radius: var(--radius-control);
+  color: var(--color-text);
+  background: #ffffff;
+}
+
+.source-file-control select,
+.diagnostics-toolbar select {
+  padding: 0 22px 0 6px;
+}
+
+.source-tool-button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 25px;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border: 1px solid #adb4af;
+  border-radius: var(--radius-control);
+  color: #343a36;
+  background: #fafbf9;
+  cursor: pointer;
+}
+
+.source-tool-button:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  background: #e7eee9;
+}
+
+.source-tool-button:disabled {
+  color: #8d9490;
+  cursor: default;
+}
+
+.source-status {
+  flex: 0 0 auto;
+  min-width: 76px;
+  padding: 0 5px;
+  overflow: hidden;
+  color: var(--color-primary-strong);
+  font-size: 10px;
+  font-weight: 680;
+  text-align: right;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.source-status--stale {
+  color: #8a3b32;
+}
+
+.source-editor {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.source-editor .cm-editor {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  color: #202522;
+  background: #ffffff;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.source-editor .cm-editor.cm-focused {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.source-editor .cm-scroller {
+  min-width: 0;
+  overflow: auto;
+  line-height: 1.45;
+}
+
+.source-editor .cm-content {
+  min-width: 0;
+  padding: 5px 0 12px;
+}
+
+.source-editor .cm-gutters {
+  border-right: 1px solid #d4d9d5;
+  color: #78807b;
+  background: #f3f5f2;
+}
+
+.source-editor .cm-activeLine,
+.source-editor .cm-activeLineGutter {
+  background: #edf4ee;
+}
+
+.source-editor .cm-search {
+  padding: 3px 5px;
+  border-bottom: 1px solid var(--color-tool-border);
+  background: #f4f6f3;
+}
+
+.diagnostics-toolbar {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(100px, 220px) 34px;
+}
+
+.diagnostics-search {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.diagnostics-search svg {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  color: var(--color-muted);
+  pointer-events: none;
+}
+
+.diagnostics-search input {
+  padding: 0 6px 0 23px;
+}
+
+.diagnostics-toolbar output {
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.diagnostics-results {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.diagnostic-group h3 {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  height: 23px;
+  margin: 0;
+  padding: 4px 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--color-tool-border);
+  color: #555d58;
+  background: #e7eae7;
+  font-size: 10px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostic-group ul {
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.diagnostic-list li {
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  min-height: 28px;
-  padding: 4px 10px;
-  border-bottom: 1px solid var(--color-tool-border);
+.diagnostic-group li {
+  min-width: 0;
 }
 
-.diagnostic-marker {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-diagnostic);
+.diagnostic-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  min-height: 27px;
+  padding: 3px 8px;
+  overflow: hidden;
+  border: 0;
+  border-bottom: 1px solid #d9ddda;
+  color: var(--color-text);
+  background: #f8f9f7;
+  text-align: left;
+  cursor: pointer;
+}
+
+.diagnostic-row:hover {
+  background: #fff4f1;
+}
+
+.diagnostic-row svg {
+  color: var(--color-diagnostic);
+}
+
+.diagnostic-message,
+.diagnostic-location {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostic-location {
+  color: var(--color-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .pane-resizer {

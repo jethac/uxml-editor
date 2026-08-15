@@ -45,6 +45,7 @@ import {
 } from '../../core/store/EditorStoreContracts';
 import { activeStateEntryFor, resolveActiveStateLocator } from '../../core/store/ActiveStateLocator';
 import type { DocumentSession } from '../../core/documents/DocumentSession';
+import type { SourceEditCoordinator, SourceEditSnapshot } from '../../core/documents/SourceEditCoordinator';
 import type { ClipboardPort } from '../../core/commands/ClipboardService';
 import {
   layoutCommands,
@@ -61,6 +62,7 @@ import { ViewportModel } from './ViewportModel';
 
 export interface PreviewCanvasProps {
   readonly store: EditorStore;
+  readonly coordinator?: SourceEditCoordinator | null;
   readonly resolveAsset?: (path: string, form: 'url' | 'resource') => string | null;
   readonly measureText?: MeasurePreviewText;
   readonly clipboardPort?: ClipboardPort;
@@ -76,11 +78,18 @@ const PRESETS = Object.freeze({
 
 export function PreviewCanvas({
   store,
+  coordinator = null,
   resolveAsset = defaultResolveAsset,
   measureText = defaultMeasureText,
   clipboardPort,
 }: PreviewCanvasProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  const sourceSnapshot = useSyncExternalStore(
+    coordinator?.subscribe ?? nullSourceSubscribe,
+    coordinator?.getSnapshot ?? nullSourceSnapshot,
+    coordinator?.getSnapshot ?? nullSourceSnapshot,
+  );
+  const sourceStale = sourceSnapshot?.status === 'stale';
   const session = snapshot.session;
   const sessionDocument = session?.document ?? null;
   const rendererRef = useRef<HTMLDivElement>(null);
@@ -218,6 +227,7 @@ export function PreviewCanvas({
   };
 
   const selectRenderedElement = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (sourceStale) return;
     if (event.detail !== 0) return;
     if (session === null) return;
     const nodeId = nodeForTarget(event.target);
@@ -268,6 +278,7 @@ export function PreviewCanvas({
       event.preventDefault();
       return;
     }
+    if (sourceStale) return;
     if (event.button !== 0 || session === null || frameRef.current === null) return;
     const nodeId = nodeForTarget(event.target);
     const node = nodeId === null ? null : elementById(session.document.root, nodeId);
@@ -322,6 +333,7 @@ export function PreviewCanvas({
   };
 
   const beginResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (sourceStale) return;
     const node = selectedNodes.length === 1 ? selectedNodes[0] : null;
     if (session === null || node === null || frameRef.current === null || fieldRef.current === null) return;
     const controller = new ManipulationController(session, frameRef.current, { onCommit: syncAfterMutation });
@@ -339,7 +351,7 @@ export function PreviewCanvas({
 
   const handleNudge = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const direction = arrowDelta(event.key);
-    if (direction === null || session === null || selectedNodes.length === 0) return;
+    if (sourceStale || direction === null || session === null || selectedNodes.length === 0) return;
     event.preventDefault();
     const amount = event.shiftKey ? 10 : 1;
     executeLayout(layoutCommands.nudge(session, selectedNodes, {
@@ -399,27 +411,27 @@ export function PreviewCanvas({
           <Scan aria-hidden="true" /><span>100%</span>
         </button>
         <div className="canvas-command-group" role="group" aria-label="Alignment commands">
-          <CommandButton label="Align left" disabled={selectedNodes.length < 2} onClick={() => alignSelection('left')}><AlignHorizontalJustifyStart /></CommandButton>
-          <CommandButton label="Align horizontal centers" disabled={selectedNodes.length < 2} onClick={() => alignSelection('horizontal-center')}><AlignHorizontalJustifyCenter /></CommandButton>
-          <CommandButton label="Align right" disabled={selectedNodes.length < 2} onClick={() => alignSelection('right')}><AlignHorizontalJustifyEnd /></CommandButton>
-          <CommandButton label="Align top" disabled={selectedNodes.length < 2} onClick={() => alignSelection('top')}><AlignVerticalJustifyStart /></CommandButton>
-          <CommandButton label="Align vertical centers" disabled={selectedNodes.length < 2} onClick={() => alignSelection('vertical-center')}><AlignVerticalJustifyCenter /></CommandButton>
-          <CommandButton label="Align bottom" disabled={selectedNodes.length < 2} onClick={() => alignSelection('bottom')}><AlignVerticalJustifyEnd /></CommandButton>
-          <CommandButton label="Distribute horizontally" disabled={selectedNodes.length < 3} onClick={() => distributeSelection('horizontal')}><AlignHorizontalSpaceBetween /></CommandButton>
-          <CommandButton label="Distribute vertically" disabled={selectedNodes.length < 3} onClick={() => distributeSelection('vertical')}><AlignVerticalSpaceBetween /></CommandButton>
+          <CommandButton label="Align left" disabled={sourceStale || selectedNodes.length < 2} onClick={() => alignSelection('left')}><AlignHorizontalJustifyStart /></CommandButton>
+          <CommandButton label="Align horizontal centers" disabled={sourceStale || selectedNodes.length < 2} onClick={() => alignSelection('horizontal-center')}><AlignHorizontalJustifyCenter /></CommandButton>
+          <CommandButton label="Align right" disabled={sourceStale || selectedNodes.length < 2} onClick={() => alignSelection('right')}><AlignHorizontalJustifyEnd /></CommandButton>
+          <CommandButton label="Align top" disabled={sourceStale || selectedNodes.length < 2} onClick={() => alignSelection('top')}><AlignVerticalJustifyStart /></CommandButton>
+          <CommandButton label="Align vertical centers" disabled={sourceStale || selectedNodes.length < 2} onClick={() => alignSelection('vertical-center')}><AlignVerticalJustifyCenter /></CommandButton>
+          <CommandButton label="Align bottom" disabled={sourceStale || selectedNodes.length < 2} onClick={() => alignSelection('bottom')}><AlignVerticalJustifyEnd /></CommandButton>
+          <CommandButton label="Distribute horizontally" disabled={sourceStale || selectedNodes.length < 3} onClick={() => distributeSelection('horizontal')}><AlignHorizontalSpaceBetween /></CommandButton>
+          <CommandButton label="Distribute vertically" disabled={sourceStale || selectedNodes.length < 3} onClick={() => distributeSelection('vertical')}><AlignVerticalSpaceBetween /></CommandButton>
         </div>
         <div className="canvas-command-group" role="group" aria-label="Ordering and clipboard commands">
-          <CommandButton label="Bring to front" disabled={selectedNodes.length === 0} onClick={() => orderSelection('front')}><BringToFront /></CommandButton>
-          <CommandButton label="Send to back" disabled={selectedNodes.length === 0} onClick={() => orderSelection('back')}><SendToBack /></CommandButton>
+          <CommandButton label="Bring to front" disabled={sourceStale || selectedNodes.length === 0} onClick={() => orderSelection('front')}><BringToFront /></CommandButton>
+          <CommandButton label="Send to back" disabled={sourceStale || selectedNodes.length === 0} onClick={() => orderSelection('back')}><SendToBack /></CommandButton>
           <CommandButton label="Copy selection" disabled={selectedNodes.length === 0} onClick={() => { void clipboard.copy(); }}><Copy /></CommandButton>
-          <CommandButton label="Paste" disabled={session === null} onClick={() => { void clipboard.paste(); }}><ClipboardPaste /></CommandButton>
-          <CommandButton label="Duplicate selection" disabled={selectedNodes.length === 0} onClick={() => { void clipboard.duplicate(); }}><CopyPlus /></CommandButton>
+          <CommandButton label="Paste" disabled={sourceStale || session === null} onClick={() => { void clipboard.paste(); }}><ClipboardPaste /></CommandButton>
+          <CommandButton label="Duplicate selection" disabled={sourceStale || selectedNodes.length === 0} onClick={() => { void clipboard.duplicate(); }}><CopyPlus /></CommandButton>
         </div>
         <label className="canvas-check canvas-check--safe">
           <input type="checkbox" checked={showSafeArea} onChange={(event) => setShowSafeArea(event.target.checked)} />
           <span>Show safe area</span>
         </label>
-        <fieldset className="canvas-states" disabled={selectedSelector === null} aria-describedby={stateControlDescription === null ? undefined : 'canvas-state-description'}>
+        <fieldset className="canvas-states" disabled={sourceStale || selectedSelector === null} aria-describedby={stateControlDescription === null ? undefined : 'canvas-state-description'}>
           <legend>Element states</legend>
           {EDITOR_PSEUDO_STATES.map((state) => (
             <label key={state} className="canvas-check">
@@ -430,11 +442,14 @@ export function PreviewCanvas({
         </fieldset>
         {stateControlDescription !== null && <p id="canvas-state-description" role="status">{stateControlDescription}</p>}
         {interactionDiagnostic !== null && <p className="canvas-interaction-status" role="status">{interactionDiagnostic}</p>}
+        {sourceStale && <p className="canvas-stale-status" role="status">Stale preview</p>}
       </div>
       <div
         ref={fieldRef}
         className={`canvas-field${snapshot.activeTool === 'pan' ? ' canvas-field--pan' : ''}`}
         data-testid="canvas-field"
+        data-source-status={sourceStale ? 'stale' : 'ready'}
+        aria-disabled={sourceStale || undefined}
         tabIndex={0}
         onWheel={handleWheel}
         onKeyDown={handleNudge}
@@ -459,12 +474,14 @@ export function PreviewCanvas({
             {frame !== null && (
               <>
                 <CanvasOverlay frame={frame} panelSize={panelSize} hoveredNodeId={hoveredNodeId} selectedNodeId={selectedNodeId} selectedParentNodeId={selectedParentNodeId} showSafeArea={showSafeArea} />
-                <CanvasInteractionLayer
-                  panelSize={panelSize}
-                  selectedBox={selectedNodeId === null ? null : frame.boxes.get(selectedNodeId) ?? null}
-                  guides={snapGuides}
-                  onResizePointerDown={beginResize}
-                />
+                {!sourceStale && (
+                  <CanvasInteractionLayer
+                    panelSize={panelSize}
+                    selectedBox={selectedNodeId === null ? null : frame.boxes.get(selectedNodeId) ?? null}
+                    guides={snapGuides}
+                    onResizePointerDown={beginResize}
+                  />
+                )}
               </>
             )}
           </div>
@@ -533,6 +550,9 @@ export function PreviewCanvas({
     };
   }
 }
+
+const nullSourceSubscribe = () => () => undefined;
+const nullSourceSnapshot = (): SourceEditSnapshot | null => null;
 
 interface CommandButtonProps {
   readonly label: string;

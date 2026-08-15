@@ -11,7 +11,7 @@ import type {
 } from './EditorLayoutStorage';
 
 export type EditorTool = 'select' | 'pan';
-export type EditorPanel = 'hierarchy' | 'inspector' | 'diagnostics';
+export type EditorPanel = 'hierarchy' | 'inspector' | 'diagnostics' | 'source';
 export type PreviewState = 'edit' | 'preview';
 export const EDITOR_PSEUDO_STATES = Object.freeze([
   'hover', 'active', 'focus', 'disabled', 'checked', 'selected', 'inactive',
@@ -335,7 +335,7 @@ function isEditorTool(value: unknown): value is EditorTool {
 }
 
 function isEditorPanel(value: unknown): value is EditorPanel {
-  return value === 'hierarchy' || value === 'inspector' || value === 'diagnostics';
+  return value === 'hierarchy' || value === 'inspector' || value === 'diagnostics' || value === 'source';
 }
 
 function isPreviewState(value: unknown): value is PreviewState {

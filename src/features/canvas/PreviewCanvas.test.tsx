@@ -19,6 +19,11 @@ import {
   type ClipboardPort,
 } from '../../core/commands/ClipboardService';
 import { DocumentSession } from '../../core/documents/DocumentSession';
+import {
+  SourceEditCoordinator,
+  type SourceEditScheduledTask,
+  type SourceEditScheduler,
+} from '../../core/documents/SourceEditCoordinator';
 import { EditorStore } from '../../core/store/EditorStore';
 import { PreviewCanvas } from './PreviewCanvas';
 import { ViewportModel } from './ViewportModel';
@@ -105,6 +110,23 @@ describe('PreviewCanvas frame lifecycle and selection', () => {
     expect(session.selectedNodeIds).toEqual([target]);
     expect(store.getSnapshot().selection).toEqual([target]);
     expect(session.selection).toEqual([session.locatorFor(target)]);
+  });
+
+  it('does not select from the last-good rendered preview while the source draft is stale', async () => {
+    const adapter = new ControlledPreviewPort('stale selection', []);
+    const session = openSession(adapter);
+    const scheduler = new CapturingScheduler();
+    const coordinator = new SourceEditCoordinator(session, { scheduler });
+    adapter.parseDiagnostics = [diagnostic('malformed draft', 'parse')];
+    coordinator.replace(`${UXML} `);
+    scheduler.flush();
+    expect(coordinator.getSnapshot().status).toBe('stale');
+
+    render(<PreviewCanvas store={new EditorStore({ session })} coordinator={coordinator} />);
+    fireEvent.click(await screen.findByText('stale selection preview'));
+
+    expect(session.selectedNodeIds).toEqual([]);
+    coordinator.dispose();
   });
 });
 
@@ -621,6 +643,21 @@ describe('PreviewCanvas rendering and viewport controls', () => {
 
 function diagnostic(message: string, origin: EditorDiagnostic['origin']): EditorDiagnostic {
   return { origin, severity: 'warning', kind: 'malformed', message };
+}
+
+class CapturingScheduler implements SourceEditScheduler {
+  private callback: (() => void) | null = null;
+
+  schedule(_delayMs: number, callback: () => void): SourceEditScheduledTask {
+    this.callback = callback;
+    return Object.freeze({ cancel: () => { this.callback = null; } });
+  }
+
+  flush(): void {
+    const callback = this.callback;
+    this.callback = null;
+    callback?.();
+  }
 }
 
 function openSession(adapter: UxmlPreviewPort, document = UXML): DocumentSession {

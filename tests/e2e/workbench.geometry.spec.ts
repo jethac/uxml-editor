@@ -74,6 +74,7 @@ test('compact workbench has one physical tool panel below a nonzero canvas at 72
     page.getByTestId('left-pane'),
     page.getByTestId('right-pane'),
     page.getByTestId('bottom-pane'),
+    page.getByTestId('source-pane'),
   ];
   const visibility = await Promise.all(panels.map((panel) => panel.isVisible()));
   expect(visibility.filter(Boolean)).toHaveLength(1);
