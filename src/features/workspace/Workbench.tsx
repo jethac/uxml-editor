@@ -1,4 +1,4 @@
-import { useRef, useSyncExternalStore, type CSSProperties, type KeyboardEvent } from 'react';
+import { useRef, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type Ref } from 'react';
 import {
   PANE_LIMITS,
   WORKBENCH_COMMAND_BAR_HEIGHT,
@@ -27,19 +27,27 @@ const PANELS: readonly EditorPanel[] = Object.freeze(['hierarchy', 'inspector', 
 
 export function Workbench({ store }: WorkbenchProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  const desktopPanes = useRef<Record<EditorPanel, HTMLElement | null>>({
+    hierarchy: null,
+    inspector: null,
+    diagnostics: null,
+  });
   const desktopCanvasWidth = snapshot.viewport.width
     - snapshot.panes.left
     - snapshot.panes.right
     - (WORKBENCH_SEPARATOR_SIZE * 2);
   const compact = snapshot.viewport.width <= WORKBENCH_COMPACT_BREAKPOINT
     || desktopCanvasWidth < WORKBENCH_MIN_CANVAS_WIDTH;
-  const geometry = getWorkbenchGeometry(snapshot, compact);
   const style: WorkbenchStyle = {
     '--workbench-left-pane': `${snapshot.panes.left}px`,
     '--workbench-right-pane': `${snapshot.panes.right}px`,
     '--workbench-bottom-pane': `${snapshot.panes.bottom}px`,
     '--workbench-commandbar': `${WORKBENCH_COMMAND_BAR_HEIGHT}px`,
     '--workbench-separator': `${WORKBENCH_SEPARATOR_SIZE}px`,
+  };
+  const activatePanel = (panel: EditorPanel) => {
+    store.dispatch({ type: 'panel/set', panel });
+    if (!compact) desktopPanes.current[panel]?.focus();
   };
 
   return (
@@ -50,10 +58,14 @@ export function Workbench({ store }: WorkbenchProps) {
       aria-label="UXML Editor"
       data-layout-mode={compact ? 'compact' : 'desktop'}
     >
-      <CommandBar store={store} snapshot={snapshot} />
+      <CommandBar store={store} snapshot={snapshot} onPanelActivate={activatePanel} />
       {compact
-        ? <CompactWorkspace store={store} snapshot={snapshot} geometry={geometry} />
-        : <DesktopWorkspace store={store} snapshot={snapshot} geometry={geometry} />}
+        ? <CompactWorkspace store={store} snapshot={snapshot} />
+        : <DesktopWorkspace
+            store={store}
+            snapshot={snapshot}
+            setPaneRef={(panel, element) => { desktopPanes.current[panel] = element; }}
+          />}
     </div>
   );
 }
@@ -61,13 +73,21 @@ export function Workbench({ store }: WorkbenchProps) {
 interface WorkspaceProps {
   readonly store: EditorStore;
   readonly snapshot: EditorSnapshot;
-  readonly geometry: WorkbenchGeometry;
 }
 
-function DesktopWorkspace({ store, snapshot, geometry }: WorkspaceProps) {
+interface DesktopWorkspaceProps extends WorkspaceProps {
+  readonly setPaneRef: (panel: EditorPanel, element: HTMLElement | null) => void;
+}
+
+function DesktopWorkspace({ store, snapshot, setPaneRef }: DesktopWorkspaceProps) {
   return (
     <>
-      <ToolPane kind="hierarchy" snapshot={snapshot} compact={false} geometry={geometry.left} />
+      <ToolPane
+        kind="hierarchy"
+        snapshot={snapshot}
+        compact={false}
+        paneRef={(element) => setPaneRef('hierarchy', element)}
+      />
       <PaneResizer
         testId="left-resizer"
         label="Resize hierarchy pane"
@@ -78,7 +98,7 @@ function DesktopWorkspace({ store, snapshot, geometry }: WorkspaceProps) {
         movementSign={1}
         onResize={(size, persist) => store.dispatch({ type: 'panes/resize', pane: 'left', size, persist })}
       />
-      <CanvasPane geometry={geometry.canvas} />
+      <CanvasPane />
       <PaneResizer
         testId="right-resizer"
         label="Resize inspector pane"
@@ -99,13 +119,23 @@ function DesktopWorkspace({ store, snapshot, geometry }: WorkspaceProps) {
         movementSign={-1}
         onResize={(size, persist) => store.dispatch({ type: 'panes/resize', pane: 'bottom', size, persist })}
       />
-      <ToolPane kind="inspector" snapshot={snapshot} compact={false} geometry={geometry.right} />
-      <ToolPane kind="diagnostics" snapshot={snapshot} compact={false} geometry={geometry.bottom} />
+      <ToolPane
+        kind="inspector"
+        snapshot={snapshot}
+        compact={false}
+        paneRef={(element) => setPaneRef('inspector', element)}
+      />
+      <ToolPane
+        kind="diagnostics"
+        snapshot={snapshot}
+        compact={false}
+        paneRef={(element) => setPaneRef('diagnostics', element)}
+      />
     </>
   );
 }
 
-function CompactWorkspace({ store, snapshot, geometry }: WorkspaceProps) {
+function CompactWorkspace({ store, snapshot }: WorkspaceProps) {
   const tabs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeIndex = PANELS.indexOf(snapshot.activePanel);
   const activate = (index: number, moveFocus: boolean) => {
@@ -124,13 +154,8 @@ function CompactWorkspace({ store, snapshot, geometry }: WorkspaceProps) {
 
   return (
     <>
-      <CanvasPane geometry={geometry.canvas} />
-      <div
-        className="compact-tools"
-        data-testid="compact-tools"
-        data-layout-top={geometry.tools.top}
-        data-layout-height={geometry.tools.height}
-      >
+      <CanvasPane />
+      <div className="compact-tools" data-testid="compact-tools">
         <div className="compact-tabs" role="tablist" aria-label="Tool panes">
           {PANELS.map((panel, index) => (
             <button
@@ -156,7 +181,6 @@ function CompactWorkspace({ store, snapshot, geometry }: WorkspaceProps) {
             snapshot={snapshot}
             compact
             hidden={snapshot.activePanel !== panel}
-            geometry={geometry.tools}
           />
         ))}
       </div>
@@ -169,22 +193,25 @@ interface ToolPaneProps {
   readonly snapshot: EditorSnapshot;
   readonly compact: boolean;
   readonly hidden?: boolean;
-  readonly geometry: RegionGeometry;
+  readonly paneRef?: Ref<HTMLElement>;
 }
 
-function ToolPane({ kind, snapshot, compact, hidden = false, geometry }: ToolPaneProps) {
+function ToolPane({ kind, snapshot, compact, hidden = false, paneRef }: ToolPaneProps) {
   const headingId = `${compact ? 'compact-' : ''}${kind}-heading`;
   const panelId = compact ? `compact-${kind}-panel` : undefined;
   const labelId = compact ? `compact-${kind}-tab` : headingId;
+  const active = !compact && snapshot.activePanel === kind;
   return (
     <section
+      ref={paneRef}
       id={panelId}
       className={`workspace-pane workspace-pane--${kind}`}
       data-testid={paneTestId(kind)}
-      data-layout-top={geometry.top}
-      data-layout-height={geometry.height}
+      data-active={active ? 'true' : undefined}
       role={compact ? 'tabpanel' : 'region'}
       aria-labelledby={labelId}
+      aria-current={active ? 'true' : undefined}
+      tabIndex={compact ? undefined : -1}
       hidden={hidden}
       style={hidden ? { display: 'none' } : undefined}
     >
@@ -209,14 +236,11 @@ function ToolPane({ kind, snapshot, compact, hidden = false, geometry }: ToolPan
   );
 }
 
-function CanvasPane({ geometry }: { readonly geometry: RegionGeometry }) {
+function CanvasPane() {
   return (
     <section
       className="workspace-pane workspace-pane--canvas"
       data-testid="canvas-pane"
-      data-layout-top={geometry.top}
-      data-layout-height={geometry.height}
-      data-layout-width={geometry.width}
       aria-labelledby="canvas-heading"
     >
       <h2 id="canvas-heading">Canvas</h2>
@@ -225,47 +249,6 @@ function CanvasPane({ geometry }: { readonly geometry: RegionGeometry }) {
       </div>
     </section>
   );
-}
-
-interface RegionGeometry {
-  readonly top: number;
-  readonly height: number;
-  readonly width: number;
-}
-
-interface WorkbenchGeometry {
-  readonly left: RegionGeometry;
-  readonly canvas: RegionGeometry;
-  readonly right: RegionGeometry;
-  readonly bottom: RegionGeometry;
-  readonly tools: RegionGeometry;
-}
-
-function getWorkbenchGeometry(snapshot: EditorSnapshot, compact: boolean): WorkbenchGeometry {
-  const { width, height } = snapshot.viewport;
-  if (compact) {
-    const canvasHeight = Math.max(0, height - WORKBENCH_COMMAND_BAR_HEIGHT - snapshot.panes.bottom);
-    return Object.freeze({
-      left: region(WORKBENCH_COMMAND_BAR_HEIGHT + canvasHeight, snapshot.panes.bottom, width),
-      canvas: region(WORKBENCH_COMMAND_BAR_HEIGHT, canvasHeight, width),
-      right: region(WORKBENCH_COMMAND_BAR_HEIGHT + canvasHeight, snapshot.panes.bottom, width),
-      bottom: region(WORKBENCH_COMMAND_BAR_HEIGHT + canvasHeight, snapshot.panes.bottom, width),
-      tools: region(WORKBENCH_COMMAND_BAR_HEIGHT + canvasHeight, snapshot.panes.bottom, width),
-    });
-  }
-  const canvasWidth = Math.max(0, width - snapshot.panes.left - snapshot.panes.right - (WORKBENCH_SEPARATOR_SIZE * 2));
-  const canvasHeight = Math.max(0, height - WORKBENCH_COMMAND_BAR_HEIGHT - snapshot.panes.bottom - WORKBENCH_SEPARATOR_SIZE);
-  return Object.freeze({
-    left: region(WORKBENCH_COMMAND_BAR_HEIGHT, canvasHeight, snapshot.panes.left),
-    canvas: region(WORKBENCH_COMMAND_BAR_HEIGHT, canvasHeight, canvasWidth),
-    right: region(WORKBENCH_COMMAND_BAR_HEIGHT, canvasHeight, snapshot.panes.right),
-    bottom: region(height - snapshot.panes.bottom, snapshot.panes.bottom, width),
-    tools: region(height - snapshot.panes.bottom, snapshot.panes.bottom, width),
-  });
-}
-
-function region(top: number, height: number, width: number): RegionGeometry {
-  return Object.freeze({ top, height, width });
 }
 
 function paneTestId(panel: EditorPanel): string {

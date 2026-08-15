@@ -199,6 +199,16 @@
   white-space: nowrap;
 }
 
+.workspace-pane[data-active='true'] > h2 {
+  color: var(--color-primary-strong);
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
+.workspace-pane:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
 .workspace-pane-body {
   min-width: 0;
   min-height: 0;

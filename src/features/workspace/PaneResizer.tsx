@@ -35,17 +35,24 @@ export function PaneResizer({
   const removePointerListeners = useRef<(() => void) | null>(null);
 
   useEffect(() => () => {
+    const drag = activeDrag.current;
     removePointerListeners.current?.();
     removePointerListeners.current = null;
     activeDrag.current = null;
+    if (drag !== null) releasePointerCapture(drag);
   }, []);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || !event.isPrimary || activeDrag.current !== null) return;
     event.preventDefault();
     const element = event.currentTarget;
     const pointerId = event.pointerId;
     const coordinate = orientation === 'vertical' ? event.clientX : event.clientY;
+    try {
+      element.setPointerCapture?.(pointerId);
+    } catch {
+      return;
+    }
     activeDrag.current = {
       pointerId,
       element,
@@ -53,7 +60,6 @@ export function PaneResizer({
       startValue: value,
       value,
     };
-    element.setPointerCapture?.(pointerId);
 
     const handlePointerMove = (pointerEvent: PointerEvent) => {
       const drag = activeDrag.current;
@@ -68,8 +74,13 @@ export function PaneResizer({
       removePointerListeners.current?.();
       removePointerListeners.current = null;
       activeDrag.current = null;
-      drag.element.releasePointerCapture?.(drag.pointerId);
-      onResize(drag.value, true);
+      try {
+        drag.element.releasePointerCapture?.(drag.pointerId);
+      } catch {
+        // Capture can already be lost if the browser ends the pointer first.
+      } finally {
+        onResize(drag.value, true);
+      }
     };
     const cleanup = () => {
       window.removeEventListener('pointermove', handlePointerMove);
@@ -123,4 +134,12 @@ export function PaneResizer({
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function releasePointerCapture(drag: ActiveDrag): void {
+  try {
+    drag.element.releasePointerCapture?.(drag.pointerId);
+  } catch {
+    // Unmount must remain cleanup-only even if browser capture state changed.
+  }
 }

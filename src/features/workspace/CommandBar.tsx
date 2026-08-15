@@ -13,12 +13,12 @@ import {
   ZoomOut,
   type LucideIcon,
 } from 'lucide-react';
-import type { EditorSnapshot, EditorStore } from '../../core/store/EditorStore';
-import { WORKBENCH_COMMAND_BAR_HEIGHT } from '../../core/store/EditorLayoutStorage';
+import type { EditorPanel, EditorSnapshot, EditorStore } from '../../core/store/EditorStore';
 
 export interface CommandBarProps {
   readonly store: EditorStore;
   readonly snapshot: EditorSnapshot;
+  readonly onPanelActivate: (panel: EditorPanel) => void;
 }
 
 interface IconButtonProps {
@@ -29,14 +29,12 @@ interface IconButtonProps {
   readonly onClick: () => void;
 }
 
-export function CommandBar({ store, snapshot }: CommandBarProps) {
+export function CommandBar({ store, snapshot, onPanelActivate }: CommandBarProps) {
   const projectStatus = snapshot.session?.entryPath ?? 'No project open';
   return (
     <header
       className="commandbar"
       data-testid="commandbar"
-      data-layout-top="0"
-      data-layout-height={WORKBENCH_COMMAND_BAR_HEIGHT}
     >
       <div className="commandbar-brand" aria-label="Project status">
         <strong>UXML Editor</strong>
@@ -115,19 +113,19 @@ export function CommandBar({ store, snapshot }: CommandBarProps) {
             label="Show hierarchy"
             icon={PanelLeft}
             pressed={snapshot.activePanel === 'hierarchy'}
-            onClick={() => store.dispatch({ type: 'panel/set', panel: 'hierarchy' })}
+            onClick={() => onPanelActivate('hierarchy')}
           />
           <IconButton
             label="Show inspector"
             icon={PanelRight}
             pressed={snapshot.activePanel === 'inspector'}
-            onClick={() => store.dispatch({ type: 'panel/set', panel: 'inspector' })}
+            onClick={() => onPanelActivate('inspector')}
           />
           <IconButton
             label="Show diagnostics"
             icon={PanelBottom}
             pressed={snapshot.activePanel === 'diagnostics'}
-            onClick={() => store.dispatch({ type: 'panel/set', panel: 'diagnostics' })}
+            onClick={() => onPanelActivate('diagnostics')}
           />
         </div>
       </div>

@@ -1,7 +1,10 @@
+import { StrictMode } from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { EDITOR_LAYOUT_STORAGE_KEY } from '../core/store/EditorLayoutStorage';
 import { EditorStore } from '../core/store/EditorStore';
+import { createBrowserEditorStore } from './createBrowserEditorStore';
 import { App } from './App';
 
 describe('application workbench', () => {
@@ -30,5 +33,38 @@ describe('application workbench', () => {
     render(<App store={store} />);
 
     expect(screen.getByText('150%')).toBeVisible();
+  });
+
+  it('restores one browser store before StrictMode renders App', () => {
+    const getItem = vi.fn(() => JSON.stringify({
+      version: 1,
+      panes: { left: 300, right: 320, bottom: 200 },
+    }));
+    const storage: Storage = {
+      length: 1,
+      clear: vi.fn(),
+      getItem,
+      key: vi.fn(() => EDITOR_LAYOUT_STORAGE_KEY),
+      removeItem: vi.fn(),
+      setItem: vi.fn(),
+    };
+    const descriptor = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+
+    try {
+      const store = createBrowserEditorStore();
+      render(
+        <StrictMode>
+          <App store={store} />
+        </StrictMode>,
+      );
+
+      expect(store.getSnapshot().panes).toEqual({ left: 300, right: 320, bottom: 200 });
+      expect(getItem).toHaveBeenCalledOnce();
+      expect(getItem).toHaveBeenCalledWith(EDITOR_LAYOUT_STORAGE_KEY);
+    } finally {
+      if (descriptor === undefined) Reflect.deleteProperty(window, 'localStorage');
+      else Object.defineProperty(window, 'localStorage', descriptor);
+    }
   });
 });
