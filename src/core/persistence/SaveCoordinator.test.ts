@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { projectId, projectPath } from '../host/HostPort';
+import { HostError, projectId, projectPath } from '../host/HostPort';
 import { MemoryHost } from '../host/MemoryHost';
 import { SaveCoordinator } from './SaveCoordinator';
 import { RecoveryJournal } from './RecoveryJournal';
@@ -60,6 +60,45 @@ describe('SaveCoordinator', () => {
     expect(await host.readRecovery(root.id)).toBe('pending-recovery');
   });
 
+  it('refuses a dirty project write when durable recovery preparation is unavailable', async () => {
+    const original = '<UXML />';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.commit({
+      id: 'requires-recovery',
+      label: 'Edit main',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+
+    const outcome = await coordinator.save(session);
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      files: [{
+        path: 'Main.uxml',
+        status: 'failed',
+        error: {
+          code: 'recovery-unsupported',
+          message: 'Durable recovery preparation is required before project writes.',
+        },
+      }],
+      dirtyPaths: ['Main.uxml'],
+      recovery: 'failed',
+      recoveryRequired: true,
+      recoveryError: {
+        code: 'recovery-unsupported',
+        message: 'Durable recovery preparation is required before project writes.',
+      },
+    });
+    expect(await host.readText(path)).toEqual(initial);
+  });
+
   it('saves edited exact text with the recorded expected revision', async () => {
     const original = '<UXML>\r\n</UXML>\r\n';
     const edited = '<UXML><Button /></UXML>\n';
@@ -74,7 +113,7 @@ describe('SaveCoordinator', () => {
       label: 'Edit main',
       patchesByFile: new Map([['Main.uxml', [{ start: 0, end: original.length, replacement: edited }]]]),
     });
-    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
 
     const outcome = await coordinator.save(session);
 
@@ -83,7 +122,7 @@ describe('SaveCoordinator', () => {
       status: 'saved',
       files: [{ path: 'Main.uxml', status: 'saved', revision: disk.revision }],
       dirtyPaths: [],
-      recovery: 'not-requested',
+      recovery: 'cleared',
       recoveryRequired: false,
     });
     expect(disk.text).toBe(edited);
@@ -103,7 +142,7 @@ describe('SaveCoordinator', () => {
       label: 'Local edit',
       patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
     });
-    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
     await host.externalWrite(path, '<UXML><External /></UXML>');
 
     const outcome = await coordinator.save(session);
@@ -285,7 +324,7 @@ describe('SaveCoordinator', () => {
         label: 'Edit main',
         patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
       });
-      const coordinator = new SaveCoordinator(host, root, [initial]);
+      const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
       host.injectFailure({ operation: 'replace', phase, message: `${phase} failure` });
 
       const outcome = await coordinator.save(session);
@@ -501,7 +540,7 @@ describe('SaveCoordinator', () => {
       label: 'Saved edit',
       patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
     });
-    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
     await coordinator.save(session);
     await host.externalWrite(path, external);
 
@@ -715,6 +754,67 @@ describe('SaveCoordinator', () => {
     expect(coordinator.dirtyPaths(session)).toEqual([]);
   });
 
+  it('returns a deleted resolution when the file disappears before explicit reload', async () => {
+    const original = '<UXML />';
+    const local = '<UXML  />';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.commit({
+      id: 'reload-after-delete',
+      label: 'Local edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    await host.externalWrite(path, '<UXML><External /></UXML>');
+    await coordinator.processExternalChanges(session, ['Main.uxml']);
+    await host.externalDelete(path);
+
+    expect(await coordinator.resolveExternalChange(session, 'Main.uxml', 'reload')).toEqual({
+      path: 'Main.uxml',
+      decision: 'reload',
+      status: 'deleted',
+      external: 'deleted',
+      localDirty: true,
+    });
+    expect(session.snapshot().files.get('Main.uxml')?.text).toBe(local);
+    expect((await coordinator.resolveExternalChange(session, 'Main.uxml', 'reload')).status).toBe('deleted');
+  });
+
+  it('returns a failed resolution when explicit reload cannot read the file', async () => {
+    const original = '<UXML />';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.commit({
+      id: 'reload-after-read-failure',
+      label: 'Local edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const externalRevision = await host.externalWrite(path, '<UXML><External /></UXML>');
+    await coordinator.processExternalChanges(session, ['Main.uxml']);
+    host.readText = async () => { throw new HostError('read-failed', 'Project permission was lost.'); };
+
+    expect(await coordinator.resolveExternalChange(session, 'Main.uxml', 'reload')).toEqual({
+      path: 'Main.uxml',
+      decision: 'reload',
+      status: 'failed',
+      external: 'changed',
+      revision: externalRevision,
+      localDirty: true,
+      error: { code: 'read-failed', message: 'Project permission was lost.' },
+    });
+  });
+
   it('records an explicit dirty-conflict reload with coherent undo and redo semantics', async () => {
     const original = '<UXML />';
     const local = '<UXML  />';
@@ -759,7 +859,7 @@ describe('SaveCoordinator', () => {
       label: 'Local edit',
       patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
     });
-    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
     await host.externalWrite(path, external);
     await coordinator.processExternalChanges(session, ['Main.uxml']);
 
@@ -779,6 +879,80 @@ describe('SaveCoordinator', () => {
     expect(coordinator.dirtyPaths(session)).toEqual([]);
   });
 
+  it('refuses an external overwrite when durable recovery preparation is unavailable', async () => {
+    const original = '<UXML />';
+    const external = '<UXML><External /></UXML>';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.commit({
+      id: 'local-overwrite-without-recovery',
+      label: 'Local edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const externalRevision = await host.externalWrite(path, external);
+    await coordinator.processExternalChanges(session, ['Main.uxml']);
+
+    const outcome = await coordinator.resolveExternalChange(session, 'Main.uxml', 'overwrite');
+
+    expect(outcome).toEqual({
+      path: 'Main.uxml',
+      decision: 'overwrite',
+      status: 'failed',
+      external: 'changed',
+      revision: externalRevision,
+      localDirty: true,
+      error: {
+        code: 'recovery-unsupported',
+        message: 'Durable recovery preparation is required before project writes.',
+      },
+    });
+    expect((await host.readText(path)).text).toBe(external);
+  });
+
+  it('prepares exact recovery before an external overwrite replacement', async () => {
+    const original = '<UXML />';
+    const local = '<UXML  />';
+    const external = '<UXML><External /></UXML>';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.commit({
+      id: 'recoverable-overwrite',
+      label: 'Local edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const journal = new RecoveryJournal(host, root);
+    const coordinator = new SaveCoordinator(host, root, [initial], journal);
+    const externalRevision = await host.externalWrite(path, external);
+    await coordinator.processExternalChanges(session, ['Main.uxml']);
+    host.injectFailure({ operation: 'replace', phase: 'before', message: 'replacement failed' });
+
+    expect(await coordinator.resolveExternalChange(session, 'Main.uxml', 'overwrite')).toEqual({
+      path: 'Main.uxml',
+      decision: 'overwrite',
+      status: 'failed',
+      external: 'changed',
+      revision: externalRevision,
+      localDirty: true,
+      error: { code: 'replace-failed', message: 'replacement failed' },
+    });
+    expect((await host.readText(path)).text).toBe(external);
+
+    const restored = openTestSession(new Map([['Main.uxml', external]]));
+    expect(await journal.recover(restored)).toMatchObject({ status: 'recovered', recordCount: 1 });
+    expect(restored.snapshot().files.get('Main.uxml')?.text).toBe(local);
+  });
+
   it('does not publish a synchronized overwrite when local source changes in flight', async () => {
     const original = '<UXML />';
     const capturedLocal = '<UXML  />';
@@ -796,7 +970,7 @@ describe('SaveCoordinator', () => {
       label: 'First local edit',
       patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
     });
-    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const coordinator = new SaveCoordinator(host, root, [initial], new RecoveryJournal(host, root));
     await host.externalWrite(path, external);
     await coordinator.processExternalChanges(session, ['Main.uxml']);
     const replaceGate = deferred<void>();
@@ -862,6 +1036,40 @@ describe('SaveCoordinator', () => {
     await host.advanceTime(50);
     expect(deliveries).toHaveLength(1);
     expect(session.snapshot().files.get('Main.uxml')?.text).toBe(second);
+  });
+
+  it('does not mutate the session when disposal occurs during a debounced external read', async () => {
+    const original = '<UXML />';
+    const external = '<UXML><External /></UXML>';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const deliveries: unknown[] = [];
+    const watcher = await coordinator.watch(() => session, (outcomes) => { deliveries.push(outcomes); }, 10);
+    const readGate = deferred<void>();
+    const readStarted = deferred<void>();
+    const readText = host.readText.bind(host);
+    host.readText = async (candidate) => {
+      readStarted.resolve();
+      await readGate.promise;
+      return readText(candidate);
+    };
+
+    await host.externalWrite(path, external);
+    const advancing = host.advanceTime(10);
+    await readStarted.promise;
+    watcher.dispose();
+    readGate.resolve();
+    await advancing;
+
+    expect(deliveries).toEqual([]);
+    expect(session.snapshot().files.get('Main.uxml')?.text).toBe(original);
+    expect(coordinator.dirtyPaths(session)).toEqual([]);
   });
 
   it('ignores watched paths outside the exact open session, including prefix-confusable names', async () => {
@@ -1032,6 +1240,51 @@ describe('SaveCoordinator', () => {
     expect(Object.isFrozen(retried)).toBe(true);
     expect((await host.readText(initial.path)).revision).toBe(savedRevision);
     expect(await host.readRecovery(root.id)).toBeNull();
+  });
+
+  it('recreates recovery when local source changes during an explicit cleanup retry', async () => {
+    const original = '<UXML />';
+    const saved = '<UXML  />';
+    const latest = '<UXML   />';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    session.history.execute({
+      id: 'retry-cleanup-generation-1',
+      label: 'Saved edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const journal = new RecoveryJournal(host, root);
+    const coordinator = new SaveCoordinator(host, root, [initial], journal);
+    host.injectFailure({ operation: 'clearRecovery', phase: 'before' });
+    expect((await coordinator.save(session)).recovery).toBe('failed');
+    const cleanupGate = deferred<void>();
+    const cleanupStarted = deferred<void>();
+    const clearRecovery = host.clearRecovery.bind(host);
+    host.clearRecovery = async (id) => {
+      cleanupStarted.resolve();
+      await cleanupGate.promise;
+      return clearRecovery(id);
+    };
+
+    const retrying = coordinator.retryRecoveryCleanup(session);
+    await cleanupStarted.promise;
+    session.history.execute({
+      id: 'retry-cleanup-generation-2',
+      label: 'Edit during cleanup retry',
+      patchesByFile: new Map([['Main.uxml', [{ start: 7, end: 7, replacement: ' ' }]]]),
+    });
+    cleanupGate.resolve();
+
+    expect(await retrying).toEqual({ status: 'retained', recoveryRequired: true });
+    expect((await host.readText(path)).text).toBe(saved);
+    const restored = openTestSession(new Map([['Main.uxml', saved]]));
+    await journal.recover(restored);
+    expect(restored.snapshot().files.get('Main.uxml')?.text).toBe(latest);
   });
 
   it('recreates recovery before publishing when local source changes during cleanup', async () => {

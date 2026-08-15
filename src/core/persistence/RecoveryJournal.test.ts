@@ -42,6 +42,36 @@ describe('RecoveryJournal', () => {
     await expect(host.readText(projectPath(root, '.recovery/journal.json'))).rejects.toMatchObject({ code: 'not-found' });
   });
 
+  it('serializes concurrent committed appends without losing their invocation order', async () => {
+    const original = '<UXML />';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const journal = new RecoveryJournal(host, root);
+    const editing = openTestSession(new Map([['Main.uxml', original]]));
+    const first = editing.commit({
+      id: 'concurrent-1',
+      label: 'First edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const second = editing.commit({
+      id: 'concurrent-2',
+      label: 'Second edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 7, end: 7, replacement: ' ' }]]]),
+    });
+
+    await Promise.all([journal.appendCommitted(first), journal.appendCommitted(second)]);
+
+    const restored = openTestSession(new Map([['Main.uxml', original]]));
+    expect(await journal.recover(restored)).toEqual({
+      status: 'recovered',
+      recordCount: 2,
+      transactionIds: ['concurrent-1', 'concurrent-2'],
+    });
+    expect(restored.snapshot().files.get('Main.uxml')?.text).toBe('<UXML   />');
+  });
+
   it('journals edit, undo, and redo entries in order even when transaction ids repeat', async () => {
     const original = '<UXML />';
     const host = new MemoryHost({

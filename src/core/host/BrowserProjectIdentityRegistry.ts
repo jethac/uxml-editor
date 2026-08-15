@@ -8,6 +8,17 @@ export interface BrowserProjectIdentityStore {
 export interface BrowserIdentityScope {
   readonly indexedDB?: IDBFactory;
   readonly crypto?: Pick<Crypto, 'randomUUID'>;
+  readonly navigator?: {
+    readonly locks?: BrowserIdentityLockManager;
+  };
+}
+
+export interface BrowserIdentityLockManager {
+  request<T>(
+    name: string,
+    options: { readonly mode: 'exclusive' },
+    callback: () => Promise<T> | T,
+  ): Promise<T>;
 }
 
 interface StoredBrowserProjectIdentity {
@@ -17,22 +28,37 @@ interface StoredBrowserProjectIdentity {
 
 const IDENTITY_DB = 'uxml-editor-host-v1';
 const IDENTITY_STORE = 'project-identities';
+const IDENTITY_LOCK = 'uxml-editor:project-identity-registry:v1';
 
 export class IndexedDbBrowserProjectIdentityStore implements BrowserProjectIdentityStore {
   constructor(
     private readonly factory: IDBFactory,
     private readonly createId: () => string,
+    private readonly locks: BrowserIdentityLockManager,
   ) {}
 
   async identify(handle: BrowserDirectoryHandle): Promise<ProjectId> {
     if (typeof handle.isSameEntry !== 'function') {
       throw new HostError('identity-failed', 'The browser cannot compare persisted directory handles.');
     }
+    try {
+      return await this.locks.request(
+        IDENTITY_LOCK,
+        Object.freeze({ mode: 'exclusive' }),
+        () => this.identifyLocked(handle),
+      );
+    } catch (error) {
+      if (error instanceof HostError) throw error;
+      throw new HostError('identity-failed', 'The browser project identity registry failed.', error);
+    }
+  }
+
+  private async identifyLocked(handle: BrowserDirectoryHandle): Promise<ProjectId> {
     const database = await openIdentityDatabase(this.factory);
     try {
       const records = await readIdentityRecords(database);
       for (const record of records) {
-        if (await handle.isSameEntry(record.handle)) return projectId(record.id);
+        if (await handle.isSameEntry!(record.handle)) return projectId(record.id);
       }
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const id = projectId(`browser-root:v1:${this.createId()}`);
@@ -44,9 +70,6 @@ export class IndexedDbBrowserProjectIdentityStore implements BrowserProjectIdent
         }
       }
       throw new HostError('identity-failed', 'The browser could not allocate a unique project identity.');
-    } catch (error) {
-      if (error instanceof HostError) throw error;
-      throw new HostError('identity-failed', 'The browser project identity registry failed.', error);
     } finally {
       database.close();
     }
@@ -59,8 +82,10 @@ export function createDefaultBrowserProjectIdentityStore(
   try {
     const factory = scope.indexedDB;
     const randomUUID = scope.crypto?.randomUUID;
-    if (factory === undefined || typeof factory.open !== 'function' || typeof randomUUID !== 'function') return undefined;
-    return new IndexedDbBrowserProjectIdentityStore(factory, () => randomUUID.call(scope.crypto));
+    const locks = scope.navigator?.locks;
+    if (factory === undefined || typeof factory.open !== 'function' || typeof randomUUID !== 'function'
+      || locks === undefined || typeof locks.request !== 'function') return undefined;
+    return new IndexedDbBrowserProjectIdentityStore(factory, () => randomUUID.call(scope.crypto), locks);
   } catch {
     return undefined;
   }

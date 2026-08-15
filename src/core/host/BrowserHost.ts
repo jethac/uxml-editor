@@ -22,6 +22,7 @@ import {
 import { MemoryHost } from './MemoryHost';
 import {
   createDefaultBrowserProjectIdentityStore,
+  type BrowserIdentityScope,
   type BrowserProjectIdentityStore,
 } from './BrowserProjectIdentityRegistry';
 
@@ -34,6 +35,7 @@ export interface BrowserScope {
   readonly clearTimeout?: (handle: unknown) => void;
   readonly crypto?: Pick<Crypto, 'subtle' | 'randomUUID'>;
   readonly indexedDB?: IDBFactory;
+  readonly navigator?: BrowserIdentityScope['navigator'];
   readonly localStorage?: BrowserStorage;
   readonly confirm?: (message: string) => boolean;
   readonly alert?: (message: string) => void;
