@@ -68,9 +68,15 @@ function inspectorAuthorityMatches(snapshot: EditorSnapshot, token: InspectorCon
 
 function inspectorPostCommitAuthorityMatches(snapshot: EditorSnapshot, token: InspectorContextToken): boolean {
   if (snapshot.projectAssets !== token.projectAssets || snapshot.session === null) return false;
-  const locators = snapshot.session.selection;
-  return locators.length === token.locators.length
-    && locators.every((locator, index) => equalElementLocator(locator, token.locators[index]))
+  const sessionLocators = snapshot.session.selection;
+  if (
+    sessionLocators.length !== token.locators.length
+    || !sessionLocators.every((locator, index) => equalElementLocator(locator, token.locators[index]))
+  ) return false;
+  const resolvedNodeIds = snapshot.session.selectedNodeIds;
+  return resolvedNodeIds.length === token.locators.length
+    && snapshot.selection.length === resolvedNodeIds.length
+    && snapshot.selection.every((nodeId, index) => nodeId === resolvedNodeIds[index])
     && equalActiveStates(snapshot.activeStates, token.activeStates);
 }
 

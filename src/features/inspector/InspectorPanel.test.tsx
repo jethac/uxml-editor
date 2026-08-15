@@ -251,6 +251,36 @@ describe('InspectorPanel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('suppresses post-commit focus when session sync drains a queued selection change', async () => {
+    const user = userEvent.setup();
+    const rendered = renderInspector(['primary']);
+    const origin = screen.getByLabelText('Width');
+    await user.clear(origin);
+    await user.type(origin, '250px');
+    await pressEnter();
+    const secondary = nodeByName(rendered.session.document.root, 'secondary').id;
+    let queuedSelection = false;
+    const unsubscribe = rendered.store.subscribe(() => {
+      if (queuedSelection || rendered.store.getSnapshot().sessionGeneration !== rendered.session.generation) return;
+      queuedSelection = true;
+      rendered.store.dispatch({ type: 'selection/set', selection: [secondary] });
+    });
+
+    await user.click(await screen.findByRole('menuitem', { name: 'Inline style' }));
+    unsubscribe();
+    await act(async () => { await Promise.resolve(); });
+
+    expect(queuedSelection).toBe(true);
+    expect(rendered.store.getSnapshot().selection).toEqual([secondary]);
+    expect(rendered.session.selectedNodeIds).toEqual([nodeByName(rendered.session.document.root, 'primary').id]);
+    const replacementField = screen.getByLabelText('Width');
+    expect(replacementField).toBe(origin);
+    expect(replacementField).toHaveValue('220px');
+    expect(replacementField).not.toHaveFocus();
+    expect(rendered.session.snapshot().files.get(ENTRY_PATH)?.text).toContain('style="width: 250px;"');
+    expect(rendered.session.history.undoDepth).toBe(1);
+  });
+
   it('does not focus the same-id field after a stale replacement-session callback', async () => {
     const user = userEvent.setup();
     const rendered = renderInspector(['primary']);
