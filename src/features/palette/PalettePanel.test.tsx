@@ -41,6 +41,21 @@ describe('PalettePanel search and creation', () => {
     expect(session.history.canUndo).toBe(false);
   });
 
+  it('rejects a supported control when only an unrelated root namespace is in scope', async () => {
+    const user = userEvent.setup();
+    const source = '<custom:UXML xmlns:custom="urn:custom" />';
+    const { session, store } = openEditor(source);
+    render(<PaletteHarness store={store} />);
+
+    await user.click(screen.getByRole('button', { name: 'Add Button' }));
+
+    expect(session.snapshot().files.get(PATH)?.text).toBe(source);
+    expect(session.history.canUndo).toBe(false);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'no in-scope namespace is bound to UnityEngine.UIElements',
+    );
+  });
+
   it('preserves a valid generic qualified name and namespace binding', async () => {
     const user = userEvent.setup();
     const { session, store } = openEditor(EMPTY_SOURCE);

@@ -66,3 +66,31 @@ Base: `819aa988cb3953235b8a3b1038e8705e4a4d38ad`
 ## Concerns
 
 - No blocking concerns. The compact Workbench preserves its existing 180px tools geometry, so the hierarchy uses an internal scroll viewport at 720px; the bounded check confirmed it remains operable and does not overlap the palette or page.
+
+## Fix Round 1
+
+### Change Summary
+
+- Rejected adapter-supported palette controls when the insertion destination has no in-scope prefix or default namespace bound to `UnityEngine.UIElements`.
+- Removed the arbitrary fallback from the root element prefix, so an unrelated binding such as `custom="urn:custom"` can no longer produce `custom:Button`.
+- Resolved namespace declarations along the insertion parent's ancestor path. Known-control resolution now fails inside the existing guarded add path before command construction or `session.history.execute`, while valid prefixed/default UIElements bindings and generic qualified-name creation remain unchanged.
+
+### Covering Test
+
+- `src/features/palette/PalettePanel.test.tsx`: `rejects a supported control when only an unrelated root namespace is in scope` opens `<custom:UXML xmlns:custom="urn:custom" />`, clicks `Add Button`, and requires byte-identical source, no undo entry, and an accessible UIElements namespace error.
+
+### RED/GREEN Evidence
+
+- RED: `npm test -- src/features/palette/PalettePanel.test.tsx` -> exit 1; 1 file failed, 1 test failed and 6 passed. Expected the original custom-root source, but received `<custom:UXML xmlns:custom="urn:custom" ><custom:Button /></custom:UXML>`.
+- GREEN: `npm test -- src/features/palette/PalettePanel.test.tsx` -> exit 0; 1 file passed, 7/7 tests passed.
+- Feature GREEN: `npm test -- src/features/hierarchy src/features/palette` -> exit 0; 2 files passed, 24/24 tests passed.
+
+### Full Verification
+
+- `npm test` -> exit 0; 24 files passed, 382/382 tests passed.
+- `npm run build` -> exit 0; TypeScript no-emit check and Vite production build passed, with 1,816 modules transformed.
+- `git diff --check` before commit -> exit 0; Git emitted only LF-to-CRLF working-copy notices for the two edited palette files.
+
+### Concerns
+
+- No blocking concerns. The two deferred review Minors were intentionally left unchanged because the namespace fix only required moving known-control resolution inside the existing catch boundary.

@@ -30,10 +30,13 @@ export function PalettePanel({ store, snapshot }: PalettePanelProps) {
   const query = search.toLocaleLowerCase();
   const visible = controls.filter((control) => control.name.toLocaleLowerCase().includes(query));
 
-  const addElement = (qualifiedName: string, generic: boolean) => {
+  const addElement = (requestedName: string, generic: boolean) => {
     if (session === null) return;
     try {
       const target = insertionTarget(session);
+      const qualifiedName = generic
+        ? requestedName
+        : qualifiedControlName(session.document.root, target.parent, requestedName);
       const parentLocator = session.locatorFor(target.parent.id);
       if (parentLocator === null) throw new Error('The insertion parent is no longer available.');
       const selectionAfter = insertedLocator(parentLocator, target.parent, target.index, qualifiedName);
@@ -75,7 +78,7 @@ export function PalettePanel({ store, snapshot }: PalettePanelProps) {
             aria-label={`Add ${control.name}`}
             title={`Add ${control.name}`}
             disabled={session === null}
-            onClick={() => addElement(qualifiedControlName(session!.document.root, control.name), false)}
+            onClick={() => addElement(control.name, false)}
           >
             <Plus size={13} aria-hidden="true" />
             <span>{control.name}</span>
@@ -134,15 +137,38 @@ function insertedLocator(
   });
 }
 
-function qualifiedControlName(root: EditorElement, localName: string): string {
-  const binding = root.attributes.find((attribute) =>
-    (attribute.name === 'xmlns' || attribute.name.startsWith('xmlns:'))
-    && attribute.value === 'UnityEngine.UIElements',
+function qualifiedControlName(root: EditorElement, destination: EditorElement, localName: string): string {
+  const bindings = namespaceBindingsAt(root, destination);
+  if (bindings.get('') === 'UnityEngine.UIElements') return localName;
+  const prefixed = [...bindings].find(([prefix, namespace]) =>
+    prefix.length > 0 && namespace === 'UnityEngine.UIElements',
   );
-  if (binding?.name === 'xmlns') return localName;
-  if (binding !== undefined) return `${binding.name.slice('xmlns:'.length)}:${localName}`;
-  const separator = root.name.indexOf(':');
-  return separator < 0 ? localName : `${root.name.slice(0, separator)}:${localName}`;
+  if (prefixed !== undefined) return `${prefixed[0]}:${localName}`;
+  throw new Error(`${localName} cannot be added because no in-scope namespace is bound to UnityEngine.UIElements.`);
+}
+
+function namespaceBindingsAt(root: EditorElement, destination: EditorElement): ReadonlyMap<string, string> {
+  const path = pathToElement(root, destination.id);
+  if (path === null) throw new Error('The insertion parent is no longer available.');
+  const bindings = new Map<string, string>();
+  for (const element of path) {
+    for (const attribute of element.attributes) {
+      if (attribute.name === 'xmlns') bindings.set('', attribute.value);
+      else if (attribute.name.startsWith('xmlns:')) {
+        bindings.set(attribute.name.slice('xmlns:'.length), attribute.value);
+      }
+    }
+  }
+  return bindings;
+}
+
+function pathToElement(root: EditorElement, nodeId: string): readonly EditorElement[] | null {
+  if (root.id === nodeId) return [root];
+  for (const child of root.children) {
+    const path = pathToElement(child, nodeId);
+    if (path !== null) return [root, ...path];
+  }
+  return null;
 }
 
 function isContainerCapable(element: EditorElement): boolean {
