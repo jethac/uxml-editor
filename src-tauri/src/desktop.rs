@@ -1,4 +1,10 @@
-use crate::{error::HostError, identifiers::deserialize_close_lease};
+use crate::{
+    error::HostError,
+    identifiers::{
+        deserialize_close_lease, deserialize_lifecycle_generation, deserialize_workflow_generation,
+        is_exact_hex_identifier,
+    },
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -122,12 +128,16 @@ pub struct MenuCommandPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileWorkflowEnabledRequest {
+    #[serde(deserialize_with = "deserialize_workflow_generation")]
+    pub workflow_generation: String,
     pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LifecycleReadyRequest {
+    #[serde(deserialize_with = "deserialize_lifecycle_generation")]
+    pub lifecycle_generation: String,
     pub ready: bool,
 }
 
@@ -143,13 +153,25 @@ pub enum CloseResolution {
 pub struct CloseResolutionRequest {
     #[serde(deserialize_with = "deserialize_close_lease")]
     pub lease: String,
+    #[serde(deserialize_with = "deserialize_lifecycle_generation")]
+    pub lifecycle_generation: String,
     pub action: CloseResolution,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloseAbandonRequest {
+    #[serde(deserialize_with = "deserialize_close_lease")]
+    pub lease: String,
+    #[serde(deserialize_with = "deserialize_lifecycle_generation")]
+    pub lifecycle_generation: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloseRequestPayload {
     pub lease: String,
+    pub lifecycle_generation: String,
 }
 
 pub fn is_desktop_command(id: &str) -> bool {
@@ -164,42 +186,70 @@ pub struct CloseGate {
 
 #[derive(Default)]
 struct CloseState {
-    ready: bool,
-    pending: Option<String>,
+    ready: Option<String>,
+    pending: Option<CloseDelivery>,
 }
 
 impl CloseGate {
-    pub fn set_ready(&self, ready: bool) -> Result<(), HostError> {
+    pub fn set_ready(&self, lifecycle_generation: &str, ready: bool) -> Result<(), HostError> {
+        let sequence = lifecycle_sequence(lifecycle_generation)?;
         let mut state = self.lock()?;
-        state.ready = ready;
-        if !ready {
-            state.pending = None;
+        if ready {
+            let current_sequence = state
+                .ready
+                .as_deref()
+                .map(lifecycle_sequence)
+                .transpose()?
+                .unwrap_or(0);
+            if sequence < current_sequence {
+                return Ok(());
+            }
+            if state.ready.as_deref() != Some(lifecycle_generation) {
+                state.pending = None;
+            }
+            state.ready = Some(lifecycle_generation.to_string());
+        } else if state.ready.as_deref() == Some(lifecycle_generation) {
+            state.ready = None;
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.lifecycle_generation == lifecycle_generation)
+            {
+                state.pending = None;
+            }
         }
         Ok(())
     }
 
     pub fn request(&self) -> Result<CloseGateDecision, HostError> {
         let mut state = self.lock()?;
-        if !state.ready || state.pending.is_some() {
+        let Some(lifecycle_generation) = state.ready.clone() else {
+            return Ok(CloseGateDecision::Prevent);
+        };
+        if state.pending.is_some() {
             return Ok(CloseGateDecision::Prevent);
         }
         let lease = format!(
             "close:v1:{:016x}",
             self.next_lease.fetch_add(1, Ordering::Relaxed)
         );
-        state.pending = Some(lease.clone());
-        Ok(CloseGateDecision::Emit(lease))
+        let delivery = CloseDelivery {
+            lease,
+            lifecycle_generation,
+        };
+        state.pending = Some(delivery.clone());
+        Ok(CloseGateDecision::Emit(delivery))
     }
 
     pub fn request_for_delivery(
         &self,
-        emit: impl FnOnce(&str) -> Result<(), HostError>,
+        emit: impl FnOnce(&CloseDelivery) -> Result<(), HostError>,
     ) -> Result<CloseGateDecision, HostError> {
         let decision = self.request()?;
-        if let CloseGateDecision::Emit(lease) = &decision {
-            if let Err(error) = emit(lease) {
+        if let CloseGateDecision::Emit(delivery) = &decision {
+            if let Err(error) = emit(delivery) {
                 let mut state = self.lock()?;
-                if state.pending.as_deref() == Some(lease) {
+                if state.pending.as_ref() == Some(delivery) {
                     state.pending = None;
                 }
                 return Err(error);
@@ -208,9 +258,16 @@ impl CloseGate {
         Ok(decision)
     }
 
-    pub fn resolve(&self, lease: &str, resolution: CloseResolution) -> Result<bool, HostError> {
+    pub fn resolve(
+        &self,
+        lease: &str,
+        lifecycle_generation: &str,
+        resolution: CloseResolution,
+    ) -> Result<bool, HostError> {
         let mut state = self.lock()?;
-        if state.pending.as_deref() != Some(lease) {
+        if !state.pending.as_ref().is_some_and(|pending| {
+            pending.lease == lease && pending.lifecycle_generation == lifecycle_generation
+        }) {
             return Err(HostError::new(
                 "read-failed",
                 "Desktop close lease is not current.",
@@ -218,6 +275,16 @@ impl CloseGate {
         }
         state.pending = None;
         Ok(resolution == CloseResolution::Close)
+    }
+
+    pub fn abandon(&self, lease: &str, lifecycle_generation: &str) -> Result<(), HostError> {
+        let mut state = self.lock()?;
+        if state.pending.as_ref().is_some_and(|pending| {
+            pending.lease == lease && pending.lifecycle_generation == lifecycle_generation
+        }) {
+            state.pending = None;
+        }
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, CloseState>, HostError> {
@@ -230,7 +297,24 @@ impl CloseGate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloseGateDecision {
     Prevent,
-    Emit(String),
+    Emit(CloseDelivery),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseDelivery {
+    pub lease: String,
+    pub lifecycle_generation: String,
+}
+
+fn lifecycle_sequence(value: &str) -> Result<u64, HostError> {
+    if !is_exact_hex_identifier(value, "lifecycle:v1:", 16) {
+        return Err(HostError::new(
+            "read-failed",
+            "Desktop lifecycle generation is malformed.",
+        ));
+    }
+    u64::from_str_radix(&value["lifecycle:v1:".len()..], 16)
+        .map_err(|_| HostError::new("read-failed", "Desktop lifecycle generation is malformed."))
 }
 
 pub fn close_choice(result: MessageDialogResult) -> &'static str {
@@ -260,26 +344,140 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     MenuBuilder::new(app).items(&[&file, &edit, &view]).build()
 }
 
-pub fn set_file_workflow_enabled<R: Runtime>(menu: &Menu<R>, enabled: bool) -> tauri::Result<()> {
-    let mut updated = 0;
-    for item in menu.items()? {
+pub fn set_file_workflow_enabled<R: Runtime>(
+    menu: &Menu<R>,
+    enabled: bool,
+) -> Result<(), HostError> {
+    let mut items = Vec::new();
+    for item in menu.items().map_err(|error| {
+        HostError::new(
+            "read-failed",
+            format!("Could not inspect native file commands: {error}"),
+        )
+    })? {
         let Some(submenu) = item.as_submenu() else {
             continue;
         };
         for id in ["file.save", "file.save-all", "file.close-project"] {
             if let Some(item) = submenu.get(id).and_then(|item| item.as_menuitem().cloned()) {
-                item.set_enabled(enabled)?;
-                updated += 1;
+                items.push((id, item));
             }
         }
     }
-    if updated == 3 {
-        Ok(())
-    } else {
-        Err(tauri::Error::AssetNotFound(
-            "native file-workflow menu items".to_string(),
-        ))
+    if items.len() != 3 {
+        return Err(HostError::new(
+            "read-failed",
+            "Native file-workflow menu items are unavailable.",
+        ));
     }
+    transition_file_workflow_items(
+        enabled,
+        |id| {
+            items
+                .iter()
+                .find(|(item_id, _)| *item_id == id)
+                .ok_or_else(|| HostError::new("read-failed", "Native menu item is unavailable."))?
+                .1
+                .is_enabled()
+                .map_err(|error| {
+                    HostError::new(
+                        "read-failed",
+                        format!("Could not inspect native file command {id}: {error}"),
+                    )
+                })
+        },
+        |id, requested| {
+            items
+                .iter()
+                .find(|(item_id, _)| *item_id == id)
+                .ok_or_else(|| HostError::new("read-failed", "Native menu item is unavailable."))?
+                .1
+                .set_enabled(requested)
+                .map_err(|error| {
+                    HostError::new(
+                        "read-failed",
+                        format!("Could not update native file command {id}: {error}"),
+                    )
+                })
+        },
+    )
+}
+
+fn transition_file_workflow_items(
+    enabled: bool,
+    mut read: impl FnMut(&str) -> Result<bool, HostError>,
+    mut write: impl FnMut(&str, bool) -> Result<(), HostError>,
+) -> Result<(), HostError> {
+    let mut prior = Vec::with_capacity(FILE_WORKFLOW_MENU_IDS.len());
+    for id in FILE_WORKFLOW_MENU_IDS {
+        prior.push(read(id)?);
+    }
+    for (index, id) in FILE_WORKFLOW_MENU_IDS.into_iter().enumerate() {
+        if let Err(failure) = write(id, enabled) {
+            let mut rollback_failure = None;
+            for rollback_index in (0..index).rev() {
+                if let Err(error) = write(
+                    FILE_WORKFLOW_MENU_IDS[rollback_index],
+                    prior[rollback_index],
+                ) {
+                    rollback_failure = Some(error);
+                }
+            }
+            return Err(match rollback_failure {
+                Some(rollback) => HostError::new(
+                    "read-failed",
+                    format!(
+                        "{} Native file-menu rollback also failed: {}",
+                        failure.message, rollback.message
+                    ),
+                ),
+                None => failure,
+            });
+        }
+    }
+    Ok(())
+}
+
+const FILE_WORKFLOW_MENU_IDS: [&str; 3] = ["file.save", "file.save-all", "file.close-project"];
+
+#[derive(Default)]
+pub struct FileWorkflowGate {
+    generation: Mutex<Option<String>>,
+}
+
+impl FileWorkflowGate {
+    pub fn transition(
+        &self,
+        workflow_generation: &str,
+        operation: impl FnOnce() -> Result<(), HostError>,
+    ) -> Result<(), HostError> {
+        let requested = workflow_sequence(workflow_generation)?;
+        let mut current = self.generation.lock().map_err(|_| {
+            HostError::new("read-failed", "Native file-workflow state is unavailable.")
+        })?;
+        let current_sequence = current
+            .as_deref()
+            .map(workflow_sequence)
+            .transpose()?
+            .unwrap_or(0);
+        if requested < current_sequence {
+            return Ok(());
+        }
+        operation()?;
+        *current = Some(workflow_generation.to_string());
+        Ok(())
+    }
+}
+
+fn workflow_sequence(value: &str) -> Result<u64, HostError> {
+    if !is_exact_hex_identifier(value, "workflow:v1:", 16) {
+        return Err(HostError::new(
+            "read-failed",
+            "Desktop workflow generation is malformed.",
+        ));
+    }
+    u64::from_str_radix(&value["workflow:v1:".len()..], 16)
+        .map_err(|_| HostError::new("read-failed", "Desktop workflow generation is malformed."))
 }
 
 fn build_submenu<R: Runtime>(
@@ -303,8 +501,9 @@ fn build_submenu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        close_choice, is_desktop_command, CloseGate, CloseGateDecision, CloseResolution,
-        CloseResolutionRequest, MenuSection, MENU_COMMANDS,
+        close_choice, is_desktop_command, transition_file_workflow_items, CloseGate,
+        CloseGateDecision, CloseResolution, CloseResolutionRequest, FileWorkflowEnabledRequest,
+        FileWorkflowGate, MenuSection, FILE_WORKFLOW_MENU_IDS, MENU_COMMANDS,
     };
     use crate::error::HostError;
     use tauri_plugin_dialog::MessageDialogResult;
@@ -379,14 +578,102 @@ mod tests {
     }
 
     #[test]
+    fn partial_file_menu_failure_rolls_every_item_back_to_its_prior_state() {
+        let states = std::cell::RefCell::new(std::collections::HashMap::from([
+            ("file.save", false),
+            ("file.save-all", false),
+            ("file.close-project", false),
+        ]));
+
+        let result = transition_file_workflow_items(
+            true,
+            |id| {
+                states
+                    .borrow()
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| HostError::new("read-failed", "missing fake menu item"))
+            },
+            |id, enabled| {
+                if id == "file.save-all" && enabled {
+                    return Err(HostError::new(
+                        "read-failed",
+                        "injected second-item failure",
+                    ));
+                }
+                *states
+                    .borrow_mut()
+                    .get_mut(id)
+                    .ok_or_else(|| HostError::new("read-failed", "missing fake menu item"))? =
+                    enabled;
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        for id in FILE_WORKFLOW_MENU_IDS {
+            assert!(!states.borrow()[id], "{id} was not rolled back");
+        }
+    }
+
+    #[test]
+    fn stale_file_workflow_generation_cannot_disable_current_items() {
+        let gate = FileWorkflowGate::default();
+        let enabled = std::cell::Cell::new(false);
+        gate.transition("workflow:v1:0000000000000002", || {
+            enabled.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        gate.transition("workflow:v1:0000000000000001", || {
+            enabled.set(false);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(enabled.get());
+    }
+
+    #[test]
+    fn file_workflow_schema_requires_an_exact_generation_and_boolean() {
+        assert!(
+            serde_json::from_value::<FileWorkflowEnabledRequest>(serde_json::json!({
+                "workflowGeneration": "workflow:v1:0000000000000001",
+                "enabled": true,
+            }))
+            .is_ok()
+        );
+        for generation in [
+            "workflow:v1:short",
+            "workflow:v1:AAAAAAAAAAAAAAAA",
+            "lifecycle:v1:0000000000000001",
+        ] {
+            assert!(
+                serde_json::from_value::<FileWorkflowEnabledRequest>(serde_json::json!({
+                    "workflowGeneration": generation,
+                    "enabled": false,
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn close_lease_is_single_use_and_duplicate_native_requests_are_coalesced() {
         let gate = CloseGate::default();
-        gate.set_ready(true).unwrap();
-        let CloseGateDecision::Emit(lease) = gate.request().unwrap() else {
+        gate.set_ready(LIFECYCLE_ONE, true).unwrap();
+        let CloseGateDecision::Emit(delivery) = gate.request().unwrap() else {
             panic!("first request must emit");
         };
         assert_eq!(gate.request().unwrap(), CloseGateDecision::Prevent);
-        assert!(gate.resolve(&lease, CloseResolution::Close).unwrap());
+        assert!(gate
+            .resolve(
+                &delivery.lease,
+                &delivery.lifecycle_generation,
+                CloseResolution::Close
+            )
+            .unwrap());
         assert!(matches!(
             gate.request().unwrap(),
             CloseGateDecision::Emit(_)
@@ -402,9 +689,23 @@ mod tests {
     }
 
     #[test]
+    fn stale_lifecycle_withdrawal_cannot_disable_the_current_close_generation() {
+        let gate = CloseGate::default();
+        gate.set_ready(LIFECYCLE_ONE, true).unwrap();
+        gate.set_ready(LIFECYCLE_TWO, true).unwrap();
+
+        gate.set_ready(LIFECYCLE_ONE, false).unwrap();
+
+        let CloseGateDecision::Emit(delivery) = gate.request().unwrap() else {
+            panic!("current generation was withdrawn by stale cleanup");
+        };
+        assert_eq!(delivery.lifecycle_generation, LIFECYCLE_TWO);
+    }
+
+    #[test]
     fn failed_close_event_delivery_cancels_the_exact_pending_lease() {
         let gate = CloseGate::default();
-        gate.set_ready(true).unwrap();
+        gate.set_ready(LIFECYCLE_ONE, true).unwrap();
 
         let delivery = gate
             .request_for_delivery(|_| Err(HostError::new("read-failed", "injected emit failure")));
@@ -419,16 +720,34 @@ mod tests {
     #[test]
     fn cancelled_failed_and_stale_close_leases_fail_closed() {
         let gate = CloseGate::default();
-        gate.set_ready(true).unwrap();
+        gate.set_ready(LIFECYCLE_ONE, true).unwrap();
         let CloseGateDecision::Emit(cancelled) = gate.request().unwrap() else {
             panic!("request must emit");
         };
-        assert!(!gate.resolve(&cancelled, CloseResolution::Cancel).unwrap());
-        assert!(gate.resolve(&cancelled, CloseResolution::Close).is_err());
+        assert!(!gate
+            .resolve(
+                &cancelled.lease,
+                &cancelled.lifecycle_generation,
+                CloseResolution::Cancel
+            )
+            .unwrap());
+        assert!(gate
+            .resolve(
+                &cancelled.lease,
+                &cancelled.lifecycle_generation,
+                CloseResolution::Close
+            )
+            .is_err());
         let CloseGateDecision::Emit(failed) = gate.request().unwrap() else {
             panic!("request must emit");
         };
-        assert!(gate.resolve(&failed, CloseResolution::Close).unwrap());
+        assert!(gate
+            .resolve(
+                &failed.lease,
+                &failed.lifecycle_generation,
+                CloseResolution::Close
+            )
+            .unwrap());
         assert!(matches!(
             gate.request().unwrap(),
             CloseGateDecision::Emit(_)
@@ -439,6 +758,7 @@ mod tests {
     fn close_resolution_schema_requires_an_exact_lowercase_lease() {
         let valid = serde_json::json!({
             "lease": format!("close:v1:{}", "a".repeat(16)),
+            "lifecycleGeneration": LIFECYCLE_ONE,
             "action": "close",
         });
         assert!(serde_json::from_value::<CloseResolutionRequest>(valid).is_ok());
@@ -450,12 +770,47 @@ mod tests {
             assert!(
                 serde_json::from_value::<CloseResolutionRequest>(serde_json::json!({
                     "lease": lease,
+                    "lifecycleGeneration": LIFECYCLE_ONE,
+                    "action": "cancel",
+                }))
+                .is_err()
+            );
+        }
+        for generation in [
+            "lifecycle:v1:short",
+            "lifecycle:v1:AAAAAAAAAAAAAAAA",
+            "close:v1:aaaaaaaaaaaaaaaa",
+        ] {
+            assert!(
+                serde_json::from_value::<CloseResolutionRequest>(serde_json::json!({
+                    "lease": format!("close:v1:{}", "a".repeat(16)),
+                    "lifecycleGeneration": generation,
                     "action": "cancel",
                 }))
                 .is_err()
             );
         }
     }
+
+    #[test]
+    fn abandoning_the_exact_failed_resolution_allows_a_later_close() {
+        let gate = CloseGate::default();
+        gate.set_ready(LIFECYCLE_ONE, true).unwrap();
+        let CloseGateDecision::Emit(failed) = gate.request().unwrap() else {
+            panic!("request must emit");
+        };
+
+        gate.abandon(&failed.lease, &failed.lifecycle_generation)
+            .unwrap();
+
+        assert!(matches!(
+            gate.request().unwrap(),
+            CloseGateDecision::Emit(_)
+        ));
+    }
+
+    const LIFECYCLE_ONE: &str = "lifecycle:v1:0000000000000001";
+    const LIFECYCLE_TWO: &str = "lifecycle:v1:0000000000000002";
 
     #[test]
     fn native_close_dialog_results_map_to_typed_choices() {

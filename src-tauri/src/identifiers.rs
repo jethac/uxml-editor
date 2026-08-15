@@ -35,6 +35,20 @@ where
     deserialize_exact_hex(deserializer, "close:v1:", 16, "close lease")
 }
 
+pub fn deserialize_lifecycle_generation<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_exact_hex(deserializer, "lifecycle:v1:", 16, "lifecycle generation")
+}
+
+pub fn deserialize_workflow_generation<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_exact_hex(deserializer, "workflow:v1:", 16, "workflow generation")
+}
+
 pub fn is_exact_hex_identifier(value: &str, prefix: &str, hex_length: usize) -> bool {
     value.strip_prefix(prefix).is_some_and(|suffix| {
         suffix.len() == hex_length

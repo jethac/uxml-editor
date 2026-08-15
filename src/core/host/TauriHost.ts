@@ -46,39 +46,44 @@ export interface TauriHostPorts {
 }
 
 export class TauriHost implements HostPort {
-  readonly capabilities: HostCapabilities = Object.freeze({
+  private capabilitySnapshot: HostCapabilities = Object.freeze({
     mode: 'tauri',
     projectSelection: 'directory-picker',
-    atomicReplace: 'best-effort-safe-write',
+    atomicReplace: 'unsupported',
     watch: 'native-revision-aware',
     appData: 'app-data',
     dialogs: 'native',
   });
   private readonly grants = new Map<ProjectId, NativeGrant>();
   private readonly watches = new Set<ActiveNativeWatch>();
-  private invokingWatch: ActiveNativeWatch | undefined;
 
   constructor(private readonly ports: TauriHostPorts) {}
 
+  get capabilities(): HostCapabilities {
+    return this.capabilitySnapshot;
+  }
+
   async chooseProject(): Promise<ProjectRoot | null> {
-    const callerWatch = this.invokingWatch;
     const result = await this.invoke('host_choose_project', undefined, 'selection-failed');
     if (result === null) return null;
-    if (!isExactRecord(result, ['projectId', 'displayName', 'grant'])
+    if (!isExactRecord(result, ['projectId', 'displayName', 'grant', 'atomicReplace'])
       || !isNativeProjectId(result.projectId)
       || !isNativeGrant(result.grant)
+      || !isNativeAtomicReplace(result.atomicReplace)
       || !isNonemptyString(result.displayName)) {
-      await Promise.all([...this.watches].map((watch) => watch.retire(true, watch === callerWatch)));
+      await Promise.all([...this.watches].map((watch) => watch.retire(true, true)));
       this.grants.clear();
+      this.publishAtomicReplace('unsupported');
       throw malformed('selection-failed', 'Project selection returned a malformed result.');
     }
     const root = snapshotProjectRoot(
       { id: projectId(result.projectId), name: result.displayName },
       result.grant,
     );
-    await Promise.all([...this.watches].map((watch) => watch.retire(true, watch === callerWatch)));
+    await Promise.all([...this.watches].map((watch) => watch.retire(true, true)));
     this.grants.clear();
     this.grants.set(root.id, Object.freeze({ root, token: result.grant }));
+    this.publishAtomicReplace(result.atomicReplace);
     return snapshotProjectRoot(root);
   }
 
@@ -132,6 +137,9 @@ export class TauriHost implements HostPort {
     expectedRevision: FileRevision,
     text: string,
   ): Promise<FileRevision> {
+    if (this.capabilitySnapshot.atomicReplace === 'unsupported') {
+      throw new HostError('unsupported', 'Native conditional replacement is unsupported on this platform.');
+    }
     const { path: normalizedPath, grant } = this.requirePath(path);
     if (!isNativeRevision(expectedRevision)) {
       throw new HostError('stale-revision', 'Atomic replacement requires a valid content revision.');
@@ -162,14 +170,14 @@ export class TauriHost implements HostPort {
     let retiredByReplacement = false;
     let deliveryFailure: HostError | undefined;
     const activeWatch: ActiveNativeWatch = {
-      retire: (nativeAlreadyStopped, skipOwnDelivery = false) => {
+      retire: (nativeAlreadyStopped, skipDelivery = false) => {
         if (retirement !== undefined) return retirement;
         retiredByReplacement = nativeAlreadyStopped;
         active = false;
         pendingPayloads.length = 0;
         unlisten?.();
         retirement = (async () => {
-          if (!skipOwnDelivery) await delivery;
+          if (!skipDelivery) await delivery;
           try {
             if (!nativeAlreadyStopped && watchId !== undefined) {
               await this.invokeVoid(
@@ -213,15 +221,7 @@ export class TauriHost implements HostPort {
       delivery = delivery
         .then(async () => {
           if (!active) return;
-          const previous = this.invokingWatch;
-          this.invokingWatch = activeWatch;
-          let result: void | Promise<void>;
-          try {
-            result = listener(event);
-          } finally {
-            this.invokingWatch = previous;
-          }
-          await result;
+          await listener(event);
         })
         .catch((error) => {
           const failure = error instanceof HostError
@@ -378,6 +378,13 @@ export class TauriHost implements HostPort {
     } catch {
       // Async adapters contain error-sink failures to prevent unhandled callbacks.
     }
+  }
+
+  private publishAtomicReplace(atomicReplace: NativeAtomicReplace): void {
+    this.capabilitySnapshot = Object.freeze({
+      ...this.capabilitySnapshot,
+      atomicReplace,
+    });
   }
 
   private requireRoot(candidate: ProjectRoot): NativeGrant {
@@ -541,6 +548,12 @@ function isNativeGrant(value: unknown): value is string {
 
 function isNativeWatchId(value: unknown): value is string {
   return typeof value === 'string' && /^watch:v1:[0-9a-f]{16}$/.test(value);
+}
+
+type NativeAtomicReplace = 'best-effort-safe-write' | 'unsupported';
+
+function isNativeAtomicReplace(value: unknown): value is NativeAtomicReplace {
+  return value === 'best-effort-safe-write' || value === 'unsupported';
 }
 
 interface NativeGrant {

@@ -1,7 +1,7 @@
 use crate::{
     app_data::{AppDataStore, RecentProjectDto},
     atomic_save::replace_text_atomically,
-    desktop::CloseGate,
+    desktop::{CloseGate, FileWorkflowGate},
     error::HostError,
     identifiers::{
         deserialize_grant, deserialize_project_id, deserialize_revision, deserialize_watch_id,
@@ -151,6 +151,7 @@ pub struct HostState {
     project_session: Mutex<()>,
     pub watches: WatchRegistry,
     pub close_gate: CloseGate,
+    pub file_workflow_gate: FileWorkflowGate,
 }
 
 impl HostState {
@@ -161,6 +162,7 @@ impl HostState {
             project_session: Mutex::new(()),
             watches: WatchRegistry::default(),
             close_gate: CloseGate::default(),
+            file_workflow_gate: FileWorkflowGate::default(),
         }
     }
 

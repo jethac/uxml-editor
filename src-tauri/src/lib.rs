@@ -13,8 +13,8 @@ use commands::{
     RecoveryWriteRequest, ReplaceTextRequest, RevisionDto, WatchStartDto, WatchStopRequest,
 };
 use desktop::{
-    CloseGateDecision, CloseRequestPayload, CloseResolutionRequest, FileWorkflowEnabledRequest,
-    LifecycleReadyRequest, MenuCommandPayload,
+    CloseAbandonRequest, CloseGateDecision, CloseRequestPayload, CloseResolutionRequest,
+    FileWorkflowEnabledRequest, LifecycleReadyRequest, MenuCommandPayload,
 };
 use error::HostError;
 use scoped_fs::{ProjectRootDto, ReadTextDto};
@@ -236,7 +236,11 @@ fn desktop_resolve_close(
     state: State<'_, HostState>,
     request: CloseResolutionRequest,
 ) -> Result<(), HostError> {
-    if !state.close_gate.resolve(&request.lease, request.action)? {
+    if !state.close_gate.resolve(
+        &request.lease,
+        &request.lifecycle_generation,
+        request.action,
+    )? {
         return Ok(());
     }
     let window = app
@@ -252,19 +256,29 @@ fn desktop_resolve_close(
 }
 
 #[tauri::command]
+fn desktop_abandon_close(
+    state: State<'_, HostState>,
+    request: CloseAbandonRequest,
+) -> Result<(), HostError> {
+    state
+        .close_gate
+        .abandon(&request.lease, &request.lifecycle_generation)
+}
+
+#[tauri::command]
 fn desktop_set_file_workflow_enabled(
     app: AppHandle,
+    state: State<'_, HostState>,
     request: FileWorkflowEnabledRequest,
 ) -> Result<(), HostError> {
     let menu = app
         .menu()
         .ok_or_else(|| HostError::new("read-failed", "The native menu is unavailable."))?;
-    desktop::set_file_workflow_enabled(&menu, request.enabled).map_err(|error| {
-        HostError::new(
-            "read-failed",
-            format!("Could not update native file commands: {error}"),
-        )
-    })
+    state
+        .file_workflow_gate
+        .transition(&request.workflow_generation, || {
+            desktop::set_file_workflow_enabled(&menu, request.enabled)
+        })
 }
 
 #[tauri::command]
@@ -272,7 +286,9 @@ fn desktop_set_lifecycle_ready(
     state: State<'_, HostState>,
     request: LifecycleReadyRequest,
 ) -> Result<(), HostError> {
-    state.close_gate.set_ready(request.ready)
+    state
+        .close_gate
+        .set_ready(&request.lifecycle_generation, request.ready)
 }
 
 fn validate_dialog_text(value: &str, field: &str, max_length: usize) -> Result<(), HostError> {
@@ -333,6 +349,7 @@ pub fn run() {
             host_show_message,
             desktop_confirm_close,
             desktop_resolve_close,
+            desktop_abandon_close,
             desktop_set_file_workflow_enabled,
             desktop_set_lifecycle_ready,
         ])
@@ -345,12 +362,13 @@ pub fn run() {
                     api.prevent_close();
                     return;
                 };
-                match state.close_gate.request_for_delivery(|lease| {
+                match state.close_gate.request_for_delivery(|delivery| {
                     window
                         .emit(
                             "uxml://close-requested",
                             CloseRequestPayload {
-                                lease: lease.to_string(),
+                                lease: delivery.lease.clone(),
+                                lifecycle_generation: delivery.lifecycle_generation.clone(),
                             },
                         )
                         .map_err(|error| {

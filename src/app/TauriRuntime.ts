@@ -31,25 +31,47 @@ export function createTauriRuntimeBindings(raw: RawTauriRuntimePorts): TauriRunt
         },
       }),
       window: Object.freeze({
-        setLifecycleReady: (ready: boolean) => invokeVoid(
-          raw,
-          'desktop_set_lifecycle_ready',
-          { request: { ready } },
-        ),
-        resolveClose: async (lease: string, action: 'close' | 'cancel') => {
+        setLifecycleReady: async (lifecycleGeneration: string, ready: boolean) => {
+          if (!/^lifecycle:v1:[0-9a-f]{16}$/.test(lifecycleGeneration)) {
+            throw new Error('Desktop lifecycle generation is malformed.');
+          }
+          await invokeVoid(
+            raw,
+            'desktop_set_lifecycle_ready',
+            { request: { lifecycleGeneration, ready } },
+          );
+        },
+        resolveClose: async (lease: string, lifecycleGeneration: string, action: 'close' | 'cancel') => {
           if (!/^close:v1:[0-9a-f]{16}$/.test(lease)
+            || !/^lifecycle:v1:[0-9a-f]{16}$/.test(lifecycleGeneration)
             || (action !== 'close' && action !== 'cancel')) {
             throw new Error('Desktop close resolution is malformed.');
           }
-          await invokeVoid(raw, 'desktop_resolve_close', { request: { lease, action } });
+          await invokeVoid(raw, 'desktop_resolve_close', {
+            request: { lease, lifecycleGeneration, action },
+          });
+        },
+        abandonClose: async (lease: string, lifecycleGeneration: string) => {
+          if (!/^close:v1:[0-9a-f]{16}$/.test(lease)
+            || !/^lifecycle:v1:[0-9a-f]{16}$/.test(lifecycleGeneration)) {
+            throw new Error('Desktop close abandonment is malformed.');
+          }
+          await invokeVoid(raw, 'desktop_abandon_close', {
+            request: { lease, lifecycleGeneration },
+          });
         },
       }),
       menu: Object.freeze({
-        setFileWorkflowEnabled: (enabled: boolean) => invokeVoid(
-          raw,
-          'desktop_set_file_workflow_enabled',
-          { request: { enabled } },
-        ),
+        setFileWorkflowEnabled: async (workflowGeneration: string, enabled: boolean) => {
+          if (!/^workflow:v1:[0-9a-f]{16}$/.test(workflowGeneration)) {
+            throw new Error('Desktop workflow generation is malformed.');
+          }
+          await invokeVoid(
+            raw,
+            'desktop_set_file_workflow_enabled',
+            { request: { workflowGeneration, enabled } },
+          );
+        },
       }),
       errors: Object.freeze({
         report: (error: unknown) => (raw.reportError ?? console.error)(error),

@@ -4,6 +4,38 @@
 
 Implemented on `agent/uxml-editor` from base `a139972`. The desktop runtime now uses a real `TauriHost`; the browser runtime continues to use `BrowserHost`. Rust is the sole filesystem authority, native operations are limited to the current directory-picker grant, and desktop menu/close events terminate in typed, tested frontend controllers.
 
+## Fix Round 3 Addendum (2026-08-16)
+
+This addendum records the accepted fixes from `task-15-fix-2-review.md` after commit `7425b18`. It supersedes conflicting round-2 statements below about cross-platform safe-write availability, quarantine cleanup, Task 16 lease semantics, boolean close readiness, listener-origin watch draining, and menu rollback/disposal. Full RED/GREEN evidence and verification are in `task-15-fix-3-report.md`.
+
+### Replacement and recovery
+
+- Tauri starts with `atomicReplace: "unsupported"` and negotiates the exact native value in the project-selection DTO. Windows publishes `best-effort-safe-write`; non-Windows remains `unsupported` and rejects before creating temp/quarantine artifacts.
+- Windows holds checked handles without `FILE_SHARE_WRITE`. An existing writable handle prevents acquisition and the final hook does not run. No claim is made that those handles coexist.
+- Quarantine creation is a capability-relative no-replace hard link followed by removal of the original name. The deterministic hook runs after the final quarantine hash. Destination creation never overwrites an external entry.
+- Every post-quarantine error restores an absent target or retains a relative surfaced recovery artifact. Backup Drop never removes the only original. Temp cleanup precedes quarantine cleanup, which is the last fallible destructive step.
+- Project acquisition restores target-absent backups, surfaces target-plus-backup conflicts without deletion, safely removes completed temps, and retains target-absent temps. Recovery occurs through the acquired directory capability before grant publication.
+
+### Close, watch, and menus
+
+- Task 16 now owns `runExclusiveCloseState`; final validation and native resolution execute inside its edit-blocking callback. The controller cannot validate and then await destruction outside owner exclusivity.
+- Close readiness/events/resolution use exact monotonic lifecycle generations. Stale StrictMode completion/disposal is ignored. Resolution failure is reported and the exact lease/generation is abandoned so later close requests recover.
+- Project replacement synchronously invalidates every frontend watch and drops queued events without awaiting already-invoked listener promises. Post-yield `chooseProject()` cannot self-deadlock; multi-listener tests prove queued old work never starts after publication.
+- File-menu transitions use exact workflow generations. Rust captures all three prior states and rolls back a partial native failure. Frontend disposal disables before removing listeners; disable failure keeps handlers active and exposes reported completion plus retry. Stale cleanup cannot disable a newer binding.
+
+### Corrected verification totals
+
+- `npm test`: 40 files / 594 tests.
+- focused Task 15 TypeScript: 6 files / 123 tests.
+- `npm run build`: passed, 1,889 modules transformed.
+- `npm run test:e2e`: 13 expected, 0 unexpected.
+- Cargo fmt/check/strict clippy: passed.
+- `cargo test`: 61 passed; doc tests passed.
+- `npx tauri build --no-bundle`: passed; rebuilt executable smoke passed with title `UXML Editor`.
+- `npm audit --omit=dev`: 0 vulnerabilities; capability/license/forbidden/diff audits passed.
+
+The accepted review artifact is unchanged at SHA-256 `7C3DC51B378D0C3A92B4510C5BBF5BC3E98B50528776456B0F9C92177FA70AEB`.
+
 ## Fix Round 2 Addendum (2026-08-16)
 
 This addendum records the accepted fixes from `task-15-fix-1-review.md` after commit `1537863`. It supersedes conflicting statements below and in the fix-round-1 addendum about selected-root acquisition order, overwrite-rename replacement, Tauri atomic-replace capability, Task 16 dirty hooks, close-listener startup, watch startup retirement, menu transactionality, and dropped asynchronous failures. Full RED/GREEN evidence is in `task-15-fix-2-report.md`.

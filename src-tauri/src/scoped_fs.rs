@@ -1,4 +1,7 @@
-use crate::{atomic_save::revision_for_bytes, error::HostError};
+use crate::{
+    atomic_save::{recover_atomic_artifacts, revision_for_bytes},
+    error::HostError,
+};
 use cap_std::{ambient_authority, fs::Dir};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -50,6 +53,7 @@ pub struct ProjectRootDto {
     pub project_id: String,
     pub display_name: String,
     pub grant: String,
+    pub atomic_replace: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +158,7 @@ impl ScopedProjects {
                 "The selected project directory changed while it was being granted.",
             ));
         }
+        recover_atomic_artifacts(&authority)?;
         let display_name = canonical
             .file_name()
             .and_then(|name| name.to_str())
@@ -179,6 +184,7 @@ impl ScopedProjects {
                 project_id,
                 display_name,
                 grant: token,
+                atomic_replace: atomic_replace_capability(),
             },
         })
     }
@@ -317,6 +323,16 @@ impl ScopedProjects {
             })?;
         operation(grant)
     }
+}
+
+#[cfg(windows)]
+fn atomic_replace_capability() -> &'static str {
+    "best-effort-safe-write"
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_capability() -> &'static str {
+    "unsupported"
 }
 
 #[cfg(unix)]
@@ -798,6 +814,45 @@ mod tests {
         assert_eq!(
             mismatch, None,
             "read text and revision came from different file versions"
+        );
+    }
+
+    #[test]
+    fn project_acquisition_restores_an_absent_target_from_a_crash_quarantine() {
+        let fixture = Fixture::new();
+        fixture.write(".Main.uxml.uxml-editor-42-7.bak", "crash-original");
+        let projects = ScopedProjects::default();
+
+        let root = projects.grant_selected(&fixture.root).unwrap();
+        let read = projects
+            .read_text(&root.project_id, &root.grant, "Main.uxml")
+            .unwrap();
+
+        assert_eq!(read.text, "crash-original");
+        assert!(!fixture
+            .root
+            .join(".Main.uxml.uxml-editor-42-7.bak")
+            .exists());
+    }
+
+    #[test]
+    fn project_acquisition_surfaces_a_target_backup_conflict_without_deleting_either() {
+        let fixture = Fixture::new();
+        fixture.write("Main.uxml", "installed-editor-bytes");
+        fixture.write(".Main.uxml.uxml-editor-42-8.bak", "original-external-bytes");
+        let projects = ScopedProjects::default();
+
+        let error = projects.grant_selected(&fixture.root).unwrap_err();
+
+        assert_eq!(error.code, "replace-failed");
+        assert!(error.message.contains(".Main.uxml.uxml-editor-42-8.bak"));
+        assert_eq!(
+            fs::read_to_string(fixture.root.join("Main.uxml")).unwrap(),
+            "installed-editor-bytes"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.join(".Main.uxml.uxml-editor-42-8.bak")).unwrap(),
+            "original-external-bytes"
         );
     }
 

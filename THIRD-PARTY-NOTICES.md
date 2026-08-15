@@ -8,7 +8,9 @@ components redistributed in its browser and desktop build output.
 The desktop shell uses the following pinned Tauri and Rust components:
 
 - `@tauri-apps/api` 2.11.1 (`sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==`), Apache-2.0 OR MIT
+- `@tauri-apps/cli` 2.11.4, Apache-2.0 OR MIT
 - `tauri` 2.11.5, Apache-2.0 OR MIT
+- `tauri-build` 2.6.3, Apache-2.0 OR MIT
 - `tauri-plugin-dialog` 2.7.1, Apache-2.0 OR MIT
 - `tauri-plugin-fs` 2.5.1 (transitive type dependency of the dialog plugin; not initialized or capability-granted), Apache-2.0 OR MIT
 - `notify` 6.1.1, CC0-1.0

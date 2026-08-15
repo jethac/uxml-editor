@@ -15,8 +15,11 @@ const NATIVE_PROJECT_A = `project:v1:${'a'.repeat(64)}`;
 const NATIVE_PROJECT_B = `project:v1:${'b'.repeat(64)}`;
 const NATIVE_GRANT_A = `grant:v1:${'1'.repeat(16)}`;
 const NATIVE_GRANT_B = `grant:v1:${'2'.repeat(16)}`;
+const NATIVE_ATOMIC_REPLACE = 'best-effort-safe-write' as const;
 const NATIVE_WATCH_A = `watch:v1:${'3'.repeat(16)}`;
+const NATIVE_WATCH_B = `watch:v1:${'4'.repeat(16)}`;
 const NATIVE_REVISION_A = `sha256:v1:${'4'.repeat(64)}`;
+const NATIVE_REVISION_B = `sha256:v1:${'5'.repeat(64)}`;
 
 interface HostContractHarness {
   readonly host: HostPort;
@@ -221,7 +224,7 @@ describe('TauriHost IPC validation and serialization', () => {
       invoke: async (command, payload) => {
         calls.push({ command, payload });
         if (command === 'host_choose_project') {
-          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE };
         }
         if (command === 'host_enumerate_files') return { relativePaths: [] };
         throw new Error(`Unexpected command: ${command}`);
@@ -239,10 +242,10 @@ describe('TauriHost IPC validation and serialization', () => {
     });
 
     for (const malformedResult of [
-      { projectId: 'project:v1:short', displayName: 'Project', grant: NATIVE_GRANT_A },
-      { projectId: `project:v1:${'A'.repeat(64)}`, displayName: 'Project', grant: NATIVE_GRANT_A },
-      { projectId: NATIVE_PROJECT_A, displayName: 'Project', grant: 'grant:v1:short' },
-      { projectId: NATIVE_PROJECT_A, displayName: 'Project' },
+      { projectId: 'project:v1:short', displayName: 'Project', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE },
+      { projectId: `project:v1:${'A'.repeat(64)}`, displayName: 'Project', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE },
+      { projectId: NATIVE_PROJECT_A, displayName: 'Project', grant: 'grant:v1:short', atomicReplace: NATIVE_ATOMIC_REPLACE },
+      { projectId: NATIVE_PROJECT_A, displayName: 'Project', atomicReplace: NATIVE_ATOMIC_REPLACE },
     ]) {
       const malformedHost = new TauriHost({
         invoke: async () => malformedResult,
@@ -258,7 +261,7 @@ describe('TauriHost IPC validation and serialization', () => {
     const host = new TauriHost({
       invoke: async (command) => {
         if (command === 'host_choose_project') {
-          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE };
         }
         if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
         if (command === 'host_stop_watch') throw { code: 'read-failed', message: 'stop failed' };
@@ -296,7 +299,7 @@ describe('TauriHost IPC validation and serialization', () => {
     const host = new TauriHost({
       invoke: async (command) => {
         if (command === 'host_choose_project') {
-          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE };
         }
         if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
         if (command === 'host_stop_watch') return null;
@@ -353,8 +356,8 @@ describe('TauriHost IPC validation and serialization', () => {
       invoke: async (command) => {
         if (command === 'host_choose_project') {
           selection += 1;
-          if (selection === 1) return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A };
-          if (selection === 2) return { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B };
+          if (selection === 1) return { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE };
+          if (selection === 2) return { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B, atomicReplace: NATIVE_ATOMIC_REPLACE };
           throw { code: 'selection-failed', message: 'picker failed' };
         }
         if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
@@ -402,8 +405,8 @@ describe('TauriHost IPC validation and serialization', () => {
         if (command === 'host_choose_project') {
           selection += 1;
           return selection === 1
-            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A }
-            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B };
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B, atomicReplace: NATIVE_ATOMIC_REPLACE };
         }
         if (command === 'host_start_watch') {
           markStartInvoked();
@@ -450,8 +453,8 @@ describe('TauriHost IPC validation and serialization', () => {
         if (command === 'host_choose_project') {
           selection += 1;
           return selection === 1
-            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A }
-            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B };
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B, atomicReplace: NATIVE_ATOMIC_REPLACE };
         }
         if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
         throw new Error(`Unexpected command: ${command}`);
@@ -483,6 +486,123 @@ describe('TauriHost IPC validation and serialization', () => {
     expect(replacementSettled).toBe(true);
   });
 
+  it('does not self-deadlock when a watch listener yields before project replacement', async () => {
+    let selection = 0;
+    let nativeListener: ((event: TauriEvent<unknown>) => void | Promise<void>) | undefined;
+    let listenerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { listenerStarted = resolve; });
+    let replacementSettled = false;
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          return selection === 1
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B, atomicReplace: NATIVE_ATOMIC_REPLACE };
+        }
+        if (command === 'host_start_watch') return { watchId: NATIVE_WATCH_A };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListener = listener;
+        return () => { nativeListener = undefined; };
+      },
+      timers: new FakeTimers(0),
+    });
+    const first = (await host.chooseProject())!;
+    await host.watch(first, async () => {
+      listenerStarted();
+      await Promise.resolve();
+      await host.chooseProject();
+      replacementSettled = true;
+    });
+
+    void nativeListener?.({ payload: {
+      watchId: NATIVE_WATCH_A,
+      projectId: NATIVE_PROJECT_A,
+      grant: NATIVE_GRANT_A,
+      kind: 'changed',
+      relativePath: 'Main.uxml',
+      revision: NATIVE_REVISION_A,
+    } });
+    await started;
+    for (let attempt = 0; attempt < 8 && !replacementSettled; attempt += 1) {
+      await Promise.resolve();
+    }
+
+    expect(replacementSettled).toBe(true);
+    await expect(host.enumerateFiles(first)).rejects.toMatchObject({ code: 'root-not-granted' });
+  });
+
+  it('cancels unrelated queued old-grant delivery before post-yield replacement publication', async () => {
+    let selection = 0;
+    let startedWatches = 0;
+    const nativeListeners = new Set<(event: TauriEvent<unknown>) => void | Promise<void>>();
+    let releaseUnrelated!: () => void;
+    const unrelatedBlocked = new Promise<void>((resolve) => { releaseUnrelated = resolve; });
+    let markUnrelatedStarted!: () => void;
+    const unrelatedStarted = new Promise<void>((resolve) => { markUnrelatedStarted = resolve; });
+    let replacementRoot: ProjectRoot | null | undefined;
+    const host = new TauriHost({
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+          selection += 1;
+          return selection === 1
+            ? { projectId: NATIVE_PROJECT_A, displayName: 'Project A', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE }
+            : { projectId: NATIVE_PROJECT_B, displayName: 'Project B', grant: NATIVE_GRANT_B, atomicReplace: NATIVE_ATOMIC_REPLACE };
+        }
+        if (command === 'host_start_watch') {
+          startedWatches += 1;
+          return { watchId: startedWatches === 1 ? NATIVE_WATCH_A : NATIVE_WATCH_B };
+        }
+        if (command === 'host_enumerate_files') return { relativePaths: [] };
+        throw new Error(`Unexpected command: ${command}`);
+      },
+      listen: async (_event, listener) => {
+        nativeListeners.add(listener);
+        return () => { nativeListeners.delete(listener); };
+      },
+      timers: new FakeTimers(0),
+    });
+    const first = (await host.chooseProject())!;
+    const unrelatedDeliveries: string[] = [];
+    await host.watch(first, async (event) => {
+      if (event.kind === 'rescan-required') return;
+      unrelatedDeliveries.push(event.path.relativePath);
+      markUnrelatedStarted();
+      await unrelatedBlocked;
+    });
+    await host.watch(first, async () => {
+      await Promise.resolve();
+      replacementRoot = await host.chooseProject();
+    });
+    const emit = (payload: unknown) => Promise.all([...nativeListeners].map(async (listener) => listener({ payload })));
+
+    const firstUnrelated = emit({
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'changed', relativePath: 'First.uxml', revision: NATIVE_REVISION_A,
+    });
+    await unrelatedStarted;
+    const queuedUnrelated = emit({
+      watchId: NATIVE_WATCH_A, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'changed', relativePath: 'Queued.uxml', revision: NATIVE_REVISION_B,
+    });
+    void emit({
+      watchId: NATIVE_WATCH_B, projectId: NATIVE_PROJECT_A, grant: NATIVE_GRANT_A,
+      kind: 'rescan-required',
+    });
+    for (let attempt = 0; attempt < 12 && replacementRoot === undefined; attempt += 1) {
+      await Promise.resolve();
+    }
+
+    expect(replacementRoot?.id).toBe(NATIVE_PROJECT_B);
+    await expect(host.enumerateFiles(first)).rejects.toMatchObject({ code: 'root-not-granted' });
+    expect(unrelatedDeliveries).toEqual(['First.uxml']);
+    releaseUnrelated();
+    await Promise.all([firstUnrelated, queuedUnrelated]);
+    expect(unrelatedDeliveries).toEqual(['First.uxml']);
+  });
+
   it('invalidates an old frontend root when the same stable project is selected with a new grant', async () => {
     let selection = 0;
     const host = new TauriHost({
@@ -493,6 +613,7 @@ describe('TauriHost IPC validation and serialization', () => {
             projectId: NATIVE_PROJECT_A,
             displayName: 'Project A',
             grant: selection === 1 ? NATIVE_GRANT_A : NATIVE_GRANT_B,
+            atomicReplace: NATIVE_ATOMIC_REPLACE,
           };
         }
         if (command === 'host_enumerate_files') return { relativePaths: [] };
@@ -507,9 +628,19 @@ describe('TauriHost IPC validation and serialization', () => {
     await expect(host.enumerateFiles(oldRoot)).rejects.toMatchObject({ code: 'root-not-granted' });
     await expect(host.enumerateFiles(currentRoot)).resolves.toMatchObject({ status: 'supported' });
   });
-  it('publishes frozen native capabilities without claiming browser or memory behavior', () => {
+  it('publishes unsupported replacement until an exact native capability is negotiated', async () => {
     const host = new TauriHost({
-      invoke: async () => null,
+      invoke: async (command) => {
+        if (command === 'host_choose_project') {
+      return {
+            projectId: NATIVE_PROJECT_A,
+            displayName: 'Project A',
+            grant: NATIVE_GRANT_A,
+            atomicReplace: NATIVE_ATOMIC_REPLACE,
+          };
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      },
       listen: async () => () => undefined,
       timers: new FakeTimers(0),
     });
@@ -517,19 +648,24 @@ describe('TauriHost IPC validation and serialization', () => {
     expect(host.capabilities).toEqual({
       mode: 'tauri',
       projectSelection: 'directory-picker',
-      atomicReplace: 'best-effort-safe-write',
+      atomicReplace: 'unsupported',
       watch: 'native-revision-aware',
       appData: 'app-data',
       dialogs: 'native',
     });
     expect(Object.isFrozen(host.capabilities)).toBe(true);
+
+    await host.chooseProject();
+
+    expect(host.capabilities.atomicReplace).toBe('best-effort-safe-write');
+    expect(Object.isFrozen(host.capabilities)).toBe(true);
   });
 
   it.each([
     {},
-    { projectId: '', displayName: 'Chosen', grant: NATIVE_GRANT_A },
-    { projectId: NATIVE_PROJECT_A, displayName: '', grant: NATIVE_GRANT_A },
-    { projectId: NATIVE_PROJECT_A, displayName: 'Chosen', grant: NATIVE_GRANT_A, absolutePath: 'C:\\secret' },
+    { projectId: '', displayName: 'Chosen', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE },
+    { projectId: NATIVE_PROJECT_A, displayName: '', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE },
+    { projectId: NATIVE_PROJECT_A, displayName: 'Chosen', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE, absolutePath: 'C:\\secret' },
   ])('rejects an untrusted choose_project result before branding it: %j', async (result) => {
     const host = new TauriHost({
       invoke: async () => result,
@@ -556,7 +692,7 @@ describe('TauriHost IPC validation and serialization', () => {
       invoke: async (command, payload) => {
         calls.push({ command, payload });
         if (command === 'host_choose_project') {
-          return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A };
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE };
         }
         if (command === 'host_read_text') throw { code: 'not-found', message: 'missing fixture' };
         throw new Error(`Unexpected command: ${command}`);
@@ -666,7 +802,7 @@ describe('TauriHost IPC validation and serialization', () => {
     const host = new TauriHost({
       invoke: async (command) => {
         if (command === 'host_choose_project') {
-          return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A };
+          return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE };
         }
         if (command === 'host_start_watch') {
           await nativeListener!({
@@ -815,7 +951,7 @@ class FakeTauriBridge {
     const request = readRequest(payload);
     switch (command) {
       case 'host_choose_project':
-        return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A };
+        return { projectId: NATIVE_PROJECT_A, displayName: 'Chosen Project', grant: NATIVE_GRANT_A, atomicReplace: NATIVE_ATOMIC_REPLACE };
       case 'host_enumerate_files':
         this.requireGranted(request);
         return { relativePaths: [...this.files.keys()].sort() };

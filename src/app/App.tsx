@@ -12,6 +12,7 @@ import {
   type CloseResolution,
   type DocumentStateLease,
   type DirtyState,
+  type LifecycleGeneration,
   type SaveBeforeCloseResult,
 } from '../core/desktop/DesktopLifecycleController';
 import { EditorStore } from '../core/store/EditorStore';
@@ -29,18 +30,39 @@ export interface AppDesktopPorts {
   readonly events: DesktopEventPort;
   readonly confirm: { confirmClose(): CloseChoice | Promise<CloseChoice> };
   readonly window: {
-    setLifecycleReady(ready: boolean): void | Promise<void>;
-    resolveClose(lease: CloseLease, resolution: CloseResolution): void | Promise<void>;
+    setLifecycleReady(generation: LifecycleGeneration, ready: boolean): void | Promise<void>;
+    resolveClose(
+      lease: CloseLease,
+      generation: LifecycleGeneration,
+      resolution: CloseResolution,
+    ): void | Promise<void>;
+    abandonClose(lease: CloseLease, generation: LifecycleGeneration): void | Promise<void>;
   };
-  readonly menu: { setFileWorkflowEnabled(enabled: boolean): void | Promise<void> };
+  readonly menu: {
+    setFileWorkflowEnabled(generation: WorkflowGeneration, enabled: boolean): void | Promise<void>;
+  };
   readonly errors: { report(error: unknown): void };
 }
 
 export interface Task16FileLifecyclePort extends Task16FileCommandPort {
-  acquireCloseState(lease: CloseLease): DocumentStateLease | Promise<DocumentStateLease>;
+  runExclusiveCloseState(
+    lease: CloseLease,
+    operation: (lease: DocumentStateLease) => void | Promise<void>,
+  ): void | Promise<void>;
   finalValidateCloseState(lease: DocumentStateLease): boolean | Promise<boolean>;
-  releaseCloseState(lease: DocumentStateLease): void | Promise<void>;
   saveBeforeClose(lease: DocumentStateLease): SaveBeforeCloseResult | Promise<SaveBeforeCloseResult>;
+}
+
+export type WorkflowGeneration = string;
+
+export class DesktopWorkflowDisableError extends Error {
+  readonly completion: Promise<Readonly<{ status: 'failed'; error: unknown }>>;
+
+  constructor(cause: unknown, readonly retry: () => Promise<void>) {
+    super('Could not disable native file-workflow commands; listeners remain attached.', { cause });
+    this.name = 'DesktopWorkflowDisableError';
+    this.completion = Promise.resolve(Object.freeze({ status: 'failed', error: cause }));
+  }
 }
 
 export function App({ store, desktop, task16FileLifecycle }: AppProps) {
@@ -56,6 +78,7 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
   useEffect(() => {
     if (desktop === undefined) return;
     let active = true;
+    const workflowGeneration = nextWorkflowGeneration();
     const disposables: Disposable[] = [];
     const currentFileLifecycle = task16FileLifecycle ?? unboundTask16FileLifecycle(store);
     const commandBridge = new DesktopCommandBridge(
@@ -66,13 +89,13 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
     const lifecycle = new DesktopLifecycleController({
       events: desktop.events,
       state: {
-        acquire: (lease) => currentFileLifecycle.acquireCloseState(lease),
+        runExclusive: (lease, operation) => currentFileLifecycle.runExclusiveCloseState(lease, operation),
         finalValidate: (lease) => currentFileLifecycle.finalValidateCloseState(lease),
-        release: (lease) => currentFileLifecycle.releaseCloseState(lease),
       },
       confirm: desktop.confirm,
       save: { saveBeforeClose: (lease) => currentFileLifecycle.saveBeforeClose(lease) },
       window: desktop.window,
+      errors: desktop.errors,
     });
     const disposeStarted = () => {
       for (const disposable of disposables.splice(0)) {
@@ -84,11 +107,20 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
         }
       }
     };
-    const disableFileWorkflow = async () => {
+    const disableFileWorkflow = async (reportFailure = true): Promise<boolean> => {
       try {
-        await desktop.menu.setFileWorkflowEnabled(false);
+        await desktop.menu.setFileWorkflowEnabled(workflowGeneration, false);
+        disposeStarted();
+        return true;
       } catch (error) {
-        desktop.errors.report(error);
+        if (reportFailure) {
+          desktop.errors.report(new DesktopWorkflowDisableError(error, async () => {
+            if (!await disableFileWorkflow(false)) {
+              throw error;
+            }
+          }));
+        }
+        return false;
       }
     };
     void (async () => {
@@ -105,22 +137,31 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
           return;
         }
         disposables.push(commandDisposable);
-        await desktop.menu.setFileWorkflowEnabled(task16FileLifecycle !== undefined);
+        await desktop.menu.setFileWorkflowEnabled(
+          workflowGeneration,
+          task16FileLifecycle !== undefined,
+        );
         if (!active) await disableFileWorkflow();
       } catch (error) {
-        disposeStarted();
         await disableFileWorkflow();
         desktop.errors.report(error);
       }
     })();
     return () => {
       active = false;
-      disposeStarted();
       void disableFileWorkflow();
     };
   }, [desktop, store, task16FileLifecycle]);
 
   return <Workbench store={store} />;
+}
+
+let workflowSequence = 1;
+
+function nextWorkflowGeneration(): WorkflowGeneration {
+  const sequence = workflowSequence;
+  workflowSequence += 1;
+  return `workflow:v1:${sequence.toString(16).padStart(16, '0')}`;
 }
 
 function unboundTask16FileLifecycle(store: EditorStore): Task16FileLifecyclePort {
@@ -129,7 +170,10 @@ function unboundTask16FileLifecycle(store: EditorStore): Task16FileLifecyclePort
     generation: number;
   }>>();
   return Object.freeze({
-    acquireCloseState: () => {
+    runExclusiveCloseState: async (
+      _nativeLease: CloseLease,
+      operation: (lease: DocumentStateLease) => void | Promise<void>,
+    ) => {
       const session = store.getSnapshot().session;
       const generation = session?.generation ?? 0;
       const lease = Object.freeze({
@@ -137,7 +181,11 @@ function unboundTask16FileLifecycle(store: EditorStore): Task16FileLifecyclePort
         dirtyState: (session === null ? 'clean' : 'unknown') as DirtyState,
       });
       held.set(lease, Object.freeze({ session, generation }));
-      return lease;
+      try {
+        await operation(lease);
+      } finally {
+        held.delete(lease);
+      }
     },
     finalValidateCloseState: (lease: DocumentStateLease) => {
       const expected = held.get(lease);
@@ -146,7 +194,6 @@ function unboundTask16FileLifecycle(store: EditorStore): Task16FileLifecyclePort
         && expected.session === session
         && expected.generation === (session?.generation ?? 0);
     },
-    releaseCloseState: (lease: DocumentStateLease) => { held.delete(lease); },
     saveBeforeClose: async (): Promise<SaveBeforeCloseResult> => 'cancelled',
     save: async () => undefined,
     saveAll: async () => undefined,

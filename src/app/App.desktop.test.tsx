@@ -16,8 +16,9 @@ describe('App desktop integration', () => {
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: {
-        setLifecycleReady: async () => undefined,
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
         resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
       },
       menu: { setFileWorkflowEnabled: async () => menuBlocked },
       errors: { report: () => undefined },
@@ -43,8 +44,8 @@ describe('App desktop integration', () => {
     const desktop = {
       events: { listen: async () => { throw new Error('listen failed'); } },
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
-      window: { setLifecycleReady: async () => undefined, resolveClose: async () => undefined },
-      menu: { setFileWorkflowEnabled: async (enabled: boolean) => { menuStates.push(enabled); } },
+      window: { setLifecycleReady: async () => undefined, resolveClose: async () => undefined, abandonClose: async () => undefined },
+      menu: { setFileWorkflowEnabled: async (_generation: string, enabled: boolean) => { menuStates.push(enabled); } },
       errors: { report: (error: unknown) => { errors.push(error); } },
     } as unknown as AppDesktopPorts;
 
@@ -67,8 +68,12 @@ describe('App desktop integration', () => {
     const desktop: AppDesktopPorts = {
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
-      window: { setLifecycleReady: async () => undefined, resolveClose: async () => undefined },
-      menu: { setFileWorkflowEnabled: async (enabled) => { menuStates.push(enabled); } },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: { setFileWorkflowEnabled: async (_generation, enabled) => { menuStates.push(enabled); } },
       errors: { report: () => undefined },
     };
     const rendered = render(<App
@@ -83,13 +88,104 @@ describe('App desktop integration', () => {
     await act(() => Promise.resolve());
     expect(menuStates).toEqual([true, false]);
   });
+
+  it('keeps functioning command listeners attached when disposal disable fails', async () => {
+    const events = new FakeDesktopEvents();
+    const errors: unknown[] = [];
+    let disableAttempts = 0;
+    const desktop: AppDesktopPorts = {
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: {
+        setFileWorkflowEnabled: async (_generation, enabled) => {
+          if (!enabled) {
+            disableAttempts += 1;
+            if (disableAttempts === 1) throw new Error('disable failed');
+          }
+        },
+      },
+      errors: { report: (error) => { errors.push(error); } },
+    };
+    const rendered = render(<App
+      store={new EditorStore({ viewport: { width: 1024, height: 768 } })}
+      desktop={desktop}
+      task16FileLifecycle={task16Lifecycle()}
+    />);
+    await listenersReady(events);
+
+    rendered.unmount();
+    await act(() => Promise.resolve());
+
+    expect(errors).toHaveLength(1);
+    expect(events.listenerCount('uxml://menu-command')).toBe(1);
+    await (errors[0] as { retry(): Promise<void> }).retry();
+    expect(events.listenerCount('uxml://menu-command')).toBe(0);
+  });
+
+  it('ignores a stale delayed disable after a newer workflow generation is enabled', async () => {
+    const events = new FakeDesktopEvents();
+    let releaseOldDisable!: () => void;
+    const oldDisableBlocked = new Promise<void>((resolve) => { releaseOldDisable = resolve; });
+    let disableCalls = 0;
+    let latestGeneration = -1;
+    let enabled = false;
+    const desktop: AppDesktopPorts = {
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: {
+        setFileWorkflowEnabled: async (...args: unknown[]) => {
+          const generation = args.length === 2
+            ? Number.parseInt(String(args[0]).slice('workflow:v1:'.length), 16)
+            : 0;
+          const requested = Boolean(args.at(-1));
+          if (!requested) {
+            disableCalls += 1;
+            if (disableCalls === 1) await oldDisableBlocked;
+          }
+          if (generation < latestGeneration) return;
+          latestGeneration = generation;
+          enabled = requested;
+        },
+      },
+      errors: { report: () => undefined },
+    };
+    const store = new EditorStore({ viewport: { width: 1024, height: 768 } });
+    const rendered = render(<App store={store} desktop={desktop} task16FileLifecycle={task16Lifecycle()} />);
+    await listenersReady(events);
+    expect(enabled).toBe(true);
+
+    rendered.rerender(<App store={store} desktop={desktop} task16FileLifecycle={task16Lifecycle()} />);
+    for (let attempt = 0; attempt < 10 && events.listenerCount('uxml://menu-command') < 1; attempt += 1) {
+      await act(() => Promise.resolve());
+    }
+    releaseOldDisable();
+    await act(() => oldDisableBlocked);
+    await act(() => Promise.resolve());
+
+    expect(enabled).toBe(true);
+    rendered.unmount();
+  });
   it('mounts current menu commands and clean close handling, then disposes native listeners', async () => {
     const events = new FakeDesktopEvents();
     let closes = 0;
     const desktop: AppDesktopPorts = {
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
-      window: { setLifecycleReady: async () => undefined, resolveClose: async (_lease, resolution) => { if (resolution === 'close') closes += 1; } },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async (_lease, _generation, resolution) => { if (resolution === 'close') closes += 1; },
+        abandonClose: async () => undefined,
+      },
       menu: { setFileWorkflowEnabled: async () => undefined },
       errors: { report: () => undefined },
     };
@@ -99,10 +195,11 @@ describe('App desktop integration', () => {
 
     await act(() => events.emit('uxml://menu-command', { commandId: 'view.pane-source' }));
     expect(store.getSnapshot().activePanel).toBe('source');
-    await act(() => events.emit('uxml://close-requested', CLOSE_REQUEST));
+    await act(() => events.emit('uxml://close-requested', events.closeRequest()));
     expect(closes).toBe(1);
 
     rendered.unmount();
+    await act(() => Promise.resolve());
     expect(events.listenerCount('uxml://menu-command')).toBe(0);
     expect(events.listenerCount('uxml://close-requested')).toBe(0);
   });
@@ -113,7 +210,11 @@ describe('App desktop integration', () => {
     const desktop: AppDesktopPorts = {
       events,
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'discard' },
-      window: { setLifecycleReady: async () => undefined, resolveClose: async (_lease, resolution) => { if (resolution === 'close') closes += 1; } },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async (_lease, _generation, resolution) => { if (resolution === 'close') closes += 1; },
+        abandonClose: async () => undefined,
+      },
       menu: { setFileWorkflowEnabled: async () => undefined },
       errors: { report: () => undefined },
     };
@@ -121,7 +222,7 @@ describe('App desktop integration', () => {
     const rendered = render(<App store={store} desktop={desktop} />);
     await listenersReady(events);
 
-    await act(() => events.emit('uxml://close-requested', CLOSE_REQUEST));
+    await act(() => events.emit('uxml://close-requested', events.closeRequest()));
     expect(closes).toBe(0);
 
     rendered.unmount();
@@ -130,6 +231,7 @@ describe('App desktop integration', () => {
 
 class FakeDesktopEvents {
   private readonly listeners = new Map<string, Set<(event: DesktopEvent<unknown>) => void | Promise<void>>>();
+  private lifecycleGeneration: string | undefined;
 
   readonly listen = async (
     eventName: string,
@@ -147,6 +249,16 @@ class FakeDesktopEvents {
 
   listenerCount(eventName: string): number {
     return this.listeners.get(eventName)?.size ?? 0;
+  }
+
+  setLifecycleReady(generation: string, ready: boolean): void {
+    if (ready) this.lifecycleGeneration = generation;
+    else if (this.lifecycleGeneration === generation) this.lifecycleGeneration = undefined;
+  }
+
+  closeRequest(): Readonly<{ lease: string; lifecycleGeneration: string }> {
+    if (this.lifecycleGeneration === undefined) throw new Error('Lifecycle is not ready.');
+    return Object.freeze({ lease: CLOSE_LEASE, lifecycleGeneration: this.lifecycleGeneration });
   }
 }
 
@@ -166,13 +278,17 @@ function openSession(): DocumentSession {
   );
 }
 
-const CLOSE_REQUEST = Object.freeze({ lease: `close:v1:${'d'.repeat(16)}` });
+const CLOSE_LEASE = `close:v1:${'d'.repeat(16)}`;
 
 function task16Lifecycle(): Task16FileLifecyclePort {
   return Object.freeze({
-    acquireCloseState: () => Object.freeze({ generation: 0, dirtyState: 'clean' as const }),
+    runExclusiveCloseState: async (
+      _nativeLease: string,
+      operation: (lease: Readonly<{ generation: number; dirtyState: 'clean' }>) => void | Promise<void>,
+    ) => {
+      await operation(Object.freeze({ generation: 0, dirtyState: 'clean' as const }));
+    },
     finalValidateCloseState: () => true,
-    releaseCloseState: () => undefined,
     saveBeforeClose: () => 'saved' as const,
     save: () => undefined,
     saveAll: () => undefined,

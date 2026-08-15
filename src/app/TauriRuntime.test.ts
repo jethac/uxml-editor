@@ -17,22 +17,26 @@ describe('createTauriRuntimeBindings', () => {
       },
     });
     const lease = `close:v1:${'a'.repeat(16)}`;
+    const lifecycleGeneration = `lifecycle:v1:${'1'.repeat(16)}`;
 
     await (runtime.desktop.window as unknown as {
-      resolveClose(lease: string, action: string): Promise<void>;
-      setLifecycleReady(ready: boolean): Promise<void>;
-    }).resolveClose(lease, 'close');
+      resolveClose(lease: string, generation: string, action: string): Promise<void>;
+      setLifecycleReady(generation: string, ready: boolean): Promise<void>;
+    }).resolveClose(lease, lifecycleGeneration, 'close');
     await (runtime.desktop.window as unknown as {
-      setLifecycleReady(ready: boolean): Promise<void>;
-    }).setLifecycleReady(true);
+      setLifecycleReady(generation: string, ready: boolean): Promise<void>;
+    }).setLifecycleReady(lifecycleGeneration, true);
     await (runtime.desktop as unknown as {
-      menu: { setFileWorkflowEnabled(enabled: boolean): Promise<void> };
-    }).menu.setFileWorkflowEnabled(true);
+      menu: { setFileWorkflowEnabled(generation: string, enabled: boolean): Promise<void> };
+    }).menu.setFileWorkflowEnabled(`workflow:v1:${'1'.repeat(16)}`, true);
 
     expect(calls).toEqual([
-      { command: 'desktop_resolve_close', payload: { request: { lease, action: 'close' } } },
-      { command: 'desktop_set_lifecycle_ready', payload: { request: { ready: true } } },
-      { command: 'desktop_set_file_workflow_enabled', payload: { request: { enabled: true } } },
+      { command: 'desktop_resolve_close', payload: { request: { lease, lifecycleGeneration, action: 'close' } } },
+      { command: 'desktop_set_lifecycle_ready', payload: { request: { lifecycleGeneration, ready: true } } },
+      {
+        command: 'desktop_set_file_workflow_enabled',
+        payload: { request: { workflowGeneration: `workflow:v1:${'1'.repeat(16)}`, enabled: true } },
+      },
     ]);
   });
   it('shares injected invoke/listen/timers with TauriHost and resolves close through native authority', async () => {
@@ -58,12 +62,13 @@ describe('createTauriRuntimeBindings', () => {
     await expect(runtime.host.chooseProject()).resolves.toBeNull();
     await expect(runtime.desktop.confirm.confirmClose()).resolves.toBe('discard');
     const lease = `close:v1:${'b'.repeat(16)}`;
-    await runtime.desktop.window.resolveClose(lease, 'close');
+    const lifecycleGeneration = `lifecycle:v1:${'2'.repeat(16)}`;
+    await runtime.desktop.window.resolveClose(lease, lifecycleGeneration, 'close');
 
     expect(calls).toEqual([
       { command: 'host_choose_project', payload: undefined },
       { command: 'desktop_confirm_close', payload: undefined },
-      { command: 'desktop_resolve_close', payload: { request: { lease, action: 'close' } } },
+      { command: 'desktop_resolve_close', payload: { request: { lease, lifecycleGeneration, action: 'close' } } },
     ]);
   });
 
@@ -94,6 +99,7 @@ describe('createTauriRuntimeBindings', () => {
 
     await expect(runtime.desktop.window.resolveClose(
       `close:v1:${'c'.repeat(16)}`,
+      `lifecycle:v1:${'3'.repeat(16)}`,
       'close',
     )).rejects.toThrow('returned unexpected data');
   });
@@ -115,8 +121,28 @@ describe('createTauriRuntimeBindings', () => {
 
     await expect(runtime.desktop.window.resolveClose(
       `close:v1:${'d'.repeat(16)}`,
+      `lifecycle:v1:${'4'.repeat(16)}`,
       'close',
     )).rejects.toThrow('native close failed');
     expect(commands).toEqual(['desktop_resolve_close']);
+  });
+
+  it('rejects malformed lifecycle and workflow generations before native invocation', async () => {
+    const commands: string[] = [];
+    const runtime = createTauriRuntimeBindings({
+      invoke: async (command) => { commands.push(command); return null; },
+      listen: async () => () => undefined,
+      timers: {
+        now: () => 0,
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+    });
+
+    await expect(runtime.desktop.window.setLifecycleReady('lifecycle:v1:SHORT', true))
+      .rejects.toThrow('lifecycle generation is malformed');
+    await expect(runtime.desktop.menu.setFileWorkflowEnabled('workflow:v1:SHORT', true))
+      .rejects.toThrow('workflow generation is malformed');
+    expect(commands).toEqual([]);
   });
 });

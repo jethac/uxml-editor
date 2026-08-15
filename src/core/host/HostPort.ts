@@ -54,7 +54,7 @@ export interface MessageRequest {
 export interface HostCapabilities {
   readonly mode: 'memory' | 'browser-file-system' | 'demo-memory' | 'tauri';
   readonly projectSelection: 'deterministic' | 'directory-picker' | 'demo';
-  readonly atomicReplace: 'guaranteed' | 'best-effort-safe-write';
+  readonly atomicReplace: 'guaranteed' | 'best-effort-safe-write' | 'unsupported';
   readonly watch: 'deterministic' | 'native-revision-aware' | 'unsupported';
   readonly appData: 'memory' | 'local-storage' | 'app-data' | 'unsupported';
   readonly dialogs: 'deterministic' | 'browser' | 'native' | 'unsupported';
