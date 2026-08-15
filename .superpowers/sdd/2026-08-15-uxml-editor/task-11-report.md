@@ -109,3 +109,59 @@ Temporary Playwright geometry/screenshot harness was removed and its Vite server
 - Frame disposal, stale completion, diagnostics replacement, generated descendants, overlay geometry, gestures, controls, all seven states, errors, empty state, and both Workbench layouts have direct tests.
 - Selector-keyed adapter state cannot safely target every unnamed or duplicate-named element. Such selections intentionally disable pseudo-state controls instead of applying a broader selector to unrelated nodes.
 - Playwright emits the existing `NO_COLOR` / `FORCE_COLOR` warning; all five tests pass.
+
+## Fix Round 1
+
+### Findings Addressed
+
+- Pseudo states are now bound to a `DocumentSession` and stable element locator. A session replacement clears them; same-session reparses preserve them only when the recorded locator still maps to exactly one current element with a unique authored-name selector.
+- Replaced the selector escape routine with the CSSOM identifier escaping algorithm, covering leading digits, leading negative digits, and punctuation without widening a selector to a sibling.
+- Pointer panning now delegates deltas to `ViewportModel.panBy`.
+- Disabled pseudo-state controls now expose the concise live description: `A unique authored name is required for pseudo states.`
+
+The deferred canvas border/fit Minor was not changed.
+
+### TDD Evidence
+
+Initial focused RED:
+
+```text
+npm test -- src/features/canvas
+Test Files  1 failed | 1 passed (2)
+Tests       6 failed | 14 passed (20)
+```
+
+The failures covered cross-session state transfer, invalid `-1` identifier escaping, leading digit/punctuation escaping, direct pointer pan arithmetic, and the missing disabled-control status. A follow-up cross-session return regression also failed as intended before clearing state on session replacement:
+
+```text
+expected { '#target': [ 'hover' ] } to be undefined
+```
+
+Final focused GREEN:
+
+```text
+npm test -- src/features/canvas
+Test Files  2 passed (2)
+Tests       20 passed (20)
+```
+
+### Final Verification
+
+```text
+npm test
+Test Files  26 passed (26)
+Tests       404 passed (404)
+```
+
+```text
+npm run build
+tsc --noEmit && vite build
+built in 464ms
+```
+
+```text
+npm run test:e2e
+5 passed (21.7s)
+```
+
+`git diff --check` completed with exit `0` before this report entry. Playwright emitted only the existing `NO_COLOR` / `FORCE_COLOR` warning.

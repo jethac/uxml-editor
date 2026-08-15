@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   EditorDiagnostic,
   EditorNodeId,
@@ -16,6 +16,7 @@ import { UxmlPreviewAdapter } from '../../core/adapter/UxmlPreviewAdapter';
 import { DocumentSession } from '../../core/documents/DocumentSession';
 import { EditorStore } from '../../core/store/EditorStore';
 import { PreviewCanvas } from './PreviewCanvas';
+import { ViewportModel } from './ViewportModel';
 
 const ENTRY = 'Assets/UI/Main.uxml';
 const UXML = `<ui:UXML xmlns:ui="UnityEngine.UIElements">
@@ -230,6 +231,121 @@ describe('PreviewCanvas rendering and viewport controls', () => {
     expect(adapter.renderOptions.at(-1)?.activeStates).toBeUndefined();
   });
 
+  it('clears selected pseudo states when a different session reuses document-local node IDs', async () => {
+    const user = userEvent.setup();
+    const firstAdapter = new ControlledPreviewPort('first states', []);
+    const first = openSession(firstAdapter);
+    const store = new EditorStore({ session: first });
+    render(<PreviewCanvas store={store} />);
+    await user.click(await screen.findByText('first states preview'));
+    await user.click(screen.getByLabelText('Hover'));
+    await waitFor(() => expect(firstAdapter.renderOptions.at(-1)?.states).toEqual({ '#target': ['hover'] }));
+
+    const secondAdapter = new ControlledPreviewPort('second states', [], false, 'replacement');
+    const second = openSession(secondAdapter, UXML.replace('name="target"', 'name="replacement"'));
+    act(() => store.dispatch({ type: 'context/set', session: second, host: null }));
+
+    await screen.findByText('second states preview');
+    expect(secondAdapter.renderOptions.at(-1)?.states).toBeUndefined();
+
+    act(() => store.dispatch({ type: 'context/set', session: first, host: null }));
+    await screen.findByText('first states preview');
+    expect(firstAdapter.renderOptions.at(-1)?.states).toBeUndefined();
+  });
+
+  it('clears pseudo states when reparsing the same session no longer resolves the original locator', async () => {
+    const user = userEvent.setup();
+    const adapter = new ControlledPreviewPort('reparse states', []);
+    const session = openSession(adapter);
+    const store = new EditorStore({ session });
+    render(<PreviewCanvas store={store} />);
+    await user.click(await screen.findByText('reparse states preview'));
+    await user.click(screen.getByLabelText('Hover'));
+    await waitFor(() => expect(adapter.renderOptions.at(-1)?.states).toEqual({ '#target': ['hover'] }));
+
+    const start = UXML.indexOf('target');
+    act(() => {
+      session.history.execute({
+        id: 'rename-target',
+        label: 'Rename target',
+        patchesByFile: new Map([[ENTRY, [{ start, end: start + 6, replacement: 'replacement' }]]]),
+      });
+      store.dispatch({ type: 'session/sync' });
+    });
+
+    await waitFor(() => expect(adapter.renderOptions.at(-1)?.states).toBeUndefined());
+  });
+
+  it('escapes authored names for pseudo states without targeting sibling identifiers', async () => {
+    const user = userEvent.setup();
+    const adapter = new ControlledPreviewPort('escaped states', [], false, '-1state');
+    const document = UXML.replace('name="target"', 'name="-1state"').replace(
+      '</ui:VisualElement>',
+      '  <ui:Button name="-1state-sibling" text="Other" />\n  </ui:VisualElement>',
+    );
+    const store = new EditorStore({ session: openSession(adapter, document) });
+    render(<PreviewCanvas store={store} />);
+    await user.click(await screen.findByText('escaped states preview'));
+    await user.click(screen.getByLabelText('Hover'));
+
+    await waitFor(() => expect(adapter.renderOptions.at(-1)?.states).toEqual({ '#-\\31 state': ['hover'] }));
+    const host = window.document.createElement('div');
+    const target = window.document.createElement('button');
+    const sibling = window.document.createElement('button');
+    target.id = '-1state';
+    sibling.id = '-1state-sibling';
+    host.append(target, sibling);
+    expect(host.querySelector(Object.keys(adapter.renderOptions.at(-1)?.states ?? {})[0])).toBe(target);
+  });
+
+  it('uses standards-correct selectors for leading digits and punctuation in authored names', async () => {
+    const user = userEvent.setup();
+    const adapter = new ControlledPreviewPort('punctuation states', [], false, '1state');
+    const document = UXML.replace('name="target"', 'name="1state"');
+    const store = new EditorStore({ session: openSession(adapter, document) });
+    render(<PreviewCanvas store={store} />);
+    await user.click(await screen.findByText('punctuation states preview'));
+    await user.click(screen.getByLabelText('Hover'));
+    await waitFor(() => expect(adapter.renderOptions.at(-1)?.states).toEqual({ '#\\31 state': ['hover'] }));
+
+    const punctuationAdapter = new ControlledPreviewPort('punctuation states two', [], false, 'item:state');
+    const punctuationStore = new EditorStore({
+      session: openSession(punctuationAdapter, UXML.replace('name="target"', 'name="item:state"')),
+    });
+    render(<PreviewCanvas store={punctuationStore} />);
+    await user.click(await screen.findByText('punctuation states two preview'));
+    await user.click(screen.getAllByLabelText('Hover').at(-1)!);
+    await waitFor(() => expect(punctuationAdapter.renderOptions.at(-1)?.states).toEqual({ '#item\\:state': ['hover'] }));
+  });
+
+  it('delegates pointer panning to ViewportModel.panBy', async () => {
+    const panBy = vi.spyOn(ViewportModel.prototype, 'panBy');
+    const adapter = new ControlledPreviewPort('pan model', []);
+    const store = new EditorStore({ session: openSession(adapter) });
+    render(<PreviewCanvas store={store} />);
+    await screen.findByText('pan model preview');
+    const field = screen.getByTestId('canvas-field');
+    act(() => store.dispatch({ type: 'tool/set', tool: 'pan' }));
+
+    fireEvent.pointerDown(field, { button: 0, pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(field, { pointerId: 1, clientX: 130, clientY: 120 });
+
+    expect(panBy).toHaveBeenCalledWith({ x: 30, y: 20 });
+    panBy.mockRestore();
+  });
+
+  it('describes why pseudo-state controls are disabled for an unnamed selection', async () => {
+    const user = userEvent.setup();
+    const adapter = new ControlledPreviewPort('unnamed state', [], false, null);
+    const document = UXML.replace(' name="target"', '');
+    const store = new EditorStore({ session: openSession(adapter, document) });
+    render(<PreviewCanvas store={store} />);
+    await user.click(await screen.findByText('unnamed state preview'));
+
+    expect(screen.getByLabelText('Hover')).toBeDisabled();
+    expect(screen.getByText('A unique authored name is required for pseudo states.')).toBeVisible();
+  });
+
   it('combines parse and current render diagnostics without render loops and replaces old render warnings', async () => {
     const user = userEvent.setup();
     const adapter = new ControlledPreviewPort('diagnostics', []);
@@ -277,8 +393,8 @@ function diagnostic(message: string, origin: EditorDiagnostic['origin']): Editor
   return { origin, severity: 'warning', kind: 'malformed', message };
 }
 
-function openSession(adapter: UxmlPreviewPort): DocumentSession {
-  return DocumentSession.open(new Map([[ENTRY, UXML]]), ENTRY, adapter);
+function openSession(adapter: UxmlPreviewPort, document = UXML): DocumentSession {
+  return DocumentSession.open(new Map([[ENTRY, document]]), ENTRY, adapter);
 }
 
 function nodeNamed(document: ParsedPreviewDocument, name: string): EditorNodeId {
@@ -297,6 +413,40 @@ function nodeNamed(document: ParsedPreviewDocument, name: string): EditorNodeId 
   return found;
 }
 
+function nodeWithoutName(document: ParsedPreviewDocument): EditorNodeId {
+  const visit = (node: ParsedPreviewDocument['root']): EditorNodeId | null => {
+    if (node.id !== document.root.id && !node.attributes.some((attribute) => attribute.name === 'name')) return node.id;
+    for (const child of node.children) {
+      const found = visit(child);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  const found = visit(document.root);
+  if (found === null) throw new Error('Missing unnamed button fixture node.');
+  return found;
+}
+
+function nodeNamedOrFirstChild(document: ParsedPreviewDocument, name: string): EditorNodeId {
+  try {
+    return nodeNamed(document, name);
+  } catch {
+    const parent = findNode(document.root, nodeNamed(document, 'parent'));
+    const fallback = parent?.children[0]?.id;
+    if (fallback === undefined) throw new Error(`Missing fixture node ${name}.`);
+    return fallback;
+  }
+}
+
+function findNode(root: ParsedPreviewDocument['root'], nodeId: EditorNodeId): ParsedPreviewDocument['root'] | null {
+  if (root.id === nodeId) return root;
+  for (const child of root.children) {
+    const found = findNode(child, nodeId);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 class ControlledPreviewPort implements UxmlPreviewPort {
   private readonly base = new UxmlPreviewAdapter();
   private readonly pending: Array<{
@@ -313,6 +463,7 @@ class ControlledPreviewPort implements UxmlPreviewPort {
     private readonly label: string,
     private readonly events: string[],
     private readonly deferred = false,
+    private readonly targetName: string | null = 'target',
   ) {}
 
   get pendingCount(): number {
@@ -363,7 +514,7 @@ class ControlledPreviewPort implements UxmlPreviewPort {
 
   private createFrame(parsed: ParsedPreviewDocument, container: HTMLElement): PreviewFrame {
     const parentId = nodeNamed(parsed, 'parent');
-    const targetId = nodeNamed(parsed, 'target');
+    const targetId = this.targetName === null ? nodeWithoutName(parsed) : nodeNamedOrFirstChild(parsed, this.targetName);
     const parent = document.createElement('div');
     const target = document.createElement('button');
     const generated = document.createElement('span');

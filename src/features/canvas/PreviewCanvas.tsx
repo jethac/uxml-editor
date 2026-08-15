@@ -19,6 +19,8 @@ import type {
   TextMeasurementContext,
 } from '../../core/adapter/types';
 import type { EditorStore } from '../../core/store/EditorStore';
+import type { DocumentSession } from '../../core/documents/DocumentSession';
+import type { ElementLocator } from '../../core/documents/ElementLocator';
 import { CanvasOverlay } from './CanvasOverlay';
 import { ViewportModel } from './ViewportModel';
 
@@ -34,6 +36,15 @@ const PSEUDO_STATES = Object.freeze([
   'hover', 'active', 'focus', 'disabled', 'checked', 'selected', 'inactive',
 ] as const);
 type PseudoState = typeof PSEUDO_STATES[number];
+interface PseudoStateEntry {
+  readonly locator: ElementLocator;
+  readonly states: ReadonlySet<PseudoState>;
+}
+
+interface PseudoStateStore {
+  readonly session: DocumentSession;
+  readonly entries: ReadonlyMap<string, PseudoStateEntry>;
+}
 
 const PRESETS = Object.freeze({
   desktop: { width: 1280, height: 720 },
@@ -53,6 +64,7 @@ export function PreviewCanvas({
   const fieldRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<PreviewFrame | null>(null);
   const generationRef = useRef(0);
+  const stateSessionRef = useRef<DocumentSession | null>(session);
   const panGestureRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [panelSize, setPanelSize] = useState<PreviewSize>(DEFAULT_PANEL_SIZE);
@@ -63,20 +75,33 @@ export function PreviewCanvas({
   const [hoveredNodeId, setHoveredNodeId] = useState<EditorNodeId | null>(null);
   const [showSafeArea, setShowSafeArea] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
-  const [statesByNode, setStatesByNode] = useState<ReadonlyMap<EditorNodeId, ReadonlySet<PseudoState>>>(new Map());
+  const [pseudoStateStore, setPseudoStateStore] = useState<PseudoStateStore | null>(null);
 
   const selectedNodeId = snapshot.selection[0] ?? null;
   const selectedParentNodeId = sessionDocument === null || selectedNodeId === null
     ? null
     : parentNodeId(sessionDocument.root, selectedNodeId);
-  const selectedStates = selectedNodeId === null ? undefined : statesByNode.get(selectedNodeId);
+  const selectedLocator = session === null || selectedNodeId === null ? null : session.locatorFor(selectedNodeId);
+  const selectedStateKey = selectedLocator === null ? null : locatorKey(selectedLocator);
+  const selectedStates = pseudoStateStore?.session === session && selectedStateKey !== null
+    ? pseudoStateStore.entries.get(selectedStateKey)?.states
+    : undefined;
   const selectedSelector = sessionDocument === null || selectedNodeId === null
     ? null
     : narrowStateSelector(sessionDocument.root, selectedNodeId);
   const renderStates = useMemo(
-    () => sessionDocument === null ? undefined : stateOptions(sessionDocument.root, statesByNode),
-    [sessionDocument, statesByNode],
+    () => session === null || sessionDocument === null ? undefined : stateOptions(session, sessionDocument.root, pseudoStateStore),
+    [pseudoStateStore, session, sessionDocument],
   );
+  const stateControlDescription = selectedNodeId !== null && selectedSelector === null
+    ? 'A unique authored name is required for pseudo states.'
+    : null;
+
+  useEffect(() => {
+    if (stateSessionRef.current === session) return;
+    stateSessionRef.current = session;
+    setPseudoStateStore(null);
+  }, [session]);
 
   useEffect(() => {
     const container = rendererRef.current;
@@ -210,7 +235,7 @@ export function PreviewCanvas({
     const dx = event.clientX - gesture.x;
     const dy = event.clientY - gesture.y;
     panGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-    setPan((current) => ({ x: current.x + dx, y: current.y + dy }));
+    setPan((current) => new ViewportModel({ zoom: snapshot.zoom, pan: current }).panBy({ x: dx, y: dy }).pan);
   };
 
   const endPan = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -220,15 +245,15 @@ export function PreviewCanvas({
   };
 
   const toggleState = (state: PseudoState) => {
-    if (selectedNodeId === null || selectedSelector === null) return;
-    setStatesByNode((current) => {
-      const next = new Map(current);
-      const states = new Set(next.get(selectedNodeId) ?? []);
+    if (session === null || selectedLocator === null || selectedStateKey === null || selectedSelector === null) return;
+    setPseudoStateStore((current) => {
+      const entries = new Map(current?.session === session ? current.entries : []);
+      const states = new Set(entries.get(selectedStateKey)?.states ?? []);
       if (states.has(state)) states.delete(state);
       else states.add(state);
-      if (states.size === 0) next.delete(selectedNodeId);
-      else next.set(selectedNodeId, states);
-      return next;
+      if (states.size === 0) entries.delete(selectedStateKey);
+      else entries.set(selectedStateKey, { locator: selectedLocator, states });
+      return { session, entries };
     });
   };
 
@@ -266,7 +291,7 @@ export function PreviewCanvas({
           <input type="checkbox" checked={showSafeArea} onChange={(event) => setShowSafeArea(event.target.checked)} />
           <span>Show safe area</span>
         </label>
-        <fieldset className="canvas-states" disabled={selectedSelector === null}>
+        <fieldset className="canvas-states" disabled={selectedSelector === null} aria-describedby={stateControlDescription === null ? undefined : 'canvas-state-description'}>
           <legend>Element states</legend>
           {PSEUDO_STATES.map((state) => (
             <label key={state} className="canvas-check">
@@ -275,6 +300,7 @@ export function PreviewCanvas({
             </label>
           ))}
         </fieldset>
+        {stateControlDescription !== null && <p id="canvas-state-description" role="status">{stateControlDescription}</p>}
       </div>
       <div
         ref={fieldRef}
@@ -333,9 +359,14 @@ function narrowStateSelector(root: EditorElement, target: EditorNodeId): string 
   return matches.length === 1 ? `#${escapeSelectorIdentifier(authoredName)}` : null;
 }
 
-function stateOptions(root: EditorElement, statesByNode: ReadonlyMap<EditorNodeId, ReadonlySet<PseudoState>>): Readonly<Record<string, readonly string[]>> | undefined {
+function stateOptions(session: DocumentSession, root: EditorElement, store: PseudoStateStore | null): Readonly<Record<string, readonly string[]>> | undefined {
+  if (store?.session !== session) return undefined;
   const options: Record<string, readonly string[]> = {};
-  for (const [nodeId, states] of statesByNode) {
+  const elements = listElements(root);
+  for (const { locator, states } of store.entries.values()) {
+    const matches = elements.filter((element) => sameLocator(session.locatorFor(element.id), locator));
+    if (matches.length !== 1) continue;
+    const nodeId = matches[0].id;
     const selector = narrowStateSelector(root, nodeId);
     if (selector !== null && states.size > 0) options[selector] = PSEUDO_STATES.filter((state) => states.has(state));
   }
@@ -347,7 +378,42 @@ function listElements(root: EditorElement): readonly EditorElement[] {
 }
 
 function escapeSelectorIdentifier(value: string): string {
-  return value.replace(/(^-?\d)|[^a-zA-Z0-9_-]/g, (character) => `\\${character.codePointAt(0)?.toString(16)} `);
+  let escaped = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit === 0) {
+      escaped += '\uFFFD';
+    } else if (
+      (codeUnit >= 1 && codeUnit <= 31)
+      || codeUnit === 127
+      || (index === 0 && codeUnit >= 48 && codeUnit <= 57)
+      || (index === 1 && value.charCodeAt(0) === 45 && codeUnit >= 48 && codeUnit <= 57)
+    ) {
+      escaped += `\\${codeUnit.toString(16)} `;
+    } else if (index === 0 && codeUnit === 45 && value.length === 1) {
+      escaped += '\\-';
+    } else if (
+      codeUnit >= 128
+      || codeUnit === 45
+      || codeUnit === 95
+      || (codeUnit >= 48 && codeUnit <= 57)
+      || (codeUnit >= 65 && codeUnit <= 90)
+      || (codeUnit >= 97 && codeUnit <= 122)
+    ) {
+      escaped += value[index];
+    } else {
+      escaped += `\\${value[index]}`;
+    }
+  }
+  return escaped;
+}
+
+function locatorKey(locator: ElementLocator): string {
+  return JSON.stringify(locator);
+}
+
+function sameLocator(left: ElementLocator | null, right: ElementLocator): boolean {
+  return left !== null && locatorKey(left) === locatorKey(right);
 }
 
 function positiveFinite(value: number): boolean {
