@@ -29,13 +29,17 @@ import type {
   StyleExplanationOptions,
   StyleExplanation,
   StyleExplanationOrigin,
+  EditorStylesheet,
+  UssSourcePort,
   UxmlPreviewPort,
 } from './types';
 import { freezeParsedPreviewDocument } from './immutableParsedDocument';
+import { editorStylesheetFromParsed, parseEditorDeclarationList } from './UssSourceAdapter';
 
 const documentModels = new WeakMap<ParsedPreviewDocument, UxmlDocument>();
 const documentNodes = new WeakMap<ParsedPreviewDocument, ReadonlyMap<EditorNodeId, ElementNode>>();
 let layoutEnginePromise: Promise<void> | undefined;
+const EMPTY_UXML = '<ui:UXML xmlns:ui="UnityEngine.UIElements" />';
 
 function editorNodeId(nodeId: NodeId): EditorNodeId {
   return String(nodeId) as EditorNodeId;
@@ -168,6 +172,7 @@ function editorStyleOrigin(
         kind: 'rule',
         ...(source === undefined ? {} : { source }),
         sheetPath: originsBySheet[origin.sheet] ?? null,
+        sheetIndex: origin.sheet,
         itemIndex: origin.item,
         declarationIndex: origin.declIndex,
         ...(origin.states === undefined ? {} : { states: [...origin.states] }),
@@ -216,9 +221,22 @@ export class RenderSupersededError extends Error {
   }
 }
 
-export class UxmlPreviewAdapter implements UxmlPreviewPort {
+export class UxmlPreviewAdapter implements UxmlPreviewPort, UssSourcePort {
   private activeFrame: PreviewFrame | undefined;
   private renderGeneration = 0;
+
+  parseStylesheet(path: string, source: string): EditorStylesheet {
+    return editorStylesheetFromParsed(path, parse(EMPTY_UXML, source).sheets[0]);
+  }
+
+  parseDeclarationList(path: string, source: string, start: number, end: number) {
+    const prefix = '__inline__ {';
+    const sheet = editorStylesheetFromParsed(
+      path,
+      parse(EMPTY_UXML, `${prefix}${source.slice(start, end)}}`).sheets[0],
+    );
+    return parseEditorDeclarationList(path, sheet.rules[0]?.declarations ?? [], start);
+  }
 
   parseProject(input: import('./types').ProjectParseInput): ParsedPreviewDocument {
     const initialSource = cloneInput(input);
@@ -245,6 +263,7 @@ export class UxmlPreviewAdapter implements UxmlPreviewPort {
       source,
       root,
       originsBySheet,
+      localStyleSheetIndices: [...new Set((model.styleRoots ?? []).map((root) => root.sheet))],
       diagnostics: model.warnings.map((warning) => diagnosticFromWarning(
         warning,
         'parse',

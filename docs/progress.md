@@ -364,3 +364,38 @@ replaceable.
   session, and history suites passed 50 tests; `npm test` passed 10 files and
   139 tests; `npm run build` passed `tsc --noEmit` and Vite bundling with 16
   modules; and `git diff --check` exited 0 with only line-ending notices.
+
+## Task 6 USS Commands And Provenance-Aware Targets
+
+- `styleTargetsFor` now turns cascade explanations into frozen, deterministic
+  write choices: winning and losing authored declarations, a base-state inline
+  override, and one new-rule destination per directly linked local sheet.
+  Built-in/default origins never acquire fake files, while inherited rule and
+  inline values retain their actual authored origin.
+- Rule targets retain exact sheet, item, declaration, selector, rule, property,
+  value, state, and source identities. Target IDs use canonical tuples, and
+  command planning deep-snapshots getter-backed caller objects before validating
+  the current session's exact source snapshot and standalone parse metadata.
+- The adapter owns independent USS and inline declaration parsing. Imported
+  files are parsed as their own buffers through an editor-owned immutable
+  contract; `uxml-preview` remains imported only by `UxmlPreviewAdapter.ts`.
+- `setDeclaration` patches only the parser-owned value, `removeDeclaration`
+  removes one selected declaration plus its exact whitespace/semicolon
+  terminator, `insertRule` appends with inferred indentation/newline/final-
+  newline conventions, and `setInlineStyle` edits or inserts inside the quoted
+  attribute value. A missing inline attribute delegates to Task 5
+  `setAttribute` rather than replacing an open tag.
+- Preservation coverage includes relative and same-named imports, multiple
+  linked sheets, CRLF, comments, XML quote/entity spelling, custom properties,
+  shorthands, duplicate properties, unsupported selectors, unknown at-rules,
+  balanced malformed recovery regions, and untouched non-target files.
+- Pseudo-state requests are canonical and exact. Unsupported, duplicate, or
+  malformed state input rejects; inline targets are never offered for a state
+  they cannot represent. Stale parsed nodes, invalid properties, forged IDs,
+  partial adapters, stale source snapshots, and unsafe append boundaries reject
+  with owned error codes before mutation.
+- Focused red/green cycles covered adapter metadata, provenance ordering,
+  inherited and pseudo-state origins, imported writes, exact removal, local
+  formatting, inline preservation, stale identity, parser-valid values,
+  malformed boundaries, caller mutation, and source-span trivia. Transactions
+  are deterministic across execute, undo, redo, and replay.

@@ -18,6 +18,9 @@ export function freezeParsedPreviewDocument(document: ParsedPreviewDocument): Pa
   mutable.root = freezeElement(document.root);
   mutable.diagnostics = Object.freeze(document.diagnostics.map(freezeDiagnostic));
   mutable.originsBySheet = Object.freeze([...document.originsBySheet]);
+  if (document.localStyleSheetIndices !== undefined) {
+    mutable.localStyleSheetIndices = Object.freeze([...document.localStyleSheetIndices]);
+  }
   return Object.freeze(document);
 }
 
@@ -29,7 +32,8 @@ function isDeepFrozenDocument(document: ParsedPreviewDocument): boolean {
     && Object.isFrozen(document.diagnostics)
     && document.diagnostics.every((diagnostic) => Object.isFrozen(diagnostic)
       && (diagnostic.source === undefined || Object.isFrozen(diagnostic.source)))
-    && Object.isFrozen(document.originsBySheet);
+    && Object.isFrozen(document.originsBySheet)
+    && (document.localStyleSheetIndices === undefined || Object.isFrozen(document.localStyleSheetIndices));
 }
 
 function isDeepFrozenElement(element: EditorElement): boolean {

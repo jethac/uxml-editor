@@ -551,6 +551,56 @@ describe('UxmlPreviewAdapter', () => {
     }
   });
 
+  it('parses one target USS buffer into immutable editor-owned source metadata', () => {
+    const adapter = new UxmlPreviewAdapter();
+    const source = `@import "base.uss";\r\n/* keep */\r\nButton {\r\n  --gap: 2px;\r\n  margin: 1px 2px;\r\n  margin: 3px;\r\n}\r\n:nth-child(2) { color: red; }`;
+    const sheet = adapter.parseStylesheet('Assets/UI/target.uss', source);
+    const buttonStart = source.indexOf('Button');
+    const customStart = source.indexOf('--gap');
+    const firstMarginStart = source.indexOf('margin');
+    const secondMarginStart = source.indexOf('margin', firstMarginStart + 1);
+
+    expect(sheet.path).toBe('Assets/UI/target.uss');
+    expect(sheet.rules).toEqual([
+      {
+        itemIndex: 1,
+        source: { path: 'Assets/UI/target.uss', start: buttonStart, end: source.indexOf('}', buttonStart) + 1 },
+        selectorSource: { path: 'Assets/UI/target.uss', start: buttonStart, end: buttonStart + 'Button'.length },
+        declarations: [
+          {
+            declarationIndex: 0,
+            property: '--gap',
+            value: '2px',
+            source: { path: 'Assets/UI/target.uss', start: customStart, end: customStart + '--gap: 2px'.length },
+          },
+          {
+            declarationIndex: 1,
+            property: 'margin',
+            value: '1px 2px',
+            source: { path: 'Assets/UI/target.uss', start: firstMarginStart, end: firstMarginStart + 'margin: 1px 2px'.length },
+          },
+          {
+            declarationIndex: 2,
+            property: 'margin',
+            value: '3px',
+            source: { path: 'Assets/UI/target.uss', start: secondMarginStart, end: secondMarginStart + 'margin: 3px'.length },
+          },
+        ],
+      },
+      expect.objectContaining({
+        itemIndex: 2,
+        selectorSource: expect.objectContaining({
+          start: source.indexOf(':nth-child(2)'),
+          end: source.indexOf(':nth-child(2)') + ':nth-child(2)'.length,
+        }),
+      }),
+    ]);
+    expect(Object.isFrozen(sheet)).toBe(true);
+    expect(Object.isFrozen(sheet.rules)).toBe(true);
+    expect(Object.isFrozen(sheet.rules[0].declarations[0].source)).toBe(true);
+    expect(() => (sheet.rules as unknown[]).push({})).toThrow();
+  });
+
   it('keeps the preview pin and detects every import form outside the adapter boundary', () => {
     const packageJson = JSON.parse(packageJsonText) as {
       dependencies: Record<string, string>;

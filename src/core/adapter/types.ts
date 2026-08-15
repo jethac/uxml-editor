@@ -65,6 +65,7 @@ export interface ParsedPreviewDocument {
   readonly root: EditorElement;
   readonly diagnostics: readonly EditorDiagnostic[];
   readonly originsBySheet: readonly (string | null)[];
+  readonly localStyleSheetIndices?: readonly number[];
 }
 
 export interface SerializedProject {
@@ -128,6 +129,7 @@ export type StyleExplanationOrigin =
     readonly kind: 'rule';
     readonly source?: EditorSourceSpan;
     readonly sheetPath: string | null;
+    readonly sheetIndex: number;
     readonly itemIndex: number;
     readonly declarationIndex: number;
     readonly states?: readonly string[];
@@ -172,6 +174,35 @@ export interface StyleExplanation {
   readonly property: string;
   readonly computed: StyleComputedValue;
   readonly candidates: readonly StyleCandidate[];
+}
+
+export interface EditorUssDeclaration {
+  readonly declarationIndex: number;
+  readonly property: string;
+  readonly value: string;
+  readonly source: EditorSourceSpan;
+}
+
+export interface EditorUssRule {
+  readonly itemIndex: number;
+  readonly source: EditorSourceSpan;
+  readonly selectorSource: EditorSourceSpan;
+  readonly declarations: readonly EditorUssDeclaration[];
+}
+
+export interface EditorStylesheet {
+  readonly path: string;
+  readonly rules: readonly EditorUssRule[];
+}
+
+export interface UssSourcePort {
+  parseStylesheet(path: string, source: string): EditorStylesheet;
+  parseDeclarationList(
+    path: string,
+    source: string,
+    start: number,
+    end: number,
+  ): readonly EditorUssDeclaration[];
 }
 
 export interface UxmlPreviewPort {
