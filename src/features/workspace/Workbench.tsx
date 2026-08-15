@@ -7,11 +7,13 @@ import {
   WORKBENCH_SEPARATOR_SIZE,
 } from '../../core/store/EditorLayoutStorage';
 import type { EditorPanel, EditorSnapshot, EditorStore } from '../../core/store/EditorStore';
+import { PreviewCanvas } from '../canvas/PreviewCanvas';
 import { HierarchyPanel } from '../hierarchy/HierarchyPanel';
 import { PalettePanel } from '../palette/PalettePanel';
 import { CommandBar } from './CommandBar';
 import { PaneResizer } from './PaneResizer';
 import '../../styles/workbench.css';
+import '../../styles/canvas.css';
 
 export interface WorkbenchProps {
   readonly store: EditorStore;
@@ -101,7 +103,7 @@ function DesktopWorkspace({ store, snapshot, setPaneRef }: DesktopWorkspaceProps
         movementSign={1}
         onResize={(size, persist) => store.dispatch({ type: 'panes/resize', pane: 'left', size, persist })}
       />
-      <CanvasPane />
+      <PreviewCanvas store={store} />
       <PaneResizer
         testId="right-resizer"
         label="Resize inspector pane"
@@ -159,7 +161,7 @@ function CompactWorkspace({ store, snapshot }: WorkspaceProps) {
 
   return (
     <>
-      <CanvasPane />
+      <PreviewCanvas store={store} />
       <div className="compact-tools" data-testid="compact-tools">
         <div className="compact-tabs" role="tablist" aria-label="Tool panes">
           {PANELS.map((panel, index) => (
@@ -247,21 +249,6 @@ function ToolPane({ kind, store, snapshot, compact, hidden = false, paneRef }: T
                 ))}
               </ul>
         )}
-      </div>
-    </section>
-  );
-}
-
-function CanvasPane() {
-  return (
-    <section
-      className="workspace-pane workspace-pane--canvas"
-      data-testid="canvas-pane"
-      aria-labelledby="canvas-heading"
-    >
-      <h2 id="canvas-heading">Canvas</h2>
-      <div className="canvas-field">
-        <div className="canvas-surface" />
       </div>
     </section>
   );

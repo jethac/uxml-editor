@@ -27,6 +27,18 @@ class RecordingLayoutStorage implements EditorLayoutStorage {
 }
 
 describe('Workbench regions and command bar', () => {
+  it.each([
+    ['desktop', 1366],
+    ['compact', 720],
+  ])('mounts the interactive preview canvas in %s layout', (mode, width) => {
+    render(<Workbench store={new EditorStore({ viewport: { width, height: 768 } })} />);
+
+    expect(screen.getByTestId('canvas-pane')).toBeVisible();
+    expect(screen.getByLabelText('Device preset')).toBeVisible();
+    expect(screen.getByTestId('canvas-field')).toBeVisible();
+    expect(screen.getByRole('application')).toHaveAttribute('data-layout-mode', mode);
+  });
+
   it('renders the dense five-region desktop workbench with all separators', () => {
     const store = new EditorStore({ viewport: { width: 1024, height: 768 } });
 
@@ -108,10 +120,10 @@ describe('Workbench regions and command bar', () => {
 
     const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
     expect(zoomIn).toHaveAttribute('title', 'Zoom in');
-    expect(screen.getByText('100%')).toBeVisible();
+    expect(screen.getByLabelText('Canvas zoom')).toHaveTextContent('100%');
     await user.click(zoomIn);
     expect(store.getSnapshot().zoom).toBe(1.1);
-    expect(screen.getByText('110%')).toBeVisible();
+    expect(screen.getByLabelText('Canvas zoom')).toHaveTextContent('110%');
 
     await user.click(screen.getByRole('button', { name: 'Pan tool' }));
     expect(store.getSnapshot().activeTool).toBe('pan');
