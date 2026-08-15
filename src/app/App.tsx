@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import {
   DesktopCommandBridge,
   EditorDesktopCommandController,
@@ -16,8 +16,12 @@ import {
   type SaveBeforeCloseResult,
 } from '../core/desktop/DesktopLifecycleController';
 import { EditorStore } from '../core/store/EditorStore';
+import { CommandRegistry, type EditorCommandId } from '../core/store/CommandRegistry';
 import type { Disposable } from '../core/host/HostPort';
+import { FileWorkflow } from '../features/workspace/FileWorkflow';
 import { Workbench } from '../features/workspace/Workbench';
+import { WorkspaceUiController } from '../features/workspace/WorkspaceUiController';
+import { WorkspaceEditingCommands } from '../features/workspace/WorkspaceEditingCommands';
 import './app.css';
 
 export interface AppProps {
@@ -67,6 +71,24 @@ export class DesktopWorkflowDisableError extends Error {
 }
 
 export function App({ store, desktop, task16FileLifecycle }: AppProps) {
+  const host = store.getSnapshot().host;
+  const fileWorkflow = useMemo(
+    () => host === null ? null : new FileWorkflow(store, host),
+    [host, store],
+  );
+  const workspaceUi = useMemo(() => new WorkspaceUiController(), []);
+  const editingCommands = useMemo(() => new WorkspaceEditingCommands(store), [store]);
+  const commandRegistry = useMemo(
+    () => fileWorkflow === null ? null : new CommandRegistry({
+      store,
+      file: fileWorkflow,
+      editing: editingCommands,
+      ui: workspaceUi,
+    }),
+    [editingCommands, fileWorkflow, store, workspaceUi],
+  );
+  const currentFileLifecycle = task16FileLifecycle ?? fileWorkflow ?? unboundTask16FileLifecycle(store);
+
   useEffect(() => {
     const updateViewport = () => {
       const viewport = readBrowserViewport();
@@ -83,10 +105,11 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
     const commandGenerations = commandGenerationGate(desktop);
     let commandGenerationRegistered = false;
     const disposables: Disposable[] = [];
-    const currentFileLifecycle = task16FileLifecycle ?? unboundTask16FileLifecycle(store);
     const commandBridge = new DesktopCommandBridge(
       desktop.events,
-      new EditorDesktopCommandController(store, task16FileLifecycle),
+      commandRegistry === null
+        ? new EditorDesktopCommandController(store, task16FileLifecycle)
+        : { execute: async (command) => { await commandRegistry.execute(command as EditorCommandId); } },
       desktop.errors,
       () => commandGenerations.isCurrent(workflowGeneration),
     );
@@ -144,7 +167,7 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
         commandGenerationRegistered = true;
         await desktop.menu.setFileWorkflowEnabled(
           workflowGeneration,
-          task16FileLifecycle !== undefined,
+          task16FileLifecycle !== undefined || fileWorkflow !== null,
         );
         if (!active) await disableFileWorkflow();
       } catch (error) {
@@ -156,9 +179,18 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
       active = false;
       void disableFileWorkflow();
     };
-  }, [desktop, store, task16FileLifecycle]);
+  }, [commandRegistry, currentFileLifecycle, desktop, fileWorkflow, store, task16FileLifecycle]);
 
-  return <Workbench store={store} />;
+  return (
+    <main className="app-main">
+      <Workbench
+        store={store}
+        registry={commandRegistry ?? undefined}
+        workflow={fileWorkflow ?? undefined}
+        ui={commandRegistry === null ? undefined : workspaceUi}
+      />
+    </main>
+  );
 }
 
 let workflowSequence = 1;

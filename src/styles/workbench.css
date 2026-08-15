@@ -62,8 +62,9 @@
   white-space: nowrap;
 }
 
-.commandbar-brand strong {
+.commandbar-brand h1 {
   flex: 0 0 auto;
+  margin: 0;
   font-size: 13px;
   font-weight: 680;
 }
@@ -126,9 +127,210 @@
 
 .icon-command:focus-visible,
 .pane-resizer:focus-visible,
-.compact-tabs button:focus-visible {
+.compact-tabs button:focus-visible,
+.command-dialog button:focus-visible,
+.command-dialog input:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: -2px;
+}
+
+.command-dialog-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: min(16vh, 120px) 16px 16px;
+  background: rgb(20 24 22 / 42%);
+}
+
+.command-dialog {
+  display: grid;
+  grid-template-rows: 38px minmax(0, 360px);
+  width: min(560px, 100%);
+  max-height: calc(100vh - 140px);
+  overflow: hidden;
+  border: 1px solid var(--color-commandbar-border);
+  border-radius: var(--radius-surface);
+  background: var(--color-tool-pane);
+  box-shadow: 0 12px 32px rgb(16 20 18 / 34%);
+}
+
+.command-dialog-search {
+  position: relative;
+  display: grid;
+  align-items: center;
+  border-bottom: 1px solid var(--color-tool-border);
+}
+
+.command-dialog-search svg {
+  position: absolute;
+  left: 11px;
+  color: var(--color-muted);
+  pointer-events: none;
+}
+
+.command-dialog-search input {
+  width: 100%;
+  height: 37px;
+  padding: 0 10px 0 34px;
+  border: 0;
+  color: var(--color-text);
+  background: #ffffff;
+  font: inherit;
+}
+
+.command-dialog-results {
+  min-height: 0;
+  padding: 4px;
+  overflow: auto;
+}
+
+.command-dialog-results button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 110px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 31px;
+  padding: 4px 7px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--color-text);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+.command-dialog-results button:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  background: #e8efe9;
+}
+
+.command-dialog-results button:disabled {
+  color: var(--color-muted);
+  opacity: 0.6;
+}
+
+.command-dialog-results button span,
+.command-dialog-results button small,
+.command-dialog-results button kbd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-dialog-results button small,
+.command-dialog-results button kbd {
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.command-dialog-results button kbd {
+  text-align: right;
+}
+
+.command-dialog-results p {
+  margin: 0;
+  padding: 12px;
+  color: var(--color-muted);
+}
+
+.external-change-dialog {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 140px);
+  overflow: auto;
+  border: 1px solid var(--color-commandbar-border);
+  border-radius: var(--radius-surface);
+  background: var(--color-tool-pane);
+  box-shadow: 0 12px 32px rgb(16 20 18 / 34%);
+}
+
+.external-change-dialog > header {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-tool-border);
+  background: var(--color-tool-pane-raised);
+}
+
+.external-change-dialog h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.external-change-list {
+  display: grid;
+}
+
+.external-change-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-tool-border);
+}
+
+.external-change-row:last-child {
+  border-bottom: 0;
+}
+
+.external-change-row > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.external-change-row strong,
+.external-change-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.external-change-row span {
+  color: var(--color-muted);
+  font-size: 10px;
+}
+
+.external-change-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.external-change-actions button {
+  min-height: 27px;
+  padding: 0 8px;
+  border: 1px solid var(--color-tool-border);
+  border-radius: var(--radius-control);
+  color: var(--color-text);
+  background: #ffffff;
+  font: inherit;
+}
+
+.external-change-actions button:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  background: #e8efe9;
+}
+
+.external-change-actions button:disabled {
+  color: var(--color-muted);
+}
+
+@media (max-width: 720px) {
+  .external-change-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .external-change-actions {
+    flex-wrap: wrap;
+  }
 }
 
 .segmented-control {

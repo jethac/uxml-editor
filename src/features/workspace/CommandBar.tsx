@@ -8,16 +8,27 @@ import {
   PanelRight,
   Pencil,
   Redo2,
+  Save,
+  Search,
   Undo2,
   ZoomIn,
   ZoomOut,
   type LucideIcon,
 } from 'lucide-react';
 import type { EditorPanel, EditorSnapshot, EditorStore } from '../../core/store/EditorStore';
+import {
+  type CommandRegistry,
+  type CommandRegistrySnapshot,
+  type EditorCommandId,
+} from '../../core/store/CommandRegistry';
+import type { FileWorkflow, FileWorkflowSnapshot } from './FileWorkflow';
+import { useSyncExternalStore } from 'react';
 
 export interface CommandBarProps {
   readonly store: EditorStore;
   readonly snapshot: EditorSnapshot;
+  readonly registry?: CommandRegistry;
+  readonly workflow?: FileWorkflow;
   readonly onPanelActivate: (panel: EditorPanel) => void;
 }
 
@@ -29,36 +40,59 @@ interface IconButtonProps {
   readonly onClick: () => void;
 }
 
-export function CommandBar({ store, snapshot, onPanelActivate }: CommandBarProps) {
-  const projectStatus = snapshot.session?.entryPath ?? 'No project open';
+export function CommandBar({ store, snapshot, registry, workflow, onPanelActivate }: CommandBarProps) {
+  const registrySnapshot = useSyncExternalStore(
+    registry?.subscribe ?? nullRegistrySubscribe,
+    registry?.getSnapshot ?? nullRegistrySnapshot,
+    registry?.getSnapshot ?? nullRegistrySnapshot,
+  );
+  const workflowSnapshot = useSyncExternalStore(
+    workflow?.subscribe ?? nullWorkflowSubscribe,
+    workflow?.getSnapshot ?? nullWorkflowSnapshot,
+    workflow?.getSnapshot ?? nullWorkflowSnapshot,
+  );
+  const projectStatus = workflowSnapshot.projectName ?? snapshot.session?.entryPath ?? 'No project open';
+  const registered = (id: EditorCommandId) => registrySnapshot.commands.find((command) => command.id === id);
+  const run = (id: EditorCommandId, fallback: () => void) => {
+    if (registry === undefined) fallback();
+    else void registry.execute(id);
+  };
   return (
-    <header
+    <div
       className="commandbar"
       data-testid="commandbar"
     >
       <div className="commandbar-brand" aria-label="Project status">
-        <strong>UXML Editor</strong>
+        <h1>UXML Editor</h1>
         <span title={projectStatus}>{projectStatus}</span>
       </div>
       <div className="commandbar-toolbar" role="toolbar" aria-label="Editor commands">
         <div className="command-group" role="group" aria-label="File and history">
           <IconButton
-            label="Open project"
+            label={registered('file.open-project')?.label ?? 'Open project'}
             icon={FolderOpen}
-            disabled={!snapshot.commands.openProject}
-            onClick={() => store.dispatch({ type: 'command/open-project' })}
+            disabled={registered('file.open-project')?.enabled === false || (registry === undefined && !snapshot.commands.openProject)}
+            onClick={() => run('file.open-project', () => store.dispatch({ type: 'command/open-project' }))}
           />
+          {registry !== undefined && (
+            <IconButton
+              label={registered('file.save')?.label ?? 'Save'}
+              icon={Save}
+              disabled={registered('file.save')?.enabled !== true}
+              onClick={() => run('file.save', () => undefined)}
+            />
+          )}
           <IconButton
-            label="Undo"
+            label={registered('edit.undo')?.label ?? 'Undo'}
             icon={Undo2}
-            disabled={!snapshot.commands.undo}
-            onClick={() => store.dispatch({ type: 'command/undo' })}
+            disabled={registered('edit.undo')?.enabled === false || (registry === undefined && !snapshot.commands.undo)}
+            onClick={() => run('edit.undo', () => store.dispatch({ type: 'command/undo' }))}
           />
           <IconButton
-            label="Redo"
+            label={registered('edit.redo')?.label ?? 'Redo'}
             icon={Redo2}
-            disabled={!snapshot.commands.redo}
-            onClick={() => store.dispatch({ type: 'command/redo' })}
+            disabled={registered('edit.redo')?.enabled === false || (registry === undefined && !snapshot.commands.redo)}
+            onClick={() => run('edit.redo', () => store.dispatch({ type: 'command/redo' }))}
           />
         </div>
 
@@ -79,17 +113,17 @@ export function CommandBar({ store, snapshot, onPanelActivate }: CommandBarProps
 
         <div className="command-group command-group--zoom" role="group" aria-label="Zoom">
           <IconButton
-            label="Zoom out"
+            label={registered('view.zoom-out')?.label ?? 'Zoom out'}
             icon={ZoomOut}
-            disabled={!snapshot.commands.zoomOut}
-            onClick={() => store.dispatch({ type: 'command/zoom-out' })}
+            disabled={registered('view.zoom-out')?.enabled === false || (registry === undefined && !snapshot.commands.zoomOut)}
+            onClick={() => run('view.zoom-out', () => store.dispatch({ type: 'command/zoom-out' }))}
           />
           <output aria-label="Canvas zoom">{Math.round(snapshot.zoom * 100)}%</output>
           <IconButton
-            label="Zoom in"
+            label={registered('view.zoom-in')?.label ?? 'Zoom in'}
             icon={ZoomIn}
-            disabled={!snapshot.commands.zoomIn}
-            onClick={() => store.dispatch({ type: 'command/zoom-in' })}
+            disabled={registered('view.zoom-in')?.enabled === false || (registry === undefined && !snapshot.commands.zoomIn)}
+            onClick={() => run('view.zoom-in', () => store.dispatch({ type: 'command/zoom-in' }))}
           />
         </div>
 
@@ -110,28 +144,61 @@ export function CommandBar({ store, snapshot, onPanelActivate }: CommandBarProps
 
         <div className="command-group command-group--panels" role="group" aria-label="Panels">
           <IconButton
-            label="Show hierarchy"
+            label={registered('view.pane-hierarchy')?.label ?? 'Show hierarchy'}
             icon={PanelLeft}
             pressed={snapshot.activePanel === 'hierarchy'}
-            onClick={() => onPanelActivate('hierarchy')}
+            onClick={() => {
+              run('view.pane-hierarchy', () => undefined);
+              onPanelActivate('hierarchy');
+            }}
           />
           <IconButton
-            label="Show inspector"
+            label={registered('view.pane-inspector')?.label ?? 'Show inspector'}
             icon={PanelRight}
             pressed={snapshot.activePanel === 'inspector'}
-            onClick={() => onPanelActivate('inspector')}
+            onClick={() => {
+              run('view.pane-inspector', () => undefined);
+              onPanelActivate('inspector');
+            }}
           />
           <IconButton
-            label="Show diagnostics"
+            label={registered('view.pane-diagnostics')?.label ?? 'Show diagnostics'}
             icon={PanelBottom}
             pressed={snapshot.activePanel === 'diagnostics'}
-            onClick={() => onPanelActivate('diagnostics')}
+            onClick={() => {
+              run('view.pane-diagnostics', () => undefined);
+              onPanelActivate('diagnostics');
+            }}
           />
         </div>
+        {registry !== undefined && (
+          <div className="command-group" role="group" aria-label="Command search">
+            <IconButton
+              label={registered('workspace.command-palette')?.label ?? 'Command Palette'}
+              icon={Search}
+              disabled={registered('workspace.command-palette')?.enabled !== true}
+              onClick={() => run('workspace.command-palette', () => undefined)}
+            />
+          </div>
+        )}
       </div>
-    </header>
+    </div>
   );
 }
+
+const EMPTY_REGISTRY_SNAPSHOT: CommandRegistrySnapshot = Object.freeze({ commands: Object.freeze([]) });
+const nullRegistrySubscribe = (_listener: () => void) => () => undefined;
+const nullRegistrySnapshot = () => EMPTY_REGISTRY_SNAPSHOT;
+const EMPTY_WORKFLOW_SNAPSHOT: FileWorkflowSnapshot = Object.freeze({
+  projectName: null,
+  dirtyState: 'clean',
+  recentProjects: Object.freeze([]),
+  externalChanges: Object.freeze([]),
+  canReopen: false,
+  canReload: false,
+});
+const nullWorkflowSubscribe = (_listener: () => void) => () => undefined;
+const nullWorkflowSnapshot = () => EMPTY_WORKFLOW_SNAPSHOT;
 
 function IconButton({ label, icon: Icon, disabled = false, pressed, onClick }: IconButtonProps) {
   return (

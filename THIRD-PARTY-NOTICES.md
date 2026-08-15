@@ -103,3 +103,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+## axe-core Playwright accessibility testing
+
+The automated accessibility test suite uses the following pinned development
+dependencies. They are test tooling and are not imported by the production
+application:
+
+- `@axe-core/playwright` 4.13.0 (`sha512-6YLx+kxXu5GJceG4ozFg+33a2EMTdjYwWGloJ3sb9Kta5pp+ZNS53uxGVog5JetIY8s++P5UrtX+cri+u0VAVg==`)
+- `axe-core` 4.13.0 (`sha512-UzGt8zg7Ny8djbYMhxl2zuEevVa7r2gJjYY5Lwr1xM7+XU2nd6CkIWFTVcCIbAP63vSz71NaVyyuSk9lHKcy0A==`)
+- License: Mozilla Public License 2.0
+- Source: https://github.com/dequelabs/axe-core-npm and
+  https://github.com/dequelabs/axe-core
+
+The complete Mozilla Public License 2.0 text is included in each installed
+package's `LICENSE` file and is available at
+https://www.mozilla.org/MPL/2.0/.

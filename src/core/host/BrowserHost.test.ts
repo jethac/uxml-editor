@@ -56,6 +56,22 @@ describe('BrowserHost', () => {
     await expect(host.watch(root, () => undefined)).rejects.toMatchObject({ code: 'unsupported' });
   });
 
+  it('creates a missing nested file once through granted browser handles', async () => {
+    const directory = new FakeDirectoryHandle('Chosen Project', {});
+    const host = new BrowserHost({
+      scope: { showDirectoryPicker: async () => directory },
+      identityStore: new FakeProjectIdentityStore(),
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Assets/UI/Main.uxml');
+
+    const revision = await host.createText(path, '<UXML />\r\n');
+
+    expect(await host.readText(path)).toMatchObject({ text: '<UXML />\r\n', revision });
+    await expect(host.createText(path, 'overwrite')).rejects.toMatchObject({ code: 'stale-revision' });
+    expect((await host.readText(path)).text).toBe('<UXML />\r\n');
+  });
+
   it('enumerates files recursively through the granted directory handle in deterministic order', async () => {
     const directory = new FakeDirectoryHandle('Chosen Project', {
       Packages: new FakeDirectoryHandle('Packages', {
@@ -347,15 +363,25 @@ class FakeDirectoryHandle {
     return this.requestResult;
   }
 
-  async getDirectoryHandle(name: string) {
+  async getDirectoryHandle(name: string, options?: { readonly create?: boolean }) {
     const entry = this.children[name];
-    if (!(entry instanceof FakeDirectoryHandle)) throw notFound();
+    if (!(entry instanceof FakeDirectoryHandle)) {
+      if (options?.create !== true) throw notFound();
+      const created = new FakeDirectoryHandle(name, {});
+      this.children[name] = created;
+      return created;
+    }
     return entry;
   }
 
-  async getFileHandle(name: string) {
+  async getFileHandle(name: string, options?: { readonly create?: boolean }) {
     const entry = this.children[name];
-    if (!(entry instanceof FakeFileHandle)) throw notFound();
+    if (!(entry instanceof FakeFileHandle)) {
+      if (options?.create !== true) throw notFound();
+      const created = new FakeFileHandle(name, '');
+      this.children[name] = created;
+      return created;
+    }
     return entry;
   }
 

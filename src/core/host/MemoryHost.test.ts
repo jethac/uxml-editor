@@ -96,6 +96,20 @@ describe('MemoryHost', () => {
     expect(await host.readText(path)).toMatchObject({ text: 'new\ntext\n', revision: replacement });
   });
 
+  it('creates exact nested text once without granting overwrite authority', async () => {
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: {} }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Assets/UI/Main.uxml');
+
+    const revision = await host.createText(path, '<UXML />\r\n');
+
+    expect(await host.readText(path)).toMatchObject({ text: '<UXML />\r\n', revision });
+    await expect(host.createText(path, 'overwrite')).rejects.toMatchObject({ code: 'stale-revision' });
+    expect((await host.readText(path)).text).toBe('<UXML />\r\n');
+  });
+
   it.each(['before', 'during'] as const)(
     'keeps the original text and revision when replacement fails %s commit',
     async (phase) => {

@@ -12,6 +12,8 @@ export class CommandHistory {
   private readonly redoStack: HistoryEntry[] = [];
   private replayed: readonly EditorTransaction[] = Object.freeze([]);
   private coalescingAllowed = true;
+  private readonly listeners = new Map<number, (results: readonly CommitResult[]) => void>();
+  private nextListenerId = 1;
 
   constructor(private readonly session: DocumentSession) {}
 
@@ -20,9 +22,21 @@ export class CommandHistory {
   get undoDepth(): number { return this.undoStack.length; }
   get replayLog(): readonly EditorTransaction[] { return Object.freeze(this.replayed.map(copyEditorTransaction)); }
 
+  subscribe(listener: (results: readonly CommitResult[]) => void): () => void {
+    const id = this.nextListenerId++;
+    this.listeners.set(id, listener);
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.listeners.delete(id);
+    };
+  }
+
   execute(transaction: EditorTransaction): CommitResult {
     const result = this.session.commit(transaction);
     this.recordSuccessfulExecution(result);
+    this.notify(Object.freeze([result]));
     return result;
   }
 
@@ -50,6 +64,7 @@ export class CommandHistory {
     this.undoStack.pop();
     this.redoStack.push(entry);
     this.coalescingAllowed = false;
+    this.notify(results);
     return results;
   }
 
@@ -60,6 +75,7 @@ export class CommandHistory {
     this.redoStack.pop();
     this.undoStack.push(entry);
     this.coalescingAllowed = false;
+    this.notify(results);
     return results;
   }
 
@@ -68,7 +84,22 @@ export class CommandHistory {
     const results = this.session.commitSequence(normalized);
     results.forEach((result) => this.recordSuccessfulExecution(result));
     this.replayed = Object.freeze(results.map((result) => result.forward));
+    this.notify(results);
     return results;
+  }
+
+  private notify(results: readonly CommitResult[]): void {
+    let listenerError: unknown;
+    let listenerThrew = false;
+    for (const listener of [...this.listeners.values()]) {
+      try {
+        listener(results);
+      } catch (error) {
+        if (!listenerThrew) listenerError = error;
+        listenerThrew = true;
+      }
+    }
+    if (listenerThrew) throw listenerError;
   }
 }
 

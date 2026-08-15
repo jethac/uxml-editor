@@ -369,6 +369,16 @@ export function PreviewCanvas({
   };
 
   const handleNudge = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      cancelManipulation();
+      panGestureRef.current = null;
+      if (session !== null && session.selectedNodeIds.length > 0) {
+        session.setSelection([]);
+        store.dispatch({ type: 'session/sync' });
+      }
+      event.preventDefault();
+      return;
+    }
     const direction = arrowDelta(event.key);
     if (sourceStale || direction === null || session === null || selectedNodes.length === 0) return;
     event.preventDefault();
@@ -468,6 +478,7 @@ export function PreviewCanvas({
         className={`canvas-field${snapshot.activeTool === 'pan' ? ' canvas-field--pan' : ''}`}
         data-testid="canvas-field"
         data-source-status={sourceStale ? 'stale' : 'ready'}
+        aria-label="Canvas editing area"
         aria-disabled={sourceStale || undefined}
         tabIndex={0}
         onWheel={handleWheel}

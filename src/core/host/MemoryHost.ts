@@ -127,6 +127,17 @@ export class MemoryHost implements HostPort {
     return Object.freeze({ path: normalizedPath, text: file.text, revision: file.revision });
   }
 
+  async createText(path: ProjectPath, text: string): Promise<FileRevision> {
+    const project = this.requireProject(path.projectId);
+    const normalizedPath = projectPath(project.root, path.relativePath);
+    if (project.files.has(normalizedPath.relativePath)) {
+      throw new HostError('stale-revision', `File already exists: ${normalizedPath.relativePath}`);
+    }
+    const revision = this.createRevision();
+    project.files.set(normalizedPath.relativePath, Object.freeze({ text, revision }));
+    return revision;
+  }
+
   async replaceTextAtomically(
     path: ProjectPath,
     expectedRevision: FileRevision,

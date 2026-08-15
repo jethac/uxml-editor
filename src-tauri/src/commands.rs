@@ -43,6 +43,17 @@ pub struct PathRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateTextRequest {
+    #[serde(deserialize_with = "deserialize_project_id")]
+    pub project_id: String,
+    #[serde(deserialize_with = "deserialize_grant")]
+    pub grant: String,
+    pub relative_path: String,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplaceTextRequest {
     #[serde(deserialize_with = "deserialize_project_id")]
     pub project_id: String,
@@ -209,6 +220,18 @@ impl HostState {
             .read_text(&request.project_id, &request.grant, &request.relative_path)
     }
 
+    pub fn create(&self, request: &CreateTextRequest) -> Result<RevisionDto, HostError> {
+        let created = self.projects.create_text(
+            &request.project_id,
+            &request.grant,
+            &request.relative_path,
+            &request.text,
+        )?;
+        Ok(RevisionDto {
+            revision: created.revision,
+        })
+    }
+
     pub fn replace(&self, request: &ReplaceTextRequest) -> Result<RevisionDto, HostError> {
         self.projects.with_replace_file(
             &request.project_id,
@@ -271,8 +294,9 @@ impl HostState {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileEnumerationDto, GrantedProjectRequest, HostState, PathRequest, ProjectRequest,
-        RecentProjectRequest, RecoveryWriteRequest, ReplaceTextRequest, WatchStopRequest,
+        CreateTextRequest, FileEnumerationDto, GrantedProjectRequest, HostState, PathRequest,
+        ProjectRequest, RecentProjectRequest, RecoveryWriteRequest, ReplaceTextRequest,
+        WatchStopRequest,
     };
     use std::{
         fs,
@@ -284,6 +308,32 @@ mod tests {
     };
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn create_text_is_scoped_exact_and_create_new_only() {
+        let fixture = Fixture::new();
+        let state = HostState::new(fixture.root.join("app-data"));
+        let root = state.select_project(&fixture.project).unwrap();
+        let request = CreateTextRequest {
+            project_id: root.project_id.clone(),
+            grant: root.grant.clone(),
+            relative_path: "Assets/UI/Main.uxml".to_string(),
+            text: "<UXML label=\"日本語\" />\r\n".to_string(),
+        };
+
+        let created = state.create(&request).unwrap();
+
+        assert!(created.revision.starts_with("sha256:v1:"));
+        assert_eq!(
+            fs::read(fixture.project.join("Assets/UI/Main.uxml")).unwrap(),
+            "<UXML label=\"日本語\" />\r\n".as_bytes(),
+        );
+        assert_eq!(state.create(&request).unwrap_err().code, "stale-revision");
+        assert_eq!(
+            fs::read(fixture.project.join("Assets/UI/Main.uxml")).unwrap(),
+            "<UXML label=\"日本語\" />\r\n".as_bytes(),
+        );
+    }
 
     #[test]
     fn command_request_schemas_reject_unknown_fields_and_unsafe_paths() {

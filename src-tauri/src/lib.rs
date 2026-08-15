@@ -8,9 +8,10 @@ mod scoped_fs;
 mod watch;
 
 use commands::{
-    ConfirmationDto, ConfirmationRequest, FileEnumerationDto, GrantedProjectRequest, HostState,
-    MessageKind, MessageRequest, PathRequest, ProjectRequest, RecentProjectRequest, RecoveryDto,
-    RecoveryWriteRequest, ReplaceTextRequest, RevisionDto, WatchStartDto, WatchStopRequest,
+    ConfirmationDto, ConfirmationRequest, CreateTextRequest, FileEnumerationDto,
+    GrantedProjectRequest, HostState, MessageKind, MessageRequest, PathRequest, ProjectRequest,
+    RecentProjectRequest, RecoveryDto, RecoveryWriteRequest, ReplaceTextRequest, RevisionDto,
+    WatchStartDto, WatchStopRequest,
 };
 use desktop::{
     CloseAbandonRequest, CloseGateDecision, CloseRequestPayload, CloseResolutionRequest,
@@ -69,6 +70,14 @@ fn host_read_text(
     request: PathRequest,
 ) -> Result<ReadTextDto, HostError> {
     state.read(&request)
+}
+
+#[tauri::command]
+fn host_create_text(
+    state: State<'_, HostState>,
+    request: CreateTextRequest,
+) -> Result<RevisionDto, HostError> {
+    state.create(&request)
 }
 
 #[tauri::command]
@@ -337,6 +346,7 @@ pub fn run() {
             host_choose_project,
             host_enumerate_files,
             host_read_text,
+            host_create_text,
             host_replace_text,
             host_start_watch,
             host_stop_watch,

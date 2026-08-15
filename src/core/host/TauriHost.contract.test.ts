@@ -136,6 +136,18 @@ function describeHostContract(name: string, createHarness: () => HostContractHar
       expect(await harness.host.readText(path)).toEqual(beforeFailure);
     });
 
+    it('creates exact text once under the current scoped grant', async () => {
+      const { host } = createHarness();
+      const root = (await host.chooseProject())!;
+      const path = projectPath(root, 'Assets/UI/New.uxml');
+
+      const revision = await host.createText(path, '<UXML />\r\n');
+
+      expect(await host.readText(path)).toMatchObject({ text: '<UXML />\r\n', revision });
+      await expect(host.createText(path, 'overwrite')).rejects.toMatchObject({ code: 'stale-revision' });
+      expect((await host.readText(path)).text).toBe('<UXML />\r\n');
+    });
+
     it('delivers revision-aware project events until disposal and isolates project ids', async () => {
       const harness = createHarness();
       const root = (await harness.host.chooseProject())!;
@@ -1055,6 +1067,14 @@ class FakeTauriBridge {
         const text = this.files.get(request.relativePath);
         if (text === undefined) throw nativeError('not-found', 'File does not exist.');
         return { text, revision: this.revisions.get(request.relativePath) };
+      }
+      case 'host_create_text': {
+        this.requireGranted(request);
+        if (this.files.has(request.relativePath)) throw nativeError('stale-revision', 'File already exists.');
+        this.files.set(request.relativePath, request.text);
+        const revision = this.nextRevision();
+        this.revisions.set(request.relativePath, revision);
+        return { revision };
       }
       case 'host_replace_text': {
         this.requireGranted(request);

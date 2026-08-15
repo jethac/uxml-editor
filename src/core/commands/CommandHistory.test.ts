@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CommandHistory } from './CommandHistory';
 import { DocumentSession } from '../documents/DocumentSession';
 import type { EditorElement, EditorNodeId, ParsedPreviewDocument, ProjectParseInput, UxmlPreviewPort } from '../adapter/types';
@@ -8,6 +8,39 @@ const entryPath = 'Main.uxml';
 const sheetPath = 'Main.uss';
 
 describe('CommandHistory', () => {
+  it('keeps duplicate subscriptions independent and preserves thrown undefined', () => {
+    const session = openSession();
+    const listener = vi.fn();
+    const unsubscribeFirst = session.history.subscribe(listener);
+    const unsubscribeSecond = session.history.subscribe(listener);
+    session.history.execute(edit('first-listener', 'First listener', new Map([
+      [entryPath, [{ start: 26, end: 30, replacement: 'First' }]],
+    ])));
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    unsubscribeFirst();
+    session.history.execute(edit('second-listener', 'Second listener', new Map([
+      [entryPath, [{ start: 26, end: 31, replacement: 'Next' }]],
+    ])));
+    expect(listener).toHaveBeenCalledTimes(3);
+    unsubscribeSecond();
+
+    let followingListenerCalled = false;
+    session.history.subscribe(() => { throw undefined; });
+    session.history.subscribe(() => { followingListenerCalled = true; });
+    let threw = false;
+    try {
+      session.history.execute(edit('undefined-listener', 'Undefined listener', new Map([
+        [entryPath, [{ start: 26, end: 30, replacement: 'Done' }]],
+      ])));
+    } catch (error) {
+      threw = true;
+      expect(error).toBeUndefined();
+    }
+    expect(threw).toBe(true);
+    expect(followingListenerCalled).toBe(true);
+  });
+
   it('undoes every file byte-for-byte and deterministically redoes it', () => {
     const session = openSession();
     const before = session.snapshot();

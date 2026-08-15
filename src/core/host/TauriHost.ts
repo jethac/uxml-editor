@@ -132,6 +132,19 @@ export class TauriHost implements HostPort {
     });
   }
 
+  async createText(path: ProjectPath, text: string): Promise<FileRevision> {
+    const { path: normalizedPath, grant } = this.requirePath(path);
+    const result = await this.invoke(
+      'host_create_text',
+      request({ ...pathRequest(normalizedPath, grant.token), text }),
+      'replace-failed',
+    );
+    if (!isExactRecord(result, ['revision']) || !isNativeRevision(result.revision)) {
+      throw malformed('replace-failed', 'Text creation returned a malformed revision.');
+    }
+    return fileRevision(result.revision);
+  }
+
   async replaceTextAtomically(
     path: ProjectPath,
     expectedRevision: FileRevision,

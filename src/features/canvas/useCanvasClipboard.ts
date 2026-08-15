@@ -119,7 +119,7 @@ export function useCanvasClipboard({
   };
 }
 
-function browserClipboardPort(): ClipboardPort | undefined {
+export function browserClipboardPort(): ClipboardPort | undefined {
   if (
     typeof navigator === 'undefined'
     || navigator.clipboard === undefined

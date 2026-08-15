@@ -51,7 +51,8 @@ const ZOOM_MAX = 4;
 const ZOOM_STEP = 0.1;
 
 export class EditorStore {
-  private readonly listeners = new Set<() => void>();
+  private readonly listeners = new Map<number, () => void>();
+  private nextListenerId = 1;
   private readonly pendingActions: EditorAction[] = [];
   private readonly storage: EditorLayoutStorage | null;
   private snapshot: EditorSnapshot;
@@ -84,12 +85,13 @@ export class EditorStore {
     if (typeof listener !== 'function') {
       throw new EditorStoreError('invalid-action', 'EditorStore.subscribe requires a listener function.');
     }
-    this.listeners.add(listener);
+    const id = this.nextListenerId++;
+    this.listeners.set(id, listener);
     let active = true;
     return () => {
       if (!active) return;
       active = false;
-      this.listeners.delete(listener);
+      this.listeners.delete(id);
     };
   };
 
@@ -101,24 +103,26 @@ export class EditorStore {
 
     this.dispatching = true;
     let listenerError: unknown;
+    let listenerThrew = false;
     try {
       while (this.pendingActions.length > 0) {
         const action = this.pendingActions.shift()!;
         const next = this.reduce(action);
         if (next === this.snapshot) continue;
         this.snapshot = next;
-        for (const listener of [...this.listeners]) {
+        for (const listener of [...this.listeners.values()]) {
           try {
             listener();
           } catch (error) {
-            listenerError ??= error;
+            if (!listenerThrew) listenerError = error;
+            listenerThrew = true;
           }
         }
       }
     } finally {
       this.dispatching = false;
     }
-    if (listenerError !== undefined) throw listenerError;
+    if (listenerThrew) throw listenerError;
   };
 
   private reduce(action: EditorAction): EditorSnapshot {

@@ -186,6 +186,33 @@ describe('EditorStore snapshots', () => {
 });
 
 describe('EditorStore subscriptions', () => {
+  it('keeps duplicate subscriptions independent and preserves thrown undefined', () => {
+    const store = new EditorStore();
+    const listener = vi.fn();
+    const unsubscribeFirst = store.subscribe(listener);
+    const unsubscribeSecond = store.subscribe(listener);
+    store.dispatch({ type: 'zoom/set', zoom: 1.25 });
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    unsubscribeFirst();
+    store.dispatch({ type: 'zoom/set', zoom: 1.5 });
+    expect(listener).toHaveBeenCalledTimes(3);
+    unsubscribeSecond();
+
+    let followingListenerCalled = false;
+    store.subscribe(() => { throw undefined; });
+    store.subscribe(() => { followingListenerCalled = true; });
+    let threw = false;
+    try {
+      store.dispatch({ type: 'zoom/set', zoom: 1.75 });
+    } catch (error) {
+      threw = true;
+      expect(error).toBeUndefined();
+    }
+    expect(threw).toBe(true);
+    expect(followingListenerCalled).toBe(true);
+  });
+
   it('notifies current listeners once and makes unsubscribe idempotent', () => {
     const store = new EditorStore();
     const listener = vi.fn();

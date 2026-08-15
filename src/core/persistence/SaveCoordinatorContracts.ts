@@ -58,6 +58,7 @@ export interface ExternalChangeOutcome {
   readonly status: ExternalChangeStatus;
   readonly external: 'changed' | 'deleted';
   readonly localDirty: boolean;
+  readonly concurrentSessionChange?: boolean;
   readonly revision?: FileRevision;
   readonly error?: SaveFailure;
 }

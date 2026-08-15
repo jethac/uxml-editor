@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type Ref } from 'react';
+import { openSearchPanel } from '@codemirror/search';
+import { EditorView } from '@codemirror/view';
 import {
   PANE_LIMITS,
   WORKBENCH_COMMAND_BAR_HEIGHT,
@@ -7,6 +9,7 @@ import {
   WORKBENCH_SEPARATOR_SIZE,
 } from '../../core/store/EditorLayoutStorage';
 import type { EditorPanel, EditorSnapshot, EditorStore } from '../../core/store/EditorStore';
+import type { CommandRegistry } from '../../core/store/CommandRegistry';
 import { SourceEditCoordinator, type SourceEditSnapshot } from '../../core/documents/SourceEditCoordinator';
 import { PreviewCanvas } from '../canvas/PreviewCanvas';
 import { DiagnosticsPanel } from '../diagnostics/DiagnosticsPanel';
@@ -15,13 +18,21 @@ import { PalettePanel } from '../palette/PalettePanel';
 import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SourcePanel } from '../source/SourcePanel';
 import { CommandBar } from './CommandBar';
+import { CommandPalette } from './CommandPalette';
+import { ExternalChangeDialog } from './ExternalChangeDialog';
+import type { FileWorkflow } from './FileWorkflow';
+import { KeyboardShortcuts } from './KeyboardShortcuts';
 import { PaneResizer } from './PaneResizer';
+import type { WorkspaceUiController, WorkspaceUiSnapshot } from './WorkspaceUiController';
 import '../../styles/workbench.css';
 import '../../styles/canvas.css';
 import '../../styles/inspector.css';
 
 export interface WorkbenchProps {
   readonly store: EditorStore;
+  readonly registry?: CommandRegistry;
+  readonly workflow?: FileWorkflow;
+  readonly ui?: WorkspaceUiController;
 }
 
 type WorkbenchStyle = CSSProperties & {
@@ -35,8 +46,14 @@ type WorkbenchStyle = CSSProperties & {
 const PANELS: readonly EditorPanel[] = Object.freeze(['hierarchy', 'inspector', 'diagnostics', 'source']);
 type BottomView = 'diagnostics' | 'source';
 
-export function Workbench({ store }: WorkbenchProps) {
+export function Workbench({ store, registry, workflow, ui }: WorkbenchProps) {
+  const workbench = useRef<HTMLDivElement>(null);
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  const uiSnapshot = useSyncExternalStore(
+    ui?.subscribe ?? nullUiSubscribe,
+    ui?.getSnapshot ?? nullUiSnapshot,
+    ui?.getSnapshot ?? nullUiSnapshot,
+  );
   const [bottomView, setBottomView] = useState<BottomView>('diagnostics');
   const coordinator = useMemo(() => snapshot.session === null ? null : new SourceEditCoordinator(snapshot.session, {
     onAccepted: () => {
@@ -55,6 +72,19 @@ export function Workbench({ store }: WorkbenchProps) {
       setBottomView(snapshot.activePanel);
     }
   }, [snapshot.activePanel]);
+  useEffect(() => {
+    if (uiSnapshot.searchRequest === 0) return;
+    if (snapshot.activePanel !== 'source') {
+      store.dispatch({ type: 'panel/set', panel: 'source' });
+      return;
+    }
+    const editor = workbench.current?.querySelector<HTMLElement>('.source-editor .cm-editor');
+    if (editor == null) return;
+    const view = EditorView.findFromDOM(editor);
+    if (view === null) return;
+    openSearchPanel(view);
+    view.focus();
+  }, [snapshot.activePanel, store, uiSnapshot.searchRequest]);
   const diagnostics = sourceSnapshot?.status === 'stale'
     ? [...sourceSnapshot.diagnostics, ...snapshot.diagnostics]
     : snapshot.diagnostics;
@@ -85,13 +115,21 @@ export function Workbench({ store }: WorkbenchProps) {
 
   return (
     <div
+      ref={workbench}
       className={`editor-workbench editor-workbench--${compact ? 'compact' : 'desktop'}`}
       style={style}
       role="application"
       aria-label="UXML Editor"
       data-layout-mode={compact ? 'compact' : 'desktop'}
     >
-      <CommandBar store={store} snapshot={snapshot} onPanelActivate={activatePanel} />
+      {registry !== undefined && <KeyboardShortcuts registry={registry} />}
+      <CommandBar
+        store={store}
+        snapshot={snapshot}
+        registry={registry}
+        workflow={workflow}
+        onPanelActivate={activatePanel}
+      />
       {compact
         ? <CompactWorkspace store={store} snapshot={snapshot} coordinator={coordinator} diagnostics={diagnostics} />
         : <DesktopWorkspace
@@ -103,9 +141,17 @@ export function Workbench({ store }: WorkbenchProps) {
             onBottomViewActivate={activatePanel}
             setPaneRef={(panel, element) => { desktopPanes.current[panel] = element; }}
           />}
+      {registry !== undefined && ui !== undefined && uiSnapshot.commandPaletteOpen && (
+        <CommandPalette registry={registry} ui={ui} />
+      )}
+      {workflow !== undefined && <ExternalChangeDialog workflow={workflow} />}
     </div>
   );
 }
+
+const CLOSED_UI_SNAPSHOT: WorkspaceUiSnapshot = Object.freeze({ commandPaletteOpen: false, searchRequest: 0 });
+const nullUiSubscribe = (_listener: () => void) => () => undefined;
+const nullUiSnapshot = () => CLOSED_UI_SNAPSHOT;
 
 interface WorkspaceProps {
   readonly store: EditorStore;

@@ -304,6 +304,7 @@ describe('SaveCoordinator', () => {
       external: 'changed',
       revision: (await readText(path)).revision,
       localDirty: true,
+      concurrentSessionChange: true,
     }]);
     expect(session.snapshot().files.get('Main.uxml')?.text).toBe('<UXML  />');
   });
@@ -608,6 +609,46 @@ describe('SaveCoordinator', () => {
     }]);
     expect(rewrittenRevision).toBe(initial.revision);
     expect(coordinator.dirtyPaths(session)).toEqual(['Main.uxml']);
+  });
+
+  it('distinguishes a selection-only generation race from local source dirtiness', async () => {
+    const original = '<UXML />\n';
+    const external = '<UXML external="true" />\n';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const path = projectPath(root, 'Main.uxml');
+    const initial = await host.readText(path);
+    const session = openTestSession(new Map([['Main.uxml', original]]));
+    const coordinator = new SaveCoordinator(host, root, [initial]);
+    const readStarted = deferred<void>();
+    const readGate = deferred<void>();
+    const readText = host.readText.bind(host);
+    let gated = false;
+    host.readText = async (requested) => {
+      if (gated) {
+        readStarted.resolve();
+        await readGate.promise;
+      }
+      return readText(requested);
+    };
+    await host.externalWrite(path, external);
+    gated = true;
+
+    const processing = coordinator.processExternalChanges(session, ['Main.uxml']);
+    await readStarted.promise;
+    session.setSelection([session.locatorFor(session.document.root.id)!]);
+    readGate.resolve();
+
+    expect(await processing).toEqual([{
+      path: 'Main.uxml',
+      status: 'conflict',
+      external: 'changed',
+      revision: (await host.readText(path)).revision,
+      localDirty: false,
+      concurrentSessionChange: true,
+    }]);
   });
 
   it('adopts a changed revision when disk and dirty local text converge exactly', async () => {

@@ -198,6 +198,11 @@ export class RecoveryLifecycle {
       ...(finalization.error === undefined ? { recoveryError: undefined } : { recoveryError: finalization.error }),
     }, this.cleanupPending);
   }
+
+  async finalizeDiscardedChanges(session: DocumentSession): Promise<RecoveryFinalizationOutcome> {
+    if (!this.cleanup) return freezeFinalization({ status: 'cleared' });
+    return this.finalizeConfirmedWrite(session);
+  }
 }
 
 function snapshotTextFiles(

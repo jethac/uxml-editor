@@ -67,16 +67,7 @@ export class ExternalChangeCoordinator {
       });
     }
     if (decision === 'reload') return this.reload(session, path, pending, baseline.path, generation, local.text, localDirty);
-    if (pending === null) {
-      return freezeExternalResolution({
-        path,
-        decision,
-        status: 'deleted',
-        external: 'deleted',
-        localDirty,
-        error: { code: 'not-found', message: `Cannot overwrite deleted file without a create capability: ${path}` },
-      });
-    }
+    if (pending === null) return this.restoreDeleted(session, path, baseline.path, generation, local.text, localDirty);
     const overwritePreparation = await this.recovery.prepareOverwrite(
       session,
       generation,
@@ -277,7 +268,14 @@ export class ExternalChangeCoordinator {
       }
       if (changedDuringRead || localDirty) {
         this.pending.set(path, disk);
-        outcomes.push({ path, status: 'conflict', external: 'changed', revision: disk.revision, localDirty: true });
+        outcomes.push({
+          path,
+          status: 'conflict',
+          external: 'changed',
+          revision: disk.revision,
+          localDirty,
+          ...(changedDuringRead ? { concurrentSessionChange: true } : {}),
+        });
         continue;
       }
       try {
@@ -385,6 +383,18 @@ export class ExternalChangeCoordinator {
     }
     this.saved.publish(path, current.text, current.revision);
     this.pending.delete(path);
+    const recoveryFinalization = await this.recovery.finalizeDiscardedChanges(session);
+    if (recoveryFinalization.status === 'failed') {
+      return freezeExternalResolution({
+        path,
+        decision,
+        status: 'failed',
+        external: 'changed',
+        revision: current.revision,
+        localDirty: this.saved.dirtyPaths(session).includes(path),
+        error: recoveryFinalization.error,
+      });
+    }
     return freezeExternalResolution({
       path,
       decision,
@@ -393,5 +403,73 @@ export class ExternalChangeCoordinator {
       revision: current.revision,
       localDirty: false,
     });
+  }
+
+  private async restoreDeleted(
+    session: DocumentSession,
+    path: string,
+    baselinePath: FileReadResult['path'],
+    generation: number,
+    localText: string,
+    localDirty: boolean,
+  ): Promise<ExternalResolutionOutcome> {
+    const decision = 'overwrite' as const;
+    const snapshot = session.snapshot();
+    const preparation = await this.recovery.prepareSave(session, generation, snapshot);
+    if (preparation !== null) {
+      return freezeExternalResolution({
+        path,
+        decision,
+        status: preparation.code === 'local-changed' ? 'conflict' : 'failed',
+        external: 'deleted',
+        localDirty: this.saved.dirtyPaths(session).includes(path),
+        error: preparation,
+      });
+    }
+    try {
+      const revision = await this.host.createText(baselinePath, localText);
+      this.saved.publish(path, localText, revision);
+      this.pending.delete(path);
+      const recoveryFinalization = await this.recovery.finalizeConfirmedWrite(session);
+      if (recoveryFinalization.status === 'failed') {
+        return freezeExternalResolution({
+          path,
+          decision,
+          status: 'failed',
+          external: 'deleted',
+          revision,
+          localDirty: this.saved.dirtyPaths(session).includes(path),
+          error: recoveryFinalization.error,
+        });
+      }
+      if (!sessionMatches(session, generation, path, localText)) {
+        return freezeExternalResolution({
+          path,
+          decision,
+          status: 'conflict',
+          external: 'deleted',
+          revision,
+          localDirty: this.saved.dirtyPaths(session).includes(path),
+          error: localChangedFailure('overwrite', path),
+        });
+      }
+      return freezeExternalResolution({
+        path,
+        decision,
+        status: 'overwritten',
+        external: 'deleted',
+        revision,
+        localDirty: false,
+      });
+    } catch (error) {
+      return freezeExternalResolution({
+        path,
+        decision,
+        status: error instanceof HostError && error.code === 'stale-revision' ? 'conflict' : 'failed',
+        external: 'deleted',
+        localDirty,
+        error: snapshotFailure(error),
+      });
+    }
   }
 }

@@ -2,13 +2,16 @@ use crate::{
     atomic_save::{recover_atomic_artifacts, revision_for_bytes},
     error::HostError,
 };
-use cap_std::{ambient_authority, fs::Dir};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -256,6 +259,32 @@ impl ScopedProjects {
                 HostError::new("read-failed", "Project file is not valid UTF-8 text.")
             })?;
             Ok(ReadTextDto { text, revision })
+        })
+    }
+
+    pub fn create_text(
+        &self,
+        project_id: &str,
+        token: &str,
+        relative_path: &str,
+        text: &str,
+    ) -> Result<ReadTextDto, HostError> {
+        self.with_grant(project_id, token, |grant| {
+            let normalized = NormalizedRelativePath::parse(relative_path)?;
+            let (parent, file_name) = open_create_file_parent(grant, &normalized)?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            let mut file = parent
+                .open_with(&file_name, &options)
+                .map_err(|error| create_error(&file_name, &error))?;
+            file.write_all(text.as_bytes())
+                .map_err(|error| create_error(&file_name, &error))?;
+            file.sync_all()
+                .map_err(|error| create_error(&file_name, &error))?;
+            Ok(ReadTextDto {
+                text: text.to_string(),
+                revision: revision_for_bytes(text.as_bytes()),
+            })
         })
     }
 
@@ -716,6 +745,40 @@ fn open_existing_file_parent(
     Ok((parent, PathBuf::from(file_name)))
 }
 
+fn open_create_file_parent(
+    grant: &Grant,
+    relative: &NormalizedRelativePath,
+) -> Result<(Dir, PathBuf), HostError> {
+    let relative = Path::new(relative.as_str());
+    let file_name = relative
+        .file_name()
+        .ok_or_else(|| invalid_path(relative.to_string_lossy().as_ref()))?;
+    let mut parent = grant.authority.try_clone().map_err(|error| {
+        HostError::io(
+            "replace-failed",
+            "Could not clone the project capability",
+            &error,
+        )
+    })?;
+    if let Some(parent_path) = relative.parent() {
+        for component in parent_path.components() {
+            let segment = Path::new(component.as_os_str());
+            parent = match open_project_child_directory(&parent, segment) {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    parent
+                        .create_dir(segment)
+                        .map_err(|create| create_error(segment, &create))?;
+                    open_project_child_directory(&parent, segment)
+                        .map_err(|open| create_error(segment, &open))?
+                }
+                Err(error) => return Err(create_error(segment, &error)),
+            };
+        }
+    }
+    Ok((parent, PathBuf::from(file_name)))
+}
+
 fn relative_path_string(path: &Path) -> Result<String, HostError> {
     let mut segments = Vec::new();
     for component in path.components() {
@@ -763,6 +826,17 @@ fn read_error(path: &Path, error: &std::io::Error) -> HostError {
     };
     let _ = path;
     HostError::io(code, "Could not access a project path", error)
+}
+
+fn create_error(path: &Path, error: &std::io::Error) -> HostError {
+    let code = match error.kind() {
+        std::io::ErrorKind::AlreadyExists => "stale-revision",
+        std::io::ErrorKind::PermissionDenied => "permission-denied",
+        std::io::ErrorKind::InvalidInput => "invalid-path",
+        _ => "replace-failed",
+    };
+    let _ = path;
+    HostError::io(code, "Could not create a project file", error)
 }
 
 fn is_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {

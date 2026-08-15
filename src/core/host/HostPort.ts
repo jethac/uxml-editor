@@ -82,6 +82,7 @@ export interface HostPort {
   chooseProject(): Promise<ProjectRoot | null>;
   enumerateFiles(root: ProjectRoot): Promise<FileEnumerationResult>;
   readText(path: ProjectPath): Promise<FileReadResult>;
+  createText(path: ProjectPath, text: string): Promise<FileRevision>;
   replaceTextAtomically(path: ProjectPath, expectedRevision: FileRevision, text: string): Promise<FileRevision>;
   watch(root: ProjectRoot, listener: FileChangeListener): Promise<Disposable>;
   readRecovery(projectId: ProjectId): Promise<string | null>;
