@@ -6,6 +6,7 @@ import {
   projectPath,
   snapshotProjectRoot,
   type FileReadResult,
+  type FileEnumerationResult,
   type FileChangeEvent,
   type FileChangeListener,
   type FileRevision,
@@ -108,6 +109,14 @@ export class MemoryHost implements HostPort {
   async chooseProject(): Promise<ProjectRoot | null> {
     const first = this.projectOrder[0];
     return first === undefined ? null : snapshotProjectRoot(this.projects.get(first)!.root);
+  }
+
+  async enumerateFiles(root: ProjectRoot): Promise<FileEnumerationResult> {
+    const project = this.requireProject(root.id);
+    const files = Object.freeze([...project.files.keys()]
+      .sort()
+      .map((relativePath) => projectPath(project.root, relativePath)));
+    return Object.freeze({ status: 'supported', files });
   }
 
   async readText(path: ProjectPath): Promise<FileReadResult> {

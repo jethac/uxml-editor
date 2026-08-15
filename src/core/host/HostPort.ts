@@ -21,6 +21,10 @@ export interface FileReadResult {
   readonly revision: FileRevision;
 }
 
+export type FileEnumerationResult =
+  | Readonly<{ readonly status: 'supported'; readonly files: readonly ProjectPath[] }>
+  | Readonly<{ readonly status: 'unsupported' }>;
+
 export interface RecentProject {
   readonly root: ProjectRoot;
   readonly lastOpenedAt: number;
@@ -67,6 +71,7 @@ export interface Disposable {
 export interface HostPort {
   readonly capabilities: HostCapabilities;
   chooseProject(): Promise<ProjectRoot | null>;
+  enumerateFiles(root: ProjectRoot): Promise<FileEnumerationResult>;
   readText(path: ProjectPath): Promise<FileReadResult>;
   replaceTextAtomically(path: ProjectPath, expectedRevision: FileRevision, text: string): Promise<FileRevision>;
   watch(root: ProjectRoot, listener: FileChangeListener): Promise<Disposable>;

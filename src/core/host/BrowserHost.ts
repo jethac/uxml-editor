@@ -1,6 +1,7 @@
 import {
   HostError,
   fileRevision,
+  normalizeRelativePath,
   projectId,
   projectPath,
   snapshotProjectRoot,
@@ -8,6 +9,7 @@ import {
   type ConfirmationResult,
   type Disposable,
   type FileChangeListener,
+  type FileEnumerationResult,
   type FileReadResult,
   type FileRevision,
   type HostCapabilities,
@@ -74,6 +76,7 @@ export interface BrowserDirectoryHandle {
   readonly name: string;
   getDirectoryHandle(name: string): Promise<BrowserDirectoryHandle>;
   getFileHandle(name: string): Promise<BrowserFileHandle>;
+  entries?(): AsyncIterableIterator<[string, BrowserDirectoryHandle | BrowserFileHandle]>;
   queryPermission?(descriptor: BrowserPermissionDescriptor): Promise<PermissionState>;
   requestPermission?(descriptor: BrowserPermissionDescriptor): Promise<PermissionState>;
   isSameEntry?(other: BrowserDirectoryHandle): Promise<boolean>;
@@ -140,6 +143,28 @@ export class BrowserHost implements HostPort {
       }
       if (error instanceof HostError) throw error;
       throw new HostError('selection-failed', 'The browser could not grant a project directory.', error);
+    }
+  }
+
+  async enumerateFiles(root: ProjectRoot): Promise<FileEnumerationResult> {
+    if (!this.usesFileSystemAccess) return this.fallback.enumerateFiles(root);
+    const grant = this.grantedRoots.get(root.id);
+    if (!grant) throw new HostError('root-not-granted', `Project root is not granted: ${root.id}`);
+    const relativePaths: string[] = [];
+    try {
+      if (!await collectBrowserFiles(grant.handle, '', relativePaths)) {
+        return Object.freeze({ status: 'unsupported' });
+      }
+      const files = Object.freeze(relativePaths
+        .sort()
+        .map((relativePath) => projectPath(grant.root, relativePath)));
+      return Object.freeze({ status: 'supported', files });
+    } catch (error) {
+      if (error instanceof HostError) throw error;
+      if (isNamedError(error, 'NotAllowedError')) {
+        throw new HostError('permission-denied', 'Project file enumeration permission was denied.', error);
+      }
+      throw new HostError('read-failed', 'Could not enumerate project files.', error);
     }
   }
 
@@ -342,6 +367,28 @@ function safelyReadGlobalScope(): BrowserScope {
   return typeof globalThis === 'object' && globalThis !== null
     ? globalThis as BrowserScope
     : {};
+}
+
+async function collectBrowserFiles(
+  directory: BrowserDirectoryHandle,
+  parentPath: string,
+  relativePaths: string[],
+): Promise<boolean> {
+  if (typeof directory.entries !== 'function') return false;
+  for await (const [name, handle] of directory.entries()) {
+    if (normalizeRelativePath(name) !== name || handle.name !== name) {
+      throw new HostError('invalid-path', `Directory enumeration returned an invalid entry name: ${name}`);
+    }
+    const relativePath = parentPath.length === 0 ? name : `${parentPath}/${name}`;
+    if (isFileHandle(handle)) {
+      relativePaths.push(relativePath);
+    } else if (isDirectoryHandle(handle)) {
+      if (!await collectBrowserFiles(handle, relativePath, relativePaths)) return false;
+    } else {
+      throw new HostError('read-failed', `Directory enumeration returned an invalid handle: ${relativePath}`);
+    }
+  }
+  return true;
 }
 
 async function requireReadWritePermission(handle: BrowserDirectoryHandle): Promise<void> {

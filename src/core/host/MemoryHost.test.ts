@@ -38,6 +38,40 @@ describe('MemoryHost', () => {
     expect(Object.isFrozen(read.path)).toBe(true);
   });
 
+  it('enumerates one project root in frozen deterministic path order', async () => {
+    const host = new MemoryHost({
+      projects: [
+        {
+          id: 'project-a',
+          name: 'Project A',
+          files: {
+            'Packages/com.example/theme.uss': 'package',
+            'Assets/UI/screen.uxml': 'screen',
+            'Assets/UI/base.uss': 'base',
+          },
+        },
+        { id: 'project-b', name: 'Project B', files: { 'Assets/Other.uxml': 'other' } },
+      ],
+    });
+    const root = (await host.chooseProject())!;
+
+    const result = await host.enumerateFiles(root);
+
+    expect(result).toEqual({
+      status: 'supported',
+      files: [
+        { projectId: 'project-a', relativePath: 'Assets/UI/base.uss' },
+        { projectId: 'project-a', relativePath: 'Assets/UI/screen.uxml' },
+        { projectId: 'project-a', relativePath: 'Packages/com.example/theme.uss' },
+      ],
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    if (result.status === 'supported') {
+      expect(Object.isFrozen(result.files)).toBe(true);
+      expect(result.files.every(Object.isFrozen)).toBe(true);
+    }
+  });
+
   it.each(['../outside.uxml', '/absolute.uxml', 'C:\\outside.uxml', 'file:///outside.uxml'])(
     'rejects a path outside the granted root: %s',
     (candidate) => {

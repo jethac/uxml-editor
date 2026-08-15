@@ -56,6 +56,68 @@ describe('BrowserHost', () => {
     await expect(host.watch(root, () => undefined)).rejects.toMatchObject({ code: 'unsupported' });
   });
 
+  it('enumerates files recursively through the granted directory handle in deterministic order', async () => {
+    const directory = new FakeDirectoryHandle('Chosen Project', {
+      Packages: new FakeDirectoryHandle('Packages', {
+        'theme.uss': new FakeFileHandle('theme.uss', 'package'),
+      }),
+      Assets: new FakeDirectoryHandle('Assets', {
+        UI: new FakeDirectoryHandle('UI', {
+          'screen.uxml': new FakeFileHandle('screen.uxml', 'screen'),
+          'base.uss': new FakeFileHandle('base.uss', 'base'),
+        }),
+      }),
+    });
+    const host = new BrowserHost({
+      scope: { showDirectoryPicker: async () => directory },
+      identityStore: new FakeProjectIdentityStore(),
+    });
+    const root = (await host.chooseProject())!;
+
+    const result = await host.enumerateFiles(root);
+
+    expect(result).toEqual({
+      status: 'supported',
+      files: [
+        { projectId: root.id, relativePath: 'Assets/UI/base.uss' },
+        { projectId: root.id, relativePath: 'Assets/UI/screen.uxml' },
+        { projectId: root.id, relativePath: 'Packages/theme.uss' },
+      ],
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    if (result.status === 'supported') {
+      expect(Object.isFrozen(result.files)).toBe(true);
+      expect(result.files.every(Object.isFrozen)).toBe(true);
+    }
+  });
+
+  it('reports file enumeration as unsupported when the granted handle has no async entries API', async () => {
+    const directory = new FakeDirectoryHandle('Chosen Project', {});
+    Object.defineProperty(directory, 'entries', { value: undefined });
+    const host = new BrowserHost({
+      scope: { showDirectoryPicker: async () => directory },
+      identityStore: new FakeProjectIdentityStore(),
+    });
+    const root = (await host.chooseProject())!;
+
+    const result = await host.enumerateFiles(root);
+
+    expect(result).toEqual({ status: 'unsupported' });
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
+  it('rejects file enumeration for a root that was never granted', async () => {
+    const directory = new FakeDirectoryHandle('Chosen Project', {});
+    const host = new BrowserHost({
+      scope: { showDirectoryPicker: async () => directory },
+      identityStore: new FakeProjectIdentityStore(),
+    });
+    await host.chooseProject();
+
+    await expect(host.enumerateFiles({ id: projectId('ungranted'), name: 'Ungrant' }))
+      .rejects.toMatchObject({ code: 'root-not-granted' });
+  });
+
   it('owns browser picker cancellation and read/write permission denial outcomes', async () => {
     const cancelled = new BrowserHost({
       scope: { showDirectoryPicker: async () => { throw Object.assign(new Error('cancelled'), { name: 'AbortError' }); } },
@@ -208,7 +270,7 @@ class FakeDirectoryHandle {
 
   constructor(
     readonly name: string,
-    private readonly entries: Record<string, FakeDirectoryHandle | FakeFileHandle>,
+    private readonly children: Record<string, FakeDirectoryHandle | FakeFileHandle>,
     private readonly queryResult: PermissionState = 'granted',
   ) {
     this.requestResult = queryResult;
@@ -225,26 +287,32 @@ class FakeDirectoryHandle {
   }
 
   async getDirectoryHandle(name: string) {
-    const entry = this.entries[name];
+    const entry = this.children[name];
     if (!(entry instanceof FakeDirectoryHandle)) throw notFound();
     return entry;
   }
 
   async getFileHandle(name: string) {
-    const entry = this.entries[name];
+    const entry = this.children[name];
     if (!(entry instanceof FakeFileHandle)) throw notFound();
     return entry;
+  }
+
+  async *entries() {
+    for (const [name, handle] of Object.entries(this.children)) {
+      yield [name, handle] as [string, FakeDirectoryHandle | FakeFileHandle];
+    }
   }
 
   file(path: string): FakeFileHandle {
     const parts = path.split('/');
     let directory: FakeDirectoryHandle = this;
     for (const part of parts.slice(0, -1)) {
-      const next = directory.entries[part];
+      const next = directory.children[part];
       if (!(next instanceof FakeDirectoryHandle)) throw notFound();
       directory = next;
     }
-    const file = directory.entries[parts.at(-1)!];
+    const file = directory.children[parts.at(-1)!];
     if (!(file instanceof FakeFileHandle)) throw notFound();
     return file;
   }
