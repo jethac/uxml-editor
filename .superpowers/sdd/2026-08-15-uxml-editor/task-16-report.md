@@ -941,3 +941,185 @@ Finding 11 is therefore resolved with evidence from the declared
 - This SHA contains all production changes, focused tests, and the complete
   round-2 red/green evidence above. The following report-only commit records
   this immutable implementation SHA.
+
+---
+
+## Fix Round 3/5
+
+### Status And Revision
+
+- Status: `DONE_WITH_CONCERNS`.
+- Fix base: `c39b86486bf09f25b2c66433f90804707085ef43`.
+- Branch: `agent/uxml-editor`.
+- The immutable implementation/report SHA is recorded in the round-finalization
+  addendum after the implementation commit is created.
+- No push or PR was performed.
+
+### Finding 1: Restore Source Authority After Retirement Failure
+
+- Red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Expected failure: a source watcher completion failure after destination
+  writes/staging must retain the exact source session, root/name, assets,
+  Save All/reload capabilities, recovery bytes, history journaling, and a live
+  watcher through a fresh runtime while disposing the staged target and
+  returning one exact `SaveAsPartialError`.
+- Observed red: 1 failed and 35 passed (36 total). The first authority assertion
+  received an empty project-asset catalog instead of
+  `Assets/Main.uxml` and `Assets/Second.uxml`, confirming the existing fallback
+  had converted the source project into Untitled authority.
+- Production change: runtime history/watch setup is separated from recent
+  metadata preparation. Save As retirement failure now creates a fresh
+  `ActiveProject` runtime object around the same source root, exact
+  `DocumentSession`, `SaveCoordinator` baselines, `RecoveryJournal`, and
+  recovery queue. The failed runtime remains retired and cannot publish.
+- The strengthened test manually delivers the retired watcher callback and
+  proves it is inert, observes a real external source conflict through the new
+  watcher, makes a subsequent local edit, and disposes/reopens the source to
+  prove recovery replays the exact local bytes.
+- Green command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Green result: 36/36 passed.
+
+### Finding 2: Guard Concurrent Source Mutation Across Save As
+
+- Red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Expected failure: deterministic source transactions during destination
+  preflight, between writes, target watcher/recent preparation, and pending
+  source watcher disposal must abort at the exact written/pending boundary,
+  retain or restore source authority/recovery, dispose staged target runtime,
+  and never activate stale target baselines.
+- Initial observed red: 4 failed and 36 passed (40 total). Three tests reported
+  that Save As incorrectly completed; the preparation test timed out because
+  its test spy was installed after source open and therefore gated recent-read
+  call 2 instead of target call 1.
+- The test-only call counter was corrected before production work.
+- Corrected red command:
+  `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Corrected observed red: 4 failed and 36 passed (40 total). Every gate failed
+  with `Expected Save As to fail`, proving all four source mutations escaped
+  detection and stale target authority was activated.
+- Production change: Save As captures the exact source session, generation,
+  active runtime, asset paths, and source snapshot before picker work. It
+  validates the same session/generation after every picker, scan, confirmation,
+  preflight read, destination write, readback, target watch/recent, and source
+  retirement boundary. A change before writing reports 0 written/all pending;
+  a change after a completed write includes that path as written; later changes
+  report all completed writes and no pending paths.
+- Source history remains subscribed until watcher retirement settles. It may
+  append recovery while the runtime is retirement-gated, but cannot publish.
+  The listener is then removed before the final recovery-tail drain. A
+  post-retirement generation mismatch restores a fresh source runtime from the
+  original root/session/save/recovery authority before the aggregate error is
+  reported.
+- Each gate test disposes/reopens the source and proves recovery yields the
+  exact concurrent values `Preflight`, `Between`, `Prepared`, and `Retiring`.
+  The preparation test also mutates the disposed destination watcher and proves
+  it cannot publish into the retained source workflow.
+- Green command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Green result: 40/40 passed.
+
+### Round 3 Green Verification
+
+- Focused covering test: `npm test -- src/features/workspace/FileWorkflow.test.ts`
+  - PASS: 1 file, 40/40 tests.
+- Brief matrix: `npm test -- src/features/workspace src/core/store`
+  - PASS: 6 files, 131/131 tests.
+- Full frontend: `npm test -- --reporter=dot`
+  - PASS: 44 files, 686/686 tests in 59.17 seconds.
+- TypeScript: `npx tsc --noEmit`
+  - PASS, no diagnostics.
+- Production frontend: `npm run build`
+  - PASS: 1,917 modules transformed. Output included
+    `dist/assets/index-DI-YVzkX.js` at 1,063.94 kB (338.36 kB gzip).
+- Focused accessibility Playwright:
+  `npx playwright test tests/e2e/accessibility-workflow.spec.ts --grep "workflow has no automated axe violations and is keyboard operable"`
+  - PASS: 1/1 in 15.7 seconds.
+- Desktop release boundary: `npm run tauri:build -- --no-bundle`
+  - PASS: frontend rebuilt and the unchanged native boundary compiled in the
+    optimized release profile; executable produced at
+    `src-tauri/target/release/uxml-editor.exe`.
+- Rust fmt/test/check/strict clippy were conditional on native-file changes.
+  No native file or Rust manifest changed in round 3, so those commands were
+  not run.
+
+### Browser, Keyboard, Axe, And Visual Evidence
+
+- The focused Playwright test ran the actual axe scan with zero violations and
+  completed keyboard-only open, command-palette focus, Escape focus return,
+  named canvas focus, and canvas Escape behavior.
+- Round 3 changes no visible UI, canvas, or layout code. The excluded canvas
+  heading, toolbar, grid, geometry files, and tests were not touched. The
+  previously recorded desktop and 720px nonblank/no-overlap screenshots and
+  geometry baseline remain applicable.
+
+### Changed Files
+
+- Production: `src/features/workspace/FileWorkflow.ts`.
+- Focused tests: `src/features/workspace/FileWorkflow.test.ts`.
+- Evidence: this append-only report.
+
+### Dependency And License Audit
+
+- No npm or Rust dependency/version changed. `package.json`,
+  `package-lock.json`, Cargo manifests, and lockfiles are unchanged.
+- `uxml-preview` remains exactly `0.4.0` in both npm manifests.
+- No license or notice changed; Apache-2.0 original code and all existing
+  third-party notices are preserved.
+
+### Round 3 Requirement Checklist
+
+- [x] Failed source retirement restores a fresh source runtime object without
+  reactivating any callback from the retired runtime.
+- [x] Exact source name/root, project assets, Save All/reload capabilities,
+  `DocumentSession`, recovery bytes, local journaling, and external watch are
+  retained or restored.
+- [x] Staged target runtime is disposed on every tested abort and cannot publish
+  after disposal.
+- [x] Save As source session/generation is captured before picker work and
+  validated through every asynchronous boundary and source retirement.
+- [x] Prewrite mutation leaves destination byte-identical; partial mutation
+  reports exact frozen written/pending paths without claiming rollback.
+- [x] Preflight, between-write, target-preparation, and retirement-pending gates
+  reopen the source and recover the exact concurrent transaction bytes.
+- [x] A changed source session is never attached to destination baselines
+  captured before that transaction.
+- [x] `DocumentSession` remains the sole exact-source/parsed-state authority; no
+  second model or arbitrary native/filesystem authority was added.
+- [x] Browser-first HostPort and existing Tauri runtime boundaries remain
+  unchanged; no execution, upload, telemetry, network, shell/process, or broad
+  path authority was introduced.
+- [x] Byte identity, malformed/unsupported preservation, command IDs,
+  accessibility conventions, dependency pins, and notices remain unchanged.
+- [x] No excluded layout/geometry file or test changed; no push or PR occurred.
+
+### Round 3 Self-Review
+
+- Traced `DocumentSession.generation`, synchronous `CommandHistory` listeners,
+  serialized `RecoveryJournal`, `SaveCoordinator` baselines, host watcher
+  disposal completion, and `FileWorkflow.operationTail` before design.
+- Confirmed source recovery listeners append while retirement is pending but
+  publish only from a non-retired current runtime. History is unsubscribed
+  before the final recovery drain, closing the unjournaled transaction window.
+- Confirmed restoration reuses source save/recovery authority but allocates a
+  fresh runtime identity, so old history/watch callbacks fail the retired and
+  current-object gates permanently.
+- Confirmed path outcomes derive from completed host writes only, are sorted by
+  the source snapshot, remain frozen in `SaveAsPartialError`, and never claim
+  destination rollback.
+- The Task 7 recovery serialization is directly exercised by the pending
+  retirement gate and remains on its established serialized journal tail. Task
+  9 listener containment is unchanged; no broader refactor was needed.
+- Final scope contains only the workflow, its focused test, and this report;
+  `git diff --check` passed apart from informational CRLF conversion warnings.
+
+### Round 3 Concerns
+
+- This environment provides Node `25.2.1` with npm `11.6.2`, outside the
+  declared `>=24.15.0 <25` range. All round-3 frontend, build, Playwright, and
+  Tauri frontend commands passed on Node 25, but this report does not claim a
+  supported-runtime pass. Per the findings, the controller will independently
+  rerun Node 24 and packaged smoke verification after commit.
+- Full Vitest retains the pre-existing unawaited-assertion warning at
+  `src/core/host/BrowserHost.test.ts:74`; that file is unchanged and all 686
+  tests passed.
+- Vite retains the existing non-failing large-chunk warning. Playwright retains
+  the existing `NO_COLOR`/`FORCE_COLOR` warning.

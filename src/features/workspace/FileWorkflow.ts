@@ -86,6 +86,13 @@ interface HeldCloseState {
   readonly generation: number;
 }
 
+interface SaveAsSourceState {
+  readonly active: ActiveProject | null;
+  readonly session: DocumentSession;
+  readonly generation: number;
+  readonly assetPaths: readonly string[];
+}
+
 type ReplacementPreparation = 'proceed' | 'discard' | 'cancel';
 
 export class FileWorkflow implements FileWorkflowPort {
@@ -437,11 +444,24 @@ export class FileWorkflow implements FileWorkflowPort {
     };
   }
 
-  private async prepareActiveProject(active: ActiveProject): Promise<readonly RecentProject[]> {
+  private async prepareActiveProject(
+    active: ActiveProject,
+    checkpoint: () => void = () => undefined,
+  ): Promise<readonly RecentProject[]> {
+    await this.prepareActiveRuntime(active);
+    checkpoint();
+    await this.host.rememberRecentProject(active.root);
+    checkpoint();
+    const recentProjects = await this.host.listRecentProjects();
+    checkpoint();
+    return Object.freeze([...recentProjects]);
+  }
+
+  private async prepareActiveRuntime(active: ActiveProject): Promise<void> {
     active.historyDispose = active.session.history.subscribe((results) => {
       const localResults = results.filter((result) => !result.forward.id.startsWith('external-reload:v1:'));
-      if (localResults.length === 0 || active.retired || this.active !== active) return;
-      this.publish();
+      if (localResults.length === 0 || this.active !== active) return;
+      if (!active.retired) this.publish();
       active.recoveryTail = active.recoveryTail
         .then(async () => {
           for (const result of localResults) await active.recovery.appendCommitted(result);
@@ -461,8 +481,6 @@ export class FileWorkflow implements FileWorkflowPort {
     } catch (error) {
       if (!(error instanceof HostError) || error.code !== 'unsupported') throw error;
     }
-    await this.host.rememberRecentProject(active.root);
-    return Object.freeze([...(await this.host.listRecentProjects())]);
   }
 
   private activatePreparedProject(
@@ -488,18 +506,22 @@ export class FileWorkflow implements FileWorkflowPort {
     }
   }
 
-  private async retireCurrentActiveProject(): Promise<ActiveProject | null> {
+  private async retireCurrentActiveProject(restoreOnFailure = false): Promise<ActiveProject | null> {
     const active = this.active;
     if (active === null) return null;
     try {
       await this.retireActiveProject(active);
     } catch (error) {
       if (this.active === active) {
-        this.active = null;
-        this.unsavedSession = active.session;
-        this.externalChanges = Object.freeze([]);
-        this.store.dispatch({ type: 'project-assets/set', paths: [] });
-        this.publish();
+        if (restoreOnFailure) {
+          try {
+            await this.restoreActiveProject(active);
+          } catch {
+            this.fallbackToUnsavedSession(active.session);
+          }
+        } else {
+          this.fallbackToUnsavedSession(active.session);
+        }
       }
       try {
         await this.host.showMessage({
@@ -516,16 +538,57 @@ export class FileWorkflow implements FileWorkflowPort {
     return active;
   }
 
+  private async restoreActiveProject(retired: ActiveProject): Promise<void> {
+    const restored: ActiveProject = {
+      root: retired.root,
+      session: retired.session,
+      save: retired.save,
+      recovery: retired.recovery,
+      historyDispose: () => undefined,
+      recoveryTail: retired.recoveryTail,
+      recoveryError: retired.recoveryError,
+      retired: false,
+      retirement: null,
+    };
+    this.active = restored;
+    this.unsavedSession = null;
+    try {
+      await this.prepareActiveRuntime(restored);
+    } catch (error) {
+      await this.disposeStagedActiveProject(restored);
+      throw error;
+    }
+    this.publish();
+  }
+
+  private async ensureSaveAsSourceAuthority(source: SaveAsSourceState): Promise<void> {
+    if (source.active === null) {
+      this.active = null;
+      this.unsavedSession = source.session;
+    } else if (this.active === null
+      || this.active.retired
+      || this.active.session !== source.session
+      || this.active.root.id !== source.active.root.id) {
+      await this.restoreActiveProject(source.active);
+    }
+    this.store.dispatch({ type: 'context/set', session: source.session, host: this.host });
+    this.store.dispatch({ type: 'project-assets/set', paths: source.assetPaths });
+    this.publish();
+  }
+
+  private fallbackToUnsavedSession(session: DocumentSession): void {
+    this.active = null;
+    this.unsavedSession = session;
+    this.externalChanges = Object.freeze([]);
+    this.store.dispatch({ type: 'project-assets/set', paths: [] });
+    this.publish();
+  }
+
   private retireActiveProject(active: ActiveProject): Promise<void> {
     if (active.retirement !== null) return active.retirement;
     active.retired = true;
     active.retirement = (async () => {
       let failure: unknown | null = null;
-      try {
-        active.historyDispose();
-      } catch (error) {
-        failure = error;
-      }
       const watch = active.watch;
       if (watch !== undefined) {
         try {
@@ -534,12 +597,6 @@ export class FileWorkflow implements FileWorkflowPort {
           failure ??= error;
         }
       }
-      try {
-        await active.recoveryTail;
-        if (active.recoveryError !== null) failure ??= active.recoveryError;
-      } catch (error) {
-        failure ??= error;
-      }
       if (watch?.completion !== undefined) {
         try {
           const outcome = await watch.completion;
@@ -547,6 +604,17 @@ export class FileWorkflow implements FileWorkflowPort {
         } catch (error) {
           failure ??= error;
         }
+      }
+      try {
+        active.historyDispose();
+      } catch (error) {
+        failure ??= error;
+      }
+      try {
+        await active.recoveryTail;
+        if (active.recoveryError !== null) failure ??= active.recoveryError;
+      } catch (error) {
+        failure ??= error;
       }
       if (failure !== null) throw failure;
     })();
@@ -591,18 +659,27 @@ export class FileWorkflow implements FileWorkflowPort {
   private async saveAsActive(root?: ProjectRoot): Promise<void> {
     const session = this.store.getSnapshot().session;
     if (session === null) return;
+    const source: SaveAsSourceState = Object.freeze({
+      active: this.active,
+      session,
+      generation: session.generation,
+      assetPaths: Object.freeze(this.store.getSnapshot().projectAssets.map(({ path }) => path)),
+    });
+    const snapshot = session.snapshot();
+    const allPaths = Object.freeze([...snapshot.files.keys()].sort((left, right) => left.localeCompare(right, 'en')));
     const selected = root ?? await this.host.chooseProject();
     if (selected === null) return;
+    await this.reportIfSaveAsSourceChanged(source, [], allPaths);
     if (root === undefined && this.host.capabilities.mode === 'tauri') {
       await this.detachRevokedActiveGrant();
     }
     const index = await ProjectIndex.scan(this.host, selected);
+    await this.reportIfSaveAsSourceChanged(source, [], allPaths);
     const destination = new Map(index.files
       .filter((file): file is typeof file & { readonly text: string; readonly revision: NonNullable<typeof file.revision> } => (
         file.text !== null && file.revision !== null
       ))
       .map((file) => [file.path, file]));
-    const snapshot = session.snapshot();
     const collisions = [...snapshot.files.keys()].filter((path) => destination.has(path));
     if (collisions.length > 0) {
       const confirmed = await this.host.confirm({
@@ -613,6 +690,7 @@ export class FileWorkflow implements FileWorkflowPort {
         cancelLabel: 'Cancel',
       });
       if (!confirmed.confirmed) return;
+      await this.reportIfSaveAsSourceChanged(source, [], allPaths);
     }
 
     const writes = [...snapshot.files]
@@ -622,6 +700,8 @@ export class FileWorkflow implements FileWorkflowPort {
       for (const write of writes) {
         if (write.existing === undefined) continue;
         const current = await this.host.readText(projectPath(selected, write.path));
+        const sourceError = this.saveAsSourceError(source);
+        if (sourceError !== null) throw sourceError;
         if (current.revision !== write.existing.revision) {
           throw new HostError('stale-revision', `File changed before Save As: ${write.path}`);
         }
@@ -633,7 +713,10 @@ export class FileWorkflow implements FileWorkflowPort {
     const writtenPaths: string[] = [];
     for (let index = 0; index < writes.length; index += 1) {
       const write = writes[index]!;
+      let writeCompleted = false;
       try {
+        const beforeWrite = this.saveAsSourceError(source);
+        if (beforeWrite !== null) throw beforeWrite;
         const targetPath = projectPath(selected, write.path);
         if (write.existing === undefined) {
           await this.host.createText(targetPath, write.text);
@@ -641,28 +724,62 @@ export class FileWorkflow implements FileWorkflowPort {
           await this.host.replaceTextAtomically(targetPath, write.existing.revision, write.text);
         }
         writtenPaths.push(write.path);
+        writeCompleted = true;
+        const afterWrite = this.saveAsSourceError(source);
+        if (afterWrite !== null) throw afterWrite;
       } catch (error) {
-        await this.reportSaveAsFailure(writtenPaths, writes.slice(index).map((pending) => pending.path), error);
+        const firstPending = index + (writeCompleted ? 1 : 0);
+        await this.reportSaveAsFailure(
+          writtenPaths,
+          writes.slice(firstPending).map((pending) => pending.path),
+          error,
+        );
       }
     }
 
     let stagedActive: ActiveProject | null = null;
     try {
+      const assertSourceCurrent = () => {
+        const error = this.saveAsSourceError(source);
+        if (error !== null) throw error;
+      };
+      assertSourceCurrent();
       const initialFiles = await Promise.all(writes
         .map((write) => this.host.readText(projectPath(selected, write.path))));
+      assertSourceCurrent();
       const recovery = new RecoveryJournal(this.host, selected);
       stagedActive = this.createActiveProject(selected, session, initialFiles, recovery);
       const savedIndex = await ProjectIndex.scan(this.host, selected);
-      const recentProjects = await this.prepareActiveProject(stagedActive);
-      await this.retireCurrentActiveProject();
+      assertSourceCurrent();
+      const recentProjects = await this.prepareActiveProject(stagedActive, assertSourceCurrent);
+      assertSourceCurrent();
+      await this.retireCurrentActiveProject(true);
+      assertSourceCurrent();
       this.activatePreparedProject(stagedActive, savedIndex.files.map((file) => file.path), recentProjects);
       stagedActive = null;
       this.store.dispatch({ type: 'session/sync' });
       this.publish();
     } catch (error) {
       if (stagedActive !== null) await this.disposeStagedActiveProject(stagedActive);
+      await this.ensureSaveAsSourceAuthority(source);
       await this.reportSaveAsFailure(writes.map((write) => write.path), [], error);
     }
+  }
+
+  private saveAsSourceError(source: SaveAsSourceState): HostError | null {
+    const current = this.store.getSnapshot().session;
+    return current === source.session && current.generation === source.generation
+      ? null
+      : new HostError('stale-revision', 'Source changed during Save As.');
+  }
+
+  private async reportIfSaveAsSourceChanged(
+    source: SaveAsSourceState,
+    writtenPaths: readonly string[],
+    pendingPaths: readonly string[],
+  ): Promise<void> {
+    const error = this.saveAsSourceError(source);
+    if (error !== null) await this.reportSaveAsFailure(writtenPaths, pendingPaths, error);
   }
 
   private async reportSaveAsFailure(

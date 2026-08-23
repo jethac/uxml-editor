@@ -239,36 +239,259 @@ describe('FileWorkflow', () => {
     await expectDirtySourceAuthority(context);
   });
 
-  it('aggregates source retirement failure and disposes the staged Save As watcher', async () => {
+  it('restores exact source project, watch, and recovery authority after Save As retirement failure', async () => {
     const context = saveAsFailureFixture({});
     const { host, store, workflow, source, destination } = context;
     const sourceFailure = new HostError('read-failed', 'Injected source retirement failure.');
     const sourceDispose = vi.fn();
     const targetDispose = vi.fn();
-    vi.spyOn(host, 'watch').mockImplementation(async (root) => root.id === source.id
-      ? Object.freeze({
-          dispose: sourceDispose,
-          completion: Promise.resolve(Object.freeze({ status: 'failed' as const, error: sourceFailure })),
-        })
-      : Object.freeze({
-          dispose: targetDispose,
-          completion: Promise.resolve(Object.freeze({ status: 'disposed' as const })),
-        }));
+    const sourceListeners: FileChangeListener[] = [];
+    const watch = host.watch.bind(host);
+    let sourceWatches = 0;
+    vi.spyOn(host, 'watch').mockImplementation(async (root, listener) => {
+      const underlying = await watch(root, listener);
+      if (root.id === source.id) {
+        sourceWatches += 1;
+        sourceListeners.push(listener);
+        if (sourceWatches === 1) {
+          return Object.freeze({
+            dispose: () => {
+              sourceDispose();
+              underlying.dispose();
+            },
+            completion: Promise.resolve(Object.freeze({ status: 'failed' as const, error: sourceFailure })),
+          });
+        }
+        return underlying;
+      }
+      return Object.freeze({
+        dispose: () => {
+          targetDispose();
+          underlying.dispose();
+        },
+        completion: Promise.resolve(Object.freeze({ status: 'disposed' as const })),
+      });
+    });
     await workflow.openProject(source);
     editButtonText(store, 'Race');
     await vi.waitFor(async () => expect(await host.readRecovery(source.id)).not.toBeNull());
-    const sourceSession = store.getSnapshot().session;
+    const sourceSession = store.getSnapshot().session!;
     const sourceRecovery = await host.readRecovery(source.id);
 
     const error = await captureSaveAsFailure(workflow.saveAs(destination));
 
     expectCompletedSaveAsFailure(error);
     expect(store.getSnapshot().session).toBe(sourceSession);
-    expect(workflow.getSnapshot().dirtyState).toBe('dirty');
+    expect(store.getSnapshot().projectAssets.map(({ path }) => path)).toEqual([
+      ENTRY_PATH,
+      'Assets/Second.uxml',
+    ]);
+    expect(workflow.getSnapshot()).toMatchObject({
+      projectName: 'Source',
+      dirtyState: 'dirty',
+      canReload: true,
+      capabilities: { saveAll: true, reloadProject: true },
+    });
     expect(await host.readRecovery(source.id)).toBe(sourceRecovery);
     expect(sourceDispose).toHaveBeenCalledOnce();
     expect(targetDispose).toHaveBeenCalledOnce();
+    expect(sourceWatches).toBe(2);
     expect(host.messageRequests.at(-1)).toMatchObject({ title: 'Save As incomplete' });
+
+    const sourceDisk = await host.readText(projectPath(source, ENTRY_PATH));
+    await sourceListeners[0]!(Object.freeze({
+      kind: 'changed',
+      path: sourceDisk.path,
+      revision: sourceDisk.revision,
+    }));
+    await host.advanceTime(50);
+    expect(workflow.getSnapshot().externalChanges).toEqual([]);
+
+    await host.externalWrite(projectPath(source, ENTRY_PATH), '<UXML external="true" />\n');
+    await host.advanceTime(50);
+    expect(workflow.getSnapshot().externalChanges).toEqual([
+      expect.objectContaining({ path: ENTRY_PATH, status: 'conflict' }),
+    ]);
+    await workflow.resolveExternalChange(ENTRY_PATH, 'overwrite');
+
+    replaceButtonText(store, 'Race', 'Restored');
+    await vi.waitFor(async () => expect(await host.readRecovery(source.id)).not.toBeNull());
+    await workflow.dispose();
+    const reopenedStore = new EditorStore({ host });
+    const reopenedWorkflow = new FileWorkflow(reopenedStore, host, { adapter: new PersistenceTestAdapter() });
+    await reopenedWorkflow.openProject(source);
+    expect(reopenedStore.getSnapshot().session?.snapshot().files.get(ENTRY_PATH)?.text)
+      .toBe('<UXML><Button text="Restored" /></UXML>\r\n');
+    await reopenedWorkflow.dispose();
+  });
+
+  it('aborts before the first Save As write when source changes during destination preflight', async () => {
+    const context = saveAsFailureFixture({
+      [ENTRY_PATH]: '<UXML destination="main" />\n',
+      'Assets/Second.uxml': '<UXML destination="second" />\n',
+    });
+    const { host, store, workflow, destination } = context;
+    await openDirtySaveAsSource(context);
+    const sourceSession = store.getSnapshot().session!;
+    const destinationBefore = await Promise.all([
+      host.readText(projectPath(destination, ENTRY_PATH)),
+      host.readText(projectPath(destination, 'Assets/Second.uxml')),
+    ]);
+    host.queueConfirmation(true);
+    const preflight = deferred<void>();
+    const releasePreflight = deferred<void>();
+    const readText = host.readText.bind(host);
+    let destinationReads = 0;
+    vi.spyOn(host, 'readText').mockImplementation(async (path) => {
+      if (path.projectId === destination.id) {
+        destinationReads += 1;
+        if (destinationReads === 3) {
+          preflight.resolve();
+          await releasePreflight.promise;
+        }
+      }
+      return readText(path);
+    });
+
+    const saving = workflow.saveAs(destination);
+    await preflight.promise;
+    replaceButtonText(store, 'Race', 'Preflight');
+    releasePreflight.resolve();
+    const error = await captureSaveAsFailure(saving);
+
+    expectSaveAsConcurrencyFailure(error, [], [ENTRY_PATH, 'Assets/Second.uxml']);
+    await expect(Promise.all([
+      host.readText(projectPath(destination, ENTRY_PATH)),
+      host.readText(projectPath(destination, 'Assets/Second.uxml')),
+    ])).resolves.toEqual(destinationBefore);
+    await expectConcurrentSourceRecoverable(context, sourceSession, 'Preflight');
+  });
+
+  it('reports one written path and preserves source recovery when source changes between Save As writes', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, store, workflow, destination } = context;
+    await openDirtySaveAsSource(context);
+    const sourceSession = store.getSnapshot().session!;
+    const firstWrite = deferred<void>();
+    const releaseFirstWrite = deferred<void>();
+    const createText = host.createText.bind(host);
+    let creates = 0;
+    vi.spyOn(host, 'createText').mockImplementation(async (...arguments_) => {
+      const revision = await createText(...arguments_);
+      creates += 1;
+      if (creates === 1) {
+        firstWrite.resolve();
+        await releaseFirstWrite.promise;
+      }
+      return revision;
+    });
+
+    const saving = workflow.saveAs(destination);
+    await firstWrite.promise;
+    replaceButtonText(store, 'Race', 'Between');
+    releaseFirstWrite.resolve();
+    const error = await captureSaveAsFailure(saving);
+
+    expectSaveAsConcurrencyFailure(error, [ENTRY_PATH], ['Assets/Second.uxml']);
+    await expect(host.readText(projectPath(destination, ENTRY_PATH))).resolves.toMatchObject({
+      text: '<UXML><Button text="Race" /></UXML>\r\n',
+    });
+    await expect(host.readText(projectPath(destination, 'Assets/Second.uxml')))
+      .rejects.toMatchObject({ code: 'not-found' });
+    await expectConcurrentSourceRecoverable(context, sourceSession, 'Between');
+  });
+
+  it('disposes staged target authority when source changes during Save As runtime preparation', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, store, workflow, source, destination } = context;
+    const targetDispose = vi.fn();
+    const watch = host.watch.bind(host);
+    vi.spyOn(host, 'watch').mockImplementation(async (root, listener) => {
+      const underlying = await watch(root, listener);
+      return root.id === destination.id
+        ? Object.freeze({
+            dispose: () => {
+              targetDispose();
+              underlying.dispose();
+            },
+          })
+        : underlying;
+    });
+    await openDirtySaveAsSource(context);
+    const sourceSession = store.getSnapshot().session!;
+    const recentPreparation = deferred<void>();
+    const releaseRecentPreparation = deferred<void>();
+    const listRecentProjects = host.listRecentProjects.bind(host);
+    let recentReads = 0;
+    vi.spyOn(host, 'listRecentProjects').mockImplementation(async () => {
+      recentReads += 1;
+      if (recentReads === 1) {
+        recentPreparation.resolve();
+        await releaseRecentPreparation.promise;
+      }
+      return listRecentProjects();
+    });
+
+    const saving = workflow.saveAs(destination);
+    await recentPreparation.promise;
+    replaceButtonText(store, 'Race', 'Prepared');
+    releaseRecentPreparation.resolve();
+    const error = await captureSaveAsFailure(saving);
+
+    expectCompletedSaveAsFailure(error);
+    expect(targetDispose).toHaveBeenCalledOnce();
+    await host.externalWrite(projectPath(destination, ENTRY_PATH), '<UXML stale-target="true" />\n');
+    await host.advanceTime(50);
+    expect(workflow.getSnapshot().externalChanges).toEqual([]);
+    expect(workflow.getSnapshot().projectName).toBe('Source');
+    expect(store.getSnapshot().session).toBe(sourceSession);
+    expect((await host.readRecovery(source.id))).not.toBeNull();
+    await expectConcurrentSourceRecoverable(context, sourceSession, 'Prepared');
+  });
+
+  it('restores source authority and recovery when source changes during watcher retirement', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, store, workflow, source, destination } = context;
+    const sourceRetirement = deferred<DisposalOutcome>();
+    const sourceDisposeStarted = deferred<void>();
+    const targetDispose = vi.fn();
+    const watch = host.watch.bind(host);
+    let sourceWatches = 0;
+    vi.spyOn(host, 'watch').mockImplementation(async (root, listener) => {
+      const underlying = await watch(root, listener);
+      if (root.id === source.id) {
+        sourceWatches += 1;
+        if (sourceWatches === 1) {
+          return Object.freeze({
+            dispose: () => {
+              underlying.dispose();
+              sourceDisposeStarted.resolve();
+            },
+            completion: sourceRetirement.promise,
+          });
+        }
+        return underlying;
+      }
+      return Object.freeze({
+        dispose: () => {
+          targetDispose();
+          underlying.dispose();
+        },
+      });
+    });
+    await openDirtySaveAsSource(context);
+    const sourceSession = store.getSnapshot().session!;
+
+    const saving = workflow.saveAs(destination);
+    await sourceDisposeStarted.promise;
+    replaceButtonText(store, 'Race', 'Retiring');
+    sourceRetirement.resolve(Object.freeze({ status: 'disposed' }));
+    const error = await captureSaveAsFailure(saving);
+
+    expectCompletedSaveAsFailure(error);
+    expect(targetDispose).toHaveBeenCalledOnce();
+    expect(sourceWatches).toBe(2);
+    await expectConcurrentSourceRecoverable(context, sourceSession, 'Retiring');
   });
 
   it('reauthorizes a recent project instead of treating recent metadata as a grant', async () => {
@@ -790,13 +1013,18 @@ describe('FileWorkflow', () => {
 });
 
 function editButtonText(store: EditorStore, replacement: string): void {
+  replaceButtonText(store, 'Play', replacement);
+}
+
+function replaceButtonText(store: EditorStore, current: string, replacement: string): void {
   const session = store.getSnapshot().session!;
   const source = session.snapshot().files.get(ENTRY_PATH)!.text;
-  const start = source.indexOf('Play');
+  const start = source.indexOf(current);
+  if (start < 0) throw new Error(`Button text ${current} is not present.`);
   session.history.execute({
-    id: `set-button-text-${replacement}`,
+    id: `set-button-text-${current}-to-${replacement}`,
     label: 'Set button text',
-    patchesByFile: new Map([[ENTRY_PATH, [{ start, end: start + 4, replacement }]]]),
+    patchesByFile: new Map([[ENTRY_PATH, [{ start, end: start + current.length, replacement }]]]),
   });
   store.dispatch({ type: 'session/sync' });
 }
@@ -930,6 +1158,50 @@ function expectCompletedSaveAsFailure(error: unknown): void {
   const outcome = error as { readonly writtenPaths: readonly string[]; readonly pendingPaths: readonly string[] };
   expect(Object.isFrozen(outcome.writtenPaths)).toBe(true);
   expect(Object.isFrozen(outcome.pendingPaths)).toBe(true);
+}
+
+function expectSaveAsConcurrencyFailure(
+  error: unknown,
+  writtenPaths: readonly string[],
+  pendingPaths: readonly string[],
+): void {
+  expect(error).toMatchObject({
+    name: 'SaveAsPartialError',
+    writtenPaths,
+    pendingPaths,
+  });
+  const outcome = error as { readonly writtenPaths: readonly string[]; readonly pendingPaths: readonly string[] };
+  expect(Object.isFrozen(outcome.writtenPaths)).toBe(true);
+  expect(Object.isFrozen(outcome.pendingPaths)).toBe(true);
+}
+
+async function expectConcurrentSourceRecoverable(
+  context: ReturnType<typeof saveAsFailureFixture>,
+  sourceSession: NonNullable<ReturnType<EditorStore['getSnapshot']>['session']>,
+  replacement: string,
+): Promise<void> {
+  expect(context.store.getSnapshot().session).toBe(sourceSession);
+  expect(context.store.getSnapshot().projectAssets.map(({ path }) => path)).toEqual([
+    ENTRY_PATH,
+    'Assets/Second.uxml',
+  ]);
+  expect(context.workflow.getSnapshot()).toMatchObject({
+    projectName: 'Source',
+    dirtyState: 'dirty',
+    canReload: true,
+    capabilities: { saveAll: true, reloadProject: true },
+  });
+  await vi.waitFor(async () => expect(await context.host.readRecovery(context.source.id)).not.toBeNull());
+  await context.workflow.dispose();
+
+  const reopenedStore = new EditorStore({ host: context.host });
+  const reopenedWorkflow = new FileWorkflow(reopenedStore, context.host, {
+    adapter: new PersistenceTestAdapter(),
+  });
+  await reopenedWorkflow.openProject(context.source);
+  expect(reopenedStore.getSnapshot().session?.snapshot().files.get(ENTRY_PATH)?.text)
+    .toBe(`<UXML><Button text="${replacement}" /></UXML>\r\n`);
+  await reopenedWorkflow.dispose();
 }
 
 function deferred<T>() {
