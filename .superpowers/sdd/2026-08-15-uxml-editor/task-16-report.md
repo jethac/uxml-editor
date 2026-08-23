@@ -1296,3 +1296,176 @@ Finding 11 is therefore resolved with evidence from the declared
   (`fix: close Save As retirement journal gap`).
 - The following report-only commit records this complete round-4 evidence
   against the immutable implementation SHA.
+
+---
+
+## Fix Round 5/5
+
+### Status And Revision
+
+- Status: `DONE_WITH_CONCERNS`.
+- Fix base: `4a4d215aa991f6aaaa63a3618ee61a090fd5bff2`.
+- Branch: `agent/uxml-editor`.
+- Supported runtime: Node `v24.15.0`, npm `11.12.1`.
+- Immutable implementation SHA:
+  `639d2acf904b7d7a7bb7ac3ddbdbf38a73bec968`.
+- Implementation commit: `639d2acf904b7d7a7bb7ac3ddbdbf38a73bec968`
+  (`fix: make retirement handoff setup failure-safe`).
+- No push or PR was performed.
+
+### Finding 1: Make Retirement Handoff Setup Failure-Safe
+
+- Root cause: round 4 installed the temporary recovery listener before entering
+  any `try` block. A synchronous `CommandHistory.subscribe` setup exception
+  therefore rejected retirement immediately, even when watcher retirement had
+  already established the authoritative first failure.
+- That rejection skipped original history-listener disposal, the stable
+  recovery-tail drain, recovery-error accumulation, and temporary-listener
+  cleanup. In the injected case, the source runtime could be restored while
+  the retired runtime's original listener remained registered.
+- `CommandHistory.subscribe` remains unchanged and normally total. The test
+  uses a workflow-focused prototype spy to throw only from the exact temporary
+  source-retirement subscription selected after source watcher completion.
+
+### Deterministic RED Evidence
+
+- Pre-test baseline command:
+  `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Baseline result on Node `v24.15.0`: 1 file passed, 41/41 tests passed.
+- The regression blocks a real source `writeRecovery`, captures a failed source
+  watcher completion, arms only the next history subscription to throw, and
+  queues the `Concurrent` transaction in the following microtask while the
+  original listener and blocked recovery tail are still authoritative.
+- An initial non-evidentiary harness attempt captured the prior round's active
+  spy wrapper and recursed. No production file had changed. The seam was
+  corrected by retaining the real prototype method at module evaluation time,
+  after which the required isolated RED was recorded.
+- Valid RED command after adding only the focused test:
+  `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Valid RED result on Node `v24.15.0`: 1 failed and 41 passed (42 total).
+- Failure 1: `SaveAsPartialError.originalError` was the injected temporary
+  subscription `Error`, rather than the previously captured source watcher
+  `HostError`.
+- Failure 2: the wrapped original source history disposer was expected once
+  but was called zero times.
+- The remaining assertions completed, including staged-target cleanup and
+  reopening the source with exact `Concurrent` recovery bytes. This isolates
+  the missing retirement cleanup and first-failure behavior.
+
+### Production Fix
+
+- Temporary retirement subscription setup now executes inside the existing
+  retirement failure accumulator and uses the established `failure ??=` first
+  failure rule.
+- When setup succeeds, round 4 behavior is unchanged: the temporary listener
+  is installed synchronously before the original listener is disposed, the
+  recovery tail is drained until stable, and the temporary listener is then
+  disposed synchronously.
+- When setup fails, the original listener remains registered throughout the
+  same stable-tail loop. Local source transactions can therefore extend
+  `recoveryTail`, and each extension is observed before retirement proceeds.
+- After the tail is stable, retirement captures any recovery error, disposes
+  the original listener, and performs no later await before returning or
+  throwing the accumulated first failure.
+- No `CommandHistory`, `DocumentSession`, host, public interface, or runtime
+  ownership boundary changed.
+
+### Deterministic GREEN Evidence
+
+- Focused GREEN command:
+  `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Focused GREEN result on Node `v24.15.0`: 1 file passed, 42/42 tests passed.
+- The regression preserves the watcher `HostError` as
+  `SaveAsPartialError.originalError`, observes exactly one original history
+  disposal, disposes staged target authority, restores a second fresh source
+  watch runtime, and reopens exact
+  `<UXML><Button text="Concurrent" /></UXML>\r\n` bytes.
+
+### Round 5 Verification
+
+- Task 16 brief test matrix, run once:
+  `npm test -- src/features/workspace src/core/store`.
+  - PASS: 6 files, 133/133 tests.
+- Task 16 brief build, run once: `npm run build`.
+  - PASS: `tsc --noEmit` completed with no diagnostics.
+  - PASS: Vite transformed 1,917 modules and completed the production build.
+- Full frontend suite, run once:
+  `npm test -- --reporter=dot`.
+  - PASS: 44 files, 688/688 tests in 58.33 seconds.
+- `git diff --check` passed; PowerShell emitted only informational future
+  LF-to-CRLF conversion warnings for the two implementation files.
+- `git diff --cached --check` passed with no output before the implementation
+  commit.
+- Playwright and Tauri/Rust commands were not rerun because round 5 changes no
+  UI, accessibility, native, capability, dependency, or manifest boundary.
+  The required focused, brief, build, and full frontend commands all ran on the
+  supported Node runtime.
+
+### Accepted Behavior Preservation
+
+- [x] A temporary retirement subscription setup exception enters cleanup and
+  first-failure accumulation instead of escaping directly.
+- [x] A previously captured watcher failure remains authoritative.
+- [x] On setup failure, the original listener owns local transactions until
+  every observed recovery-tail extension is stably drained.
+- [x] The original listener is disposed before retirement completes, with no
+  later retirement await that can open an unjournaled interval.
+- [x] The successful round-4 synchronous temporary-listener handoff retains its
+  accepted order and external-reload filtering.
+- [x] Failed Save As reports exact frozen written paths
+  (`Assets/Main.uxml`, `Assets/Second.uxml`) and no pending paths.
+- [x] Failed Save As restores the same source session and project assets under
+  a fresh source runtime with Save All/reload capability and exact recoverable
+  `Concurrent` bytes.
+- [x] The retired original history listener is removed, the source watcher is
+  replaced, staged target authority is disposed, and later target external
+  writes cannot publish workflow state.
+- [x] No canvas, toolbar, layout, geometry, native, dependency, capability,
+  license, public-interface, or unrelated behavior changed.
+
+### Changed Files
+
+- Production: `src/features/workspace/FileWorkflow.ts`.
+- Focused tests: `src/features/workspace/FileWorkflow.test.ts`.
+- Evidence: this append-only report.
+
+### Round 5 Self-Review
+
+- Traced watcher disposal and completion, synchronous history subscription,
+  original/temporary listener ownership, promise-tail extension, fresh source
+  restoration, staged target retirement, and recovery replay through reopen.
+- Confirmed successful setup still installs the temporary listener before the
+  original disposer and removes it only after the stable drain.
+- Confirmed failed setup cannot dispose the original listener before the drain,
+  and there is no asynchronous boundary between the final original disposal
+  and retirement completion.
+- Confirmed the deterministic seam throws once, only after the source watcher
+  failure and blocked recovery append are established; it does not redesign
+  `CommandHistory` or expose a new interface.
+- Confirmed the implementation commit contains only FileWorkflow and its
+  focused test and is directly parented by the required fix base.
+
+### Dependency And License Audit
+
+- No npm or Rust dependency/version changed. `package.json`,
+  `package-lock.json`, Cargo manifests, and lockfiles are unchanged.
+- `uxml-preview` remains exactly `0.4.0`.
+- No license or notice changed.
+
+### Round 5 Concerns
+
+- Full Vitest retains the pre-existing unawaited-assertion warning at
+  `src/core/host/BrowserHost.test.ts:74`. That file is unchanged; all 688 tests
+  passed. The warning remains outside the exact round-5 scope.
+- Vite retains the existing non-failing large-chunk warning for the production
+  bundle. No dependency, bundling, or layout work was in scope.
+
+### Round 5 Commit Finalization
+
+- BASE: `4a4d215aa991f6aaaa63a3618ee61a090fd5bff2`.
+- Immutable implementation SHA:
+  `639d2acf904b7d7a7bb7ac3ddbdbf38a73bec968`.
+- Commit: `639d2acf904b7d7a7bb7ac3ddbdbf38a73bec968`
+  (`fix: make retirement handoff setup failure-safe`).
+- The following report-only commit records this complete round-5 evidence
+  against the immutable implementation SHA.
