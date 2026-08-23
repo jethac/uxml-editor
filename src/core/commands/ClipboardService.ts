@@ -132,6 +132,10 @@ export class ClipboardService {
     if (parent === null || !Number.isInteger(index) || index < 0 || index > parent.children.length) {
       return pasteFailure('AMBIGUOUS_PASTE_TARGET', 'Paste requires one current parent and a valid child index.');
     }
+    const currentParentLocator = session.locatorFor(parent.id);
+    if (currentParentLocator === null) {
+      return pasteFailure('AMBIGUOUS_PASTE_TARGET', 'Paste requires one current parent and a valid child index.');
+    }
     try {
       const occupied = authoredNames(session.document.root);
       const destinationBindings = namespaceBindingsAt(session.document.root, parent);
@@ -147,8 +151,8 @@ export class ClipboardService {
         if (!transformed.ok) return transformed;
         fragments.push(transformed);
       }
-      for (const fragment of fragments) insertElement(session, parentLocator, index, fragment.source);
-      const first = insertElement(session, parentLocator, index, fragments[0].source);
+      for (const fragment of fragments) insertElement(session, currentParentLocator, index, fragment.source);
+      const first = insertElement(session, currentParentLocator, index, fragments[0].source);
       const patches = first.patchesByFile.get(session.entryPath);
       if (patches === undefined || patches.length !== 1) {
         return pasteFailure('AMBIGUOUS_PASTE_TARGET', 'The paste destination has no single safe insertion boundary.');
@@ -161,7 +165,7 @@ export class ClipboardService {
           label: fragments.length === 1 ? 'Paste element' : `Paste ${fragments.length} elements`,
           patchesByFile: new Map([[session.entryPath, [patch]]]),
           selectionAfter: fragments.map((fragment, offset) => pastedFragmentLocator(
-            parentLocator,
+            currentParentLocator,
             parent,
             index + offset,
             fragment.root,

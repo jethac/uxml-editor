@@ -2,14 +2,162 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const MENU = 'menu';
 const OPTIONS = 'options';
+const UNSUPPORTED = 'unsupported';
 const BLANK = 'blank';
 const COLLISION = 'collision';
 const MENU_UXML = 'Assets/UI/Menu.uxml';
 const MENU_USS = 'Assets/UI/Menu.uss';
 const OPTIONS_UXML = 'Assets/UI/Options.uxml';
+const UNSUPPORTED_UXML = 'Assets/UI/Unsupported.uxml';
+const UNSUPPORTED_USS = 'Assets/UI/Unsupported.uss';
 const NEW_PROJECT_UXML = 'Assets/Main.uxml';
 const NEW_PROJECT_SOURCE = '<ui:UXML xmlns:ui="UnityEngine.UIElements">\n</ui:UXML>\n';
 const RECOVERED_MENU_UXML_REVISION = 'memory:v1:26';
+const MENU_USS_BASELINE = [
+  '/* Task 17A menu stylesheet: preserve spacing and CRLF. */',
+  '.menu-root {',
+  '  padding-left: 24px;',
+  '  padding-top: 16px;',
+  '}',
+  '',
+  '.menu-button.primary {',
+  '  background-color: #18794e;',
+  '  color: #ffffff;',
+  '}',
+  '',
+  '.menu-button {',
+  '  min-width: 180px;',
+  '}',
+  '',
+].join('\r\n');
+const MENU_BASELINE = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  "    <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  "    <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+]);
+const MENU_AFTER_KNOWN_INSERT = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  "    <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  "    <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  '    <ui:Button />',
+]);
+const MENU_AFTER_GENERIC_INSERT = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  "    <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  "    <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  '    <ui:Button />',
+  '    <ui:VisualElement />',
+]);
+const MENU_AFTER_RENAME = MENU_AFTER_GENERIC_INSERT.replace('<ui:VisualElement />', '<ui:ScrollView />');
+const MENU_AFTER_REORDER = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  '    <ui:ScrollView />',
+  "    <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  '    ',
+  "    <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  '    ',
+  '    <ui:Button />',
+  '    ',
+]);
+const MENU_AFTER_KEYBOARD_REPARENT = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  '    <ui:ScrollView >',
+  "      <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '    </ui:ScrollView>',
+  '    ',
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  '    ',
+  "    <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  '    ',
+  '    <ui:Button />',
+  '    ',
+]);
+const MENU_AFTER_POINTER_REPARENT = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  '    <ui:ScrollView >',
+  "      <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  "      <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '    </ui:ScrollView>',
+  '    ',
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  '    ',
+  '    ',
+  '    ',
+  '    <ui:Button />',
+  '    ',
+]);
+const MENU_AFTER_WRAP = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  '    <ui:ScrollView >',
+  '      <ui:VisualElement>',
+  "        <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  "      <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '      </ui:VisualElement>',
+  '    </ui:ScrollView>',
+  '    ',
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  '    ',
+  '    ',
+  '    ',
+  '    <ui:Button />',
+  '    ',
+]);
+const MENU_AFTER_DUPLICATE = menuSource([
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  '    <ui:ScrollView >',
+  '      <ui:VisualElement>',
+  "        <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  "      <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '      </ui:VisualElement>',
+  '      <ui:VisualElement>',
+  "        <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  "      <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '      </ui:VisualElement>',
+  '    </ui:ScrollView>',
+  '    ',
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  '    ',
+  '    ',
+  '    ',
+  '    <ui:Button />',
+  '    ',
+]);
+const MENU_AFTER_DELETE = MENU_AFTER_WRAP;
+const UNSUPPORTED_AFTER_GENERIC_CREATE = [
+  '<?xml version="1.0" encoding="utf-8"?>',
+  '<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:acme="Acme.Widgets">',
+  '  <Style src="Unsupported.uss" />',
+  '  <acme:UnknownPanel name="unknown-panel" class="unknown-panel" mystery-mode="orbital">',
+  '    <ui:Label name="preserved-label" class="unsupported-child" text="Preserved child" />',
+  '    <ui:Button name="preserved-button" text="Still editable" />',
+  '    <acme:Widget />',
+  '  </acme:UnknownPanel>',
+  '</ui:UXML>',
+  '',
+].join('\n');
+const UNSUPPORTED_USS_BASELINE = [
+  '.unknown-panel:focus-visible > .unsupported-child {',
+  '  -unity-unsupported-glow: 7px;',
+  '  color: #b91c1c;',
+  '}',
+  '',
+  '.unknown-panel:visited {',
+  '  opacity: 0.4;',
+  '}',
+  '',
+].join('\n');
 const MENU_AFTER_PASTE_PLAY = [
   '<?xml version="1.0" encoding="utf-8"?>',
   "<ui:UXML xmlns:ui='UnityEngine.UIElements'>",
@@ -85,7 +233,7 @@ test('copies and pastes a selected subtree through visible controls, selecting t
   await showSource(page, MENU_UXML);
   expect(await visibleSourceText(page, MENU_UXML)).toBe(normalizeVisibleSource(MENU_AFTER_PASTE_PLAY));
   await runPaletteCommand(page, 'Undo');
-  expect(await visibleSourceText(page, MENU_UXML)).toBe(normalizeVisibleSource(before.files[MENU_UXML]!.text));
+  await expectVisibleSource(page, MENU_UXML, MENU_BASELINE);
   await expect(menuRoot).toHaveAttribute('aria-selected', 'true');
   await runPaletteCommand(page, 'Redo');
   expect(await visibleSourceText(page, MENU_UXML)).toBe(normalizeVisibleSource(MENU_AFTER_PASTE_PLAY));
@@ -123,33 +271,45 @@ test('authors structure through palette, hierarchy, canvas, source, and pointer 
 
   await page.getByRole('searchbox', { name: 'Search elements' }).fill('button');
   await page.getByRole('button', { name: 'Add Button' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_KNOWN_INSERT);
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+  await expectStructuralSelection(page, hierarchy.getByRole('treeitem', { name: 'ui:Button' }), 'ui:Button');
   await expect(hierarchy.getByRole('treeitem', { name: 'ui:Button' })).toBeVisible();
   await page.getByRole('textbox', { name: 'Generic qualified name' }).fill('ui:VisualElement');
   await page.getByRole('button', { name: 'Add generic element' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_GENERIC_INSERT);
   const generic = hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' });
   await expect(generic).toHaveAttribute('aria-selected', 'true');
+  await expectStructuralSelection(page, generic, 'ui:VisualElement');
 
   await page.getByRole('button', { name: 'Rename selected' }).click();
   await page.getByRole('textbox', { name: 'Qualified element name' }).fill('ui:ScrollView');
   await page.getByRole('button', { name: 'Apply rename' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_RENAME);
   const scrollView = hierarchy.getByRole('treeitem', { name: 'ui:ScrollView' });
+  await expectStructuralSelection(page, scrollView, 'ui:ScrollView');
   await page.getByRole('button', { name: 'Move selected up' }).click();
   await page.getByRole('button', { name: 'Move selected up' }).click();
   await page.getByRole('button', { name: 'Move selected up' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_REORDER);
+  await expectStructuralSelection(page, scrollView, 'ui:ScrollView');
 
   const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
   await play.focus();
   await page.keyboard.press('Enter');
   await page.keyboard.press('Alt+ArrowRight');
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_KEYBOARD_REPARENT);
   await expect(play).toHaveAttribute('aria-level', '4');
+  await expectStructuralSelection(page, play, 'ui:Button');
 
   const quit = hierarchy.getByRole('treeitem', { name: 'quit-button' });
   await quit.dragTo(scrollView);
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_POINTER_REPARENT);
   await expect(quit).toHaveAttribute('aria-level', '4');
-  const beforeIllegalDrop = await visibleSourceTextAfterSourceOpen(page, MENU_UXML);
+  await expectStructuralSelection(page, quit, 'ui:Button');
   await play.dragTo(quit);
   await expect(page.getByRole('alert')).toContainText('Button cannot contain children');
-  expect(await visibleSourceText(page, MENU_UXML)).toBe(beforeIllegalDrop);
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_POINTER_REPARENT);
 
   await play.focus();
   await page.keyboard.press('Enter');
@@ -160,11 +320,22 @@ test('authors structure through palette, hierarchy, canvas, source, and pointer 
   await page.getByRole('button', { name: 'Wrap selected' }).click();
   await page.getByRole('textbox', { name: 'Wrapper element name' }).fill('ui:VisualElement');
   await page.getByRole('button', { name: 'Apply wrap' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_WRAP);
   const wrapper = hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' });
   await expect(wrapper).toHaveAttribute('aria-selected', 'true');
+  await expectStructuralSelection(page, wrapper, 'ui:VisualElement');
   await page.getByRole('button', { name: 'Duplicate selected' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DUPLICATE);
   await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(2);
   await page.getByRole('button', { name: 'Remove selected' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE);
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(1);
+  await expectStructuralSelection(page, scrollView, 'ui:ScrollView');
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DUPLICATE);
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(2);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE);
   await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(1);
 
   await hierarchy.getByRole('treeitem', { name: 'menu-title' }).focus();
@@ -176,18 +347,57 @@ test('authors structure through palette, hierarchy, canvas, source, and pointer 
   await expect(play).toHaveAttribute('aria-selected', 'true');
 
   await replaceVisibleText(page, MENU_UXML, 'Main Menu', 'Edited Menu');
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE.replace('Main Menu', 'Edited Menu'));
   await expect(page.getByTestId('canvas-renderer')).toContainText('Edited Menu');
   await expect(hierarchy.getByRole('treeitem', { name: 'menu-title' })).toBeVisible();
-  const finalVisibleSource = await visibleSourceText(page, MENU_UXML);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE);
+  await expect(page.getByTestId('canvas-renderer')).toContainText('Main Menu');
+  await runPaletteCommand(page, 'Redo');
+  const finalExpectedSource = MENU_AFTER_DELETE.replace('Main Menu', 'Edited Menu');
+  await expectVisibleSource(page, MENU_UXML, finalExpectedSource);
   await page.getByRole('button', { name: 'Save' }).click();
   await settled(page);
   const persisted = await project(page, MENU);
-  expect(normalizeVisibleSource(persisted.files[MENU_UXML]!.text)).toBe(finalVisibleSource);
+  expect(persisted.files[MENU_UXML]?.text).toBe(finalExpectedSource);
   expectOnlyCrLf(persisted.files[MENU_UXML]!.text);
+  expect(persisted.files[MENU_USS]?.text).toBe(MENU_USS_BASELINE);
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has no unsaved changes.');
   await runPaletteCommand(page, 'Close Project');
   await runPaletteCommand(page, 'Reopen Project');
   await showSource(page, MENU_UXML);
-  expect(await visibleSourceText(page, MENU_UXML)).toBe(finalVisibleSource);
+  await expectVisibleSource(page, MENU_UXML, finalExpectedSource);
+});
+
+test('preserves an authored non-UI namespace through generic palette creation and reopen', async ({ page }) => {
+  await openEditor(page);
+  await resetEditor(page, UNSUPPORTED);
+  await page.getByRole('button', { name: 'Open Project' }).click();
+  await settled(page);
+  await expectOpenProject(page, 'Unsupported Fixture');
+  const before = await project(page, UNSUPPORTED);
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const unknownPanel = hierarchy.getByRole('treeitem', { name: 'unknown-panel' });
+  await unknownPanel.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('textbox', { name: 'Generic qualified name' }).fill('acme:Widget');
+  await page.getByRole('button', { name: 'Add generic element' }).click();
+
+  const widget = hierarchy.getByRole('treeitem', { name: 'acme:Widget' });
+  await expectVisibleSource(page, UNSUPPORTED_UXML, UNSUPPORTED_AFTER_GENERIC_CREATE);
+  await expectStructuralSelection(page, widget, 'acme:Widget');
+  expect(before.files[UNSUPPORTED_USS]?.text).toBe(UNSUPPORTED_USS_BASELINE);
+  await page.getByRole('button', { name: 'Save' }).click();
+  await settled(page);
+  const saved = await project(page, UNSUPPORTED);
+  expect(saved.files[UNSUPPORTED_UXML]?.text).toBe(UNSUPPORTED_AFTER_GENERIC_CREATE);
+  expect(saved.files[UNSUPPORTED_UXML]?.revision).not.toBe(before.files[UNSUPPORTED_UXML]?.revision);
+  expect(saved.files[UNSUPPORTED_USS]).toEqual(before.files[UNSUPPORTED_USS]);
+  await runPaletteCommand(page, 'Close Project');
+  await expectClosedProject(page);
+  await runPaletteCommand(page, 'Reopen Project');
+  await expectOpenProject(page, 'Unsupported Fixture');
+  await expectVisibleSource(page, UNSUPPORTED_UXML, UNSUPPORTED_AFTER_GENERIC_CREATE);
 });
 
 test('creates, saves, closes, and reopens an unsaved project with exact bytes', async ({ page }) => {
@@ -425,7 +635,7 @@ test('a replacement failure preserves bytes and surfaces a recoverable dirty edi
   expect((await hostObservations(page)).recovery['fixture:menu']).toBeNull();
 });
 
-type ProjectKey = 'menu' | 'options' | 'blank' | 'collision';
+type ProjectKey = 'menu' | 'options' | 'unsupported' | 'blank' | 'collision';
 
 interface FileSnapshot {
   readonly text: string;
@@ -547,6 +757,17 @@ async function visibleSourceTextAfterSourceOpen(page: Page, path: string): Promi
   return visibleSourceText(page, path);
 }
 
+async function expectVisibleSource(page: Page, path: string, expected: string): Promise<void> {
+  await showSource(page, path);
+  expect(await visibleSourceText(page, path)).toBe(normalizeVisibleSource(expected));
+}
+
+async function expectStructuralSelection(page: Page, row: Locator, inspectorName: string): Promise<void> {
+  await expect(row).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByLabel('Inspector selection context')).toContainText(inspectorName);
+  await expect(page.getByTestId('selected-bounds')).toBeVisible();
+}
+
 async function replaceVisibleText(page: Page, path: string, search: string, replacement: string): Promise<void> {
   const editor = sourceEditor(page, path);
   await editor.click();
@@ -664,6 +885,19 @@ function expectOnlyCrLf(value: string): void {
     if (value[index] === '\n') expect(value[index - 1], `lone LF at ${index}`).toBe('\r');
     if (value[index] === '\r') expect(value[index + 1], `lone CR at ${index}`).toBe('\n');
   }
+}
+
+function menuSource(children: readonly string[]): string {
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    "<ui:UXML xmlns:ui='UnityEngine.UIElements'>",
+    '  <Style src = "Menu.uss" />',
+    '  <ui:VisualElement name="menu-root" class="menu-root">',
+    ...children,
+    '  </ui:VisualElement>',
+    '</ui:UXML>',
+    '',
+  ].join('\r\n');
 }
 
 function normalizeVisibleSource(source: string): string {

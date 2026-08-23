@@ -45,6 +45,30 @@ describe('workspace accessibility', () => {
     expect(paletteButton).toHaveFocus();
   }, 15_000);
 
+  it('describes dirty state on the visible project status control', async () => {
+    const user = userEvent.setup();
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Assets/Main.uxml': '<UXML />\n' } }],
+    });
+    const store = new EditorStore({ host, viewport: { width: 1280, height: 720 } });
+    render(<App store={store} />);
+    await user.click(screen.getByRole('button', { name: 'Open Project' }));
+    await waitFor(() => expect(store.getSnapshot().session).not.toBeNull());
+    const session = store.getSnapshot().session!;
+
+    session.history.execute({
+      id: 'dirty-status',
+      label: 'Dirty status',
+      patchesByFile: new Map([['Assets/Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    store.dispatch({ type: 'session/sync' });
+
+    await waitFor(() => expect(screen.getByLabelText('Project status')).toHaveAttribute(
+      'aria-description',
+      'Project has unsaved changes.',
+    ));
+  }, 15_000);
+
   it('preserves global file and pane shortcuts in editable targets while suppressing text conflicts', async () => {
     const session = openSession();
     session.history.execute({

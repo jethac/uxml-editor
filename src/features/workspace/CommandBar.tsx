@@ -52,6 +52,11 @@ export function CommandBar({ store, snapshot, registry, workflow, onPanelActivat
     workflow?.getSnapshot ?? nullWorkflowSnapshot,
   );
   const projectStatus = workflowSnapshot.projectName ?? snapshot.session?.entryPath ?? 'No project open';
+  const projectStateDescription = workflowSnapshot.dirtyState === 'dirty'
+    ? 'Project has unsaved changes.'
+    : workflowSnapshot.dirtyState === 'clean'
+      ? 'Project has no unsaved changes.'
+      : 'Project save state is unavailable.';
   const registered = (id: EditorCommandId) => registrySnapshot.commands.find((command) => command.id === id);
   const run = (id: EditorCommandId, fallback: () => void) => {
     if (registry === undefined) fallback();
@@ -62,7 +67,7 @@ export function CommandBar({ store, snapshot, registry, workflow, onPanelActivat
       className="commandbar"
       data-testid="commandbar"
     >
-      <div className="commandbar-brand" aria-label="Project status">
+      <div className="commandbar-brand" aria-label="Project status" aria-description={projectStateDescription}>
         <h1>UXML Editor</h1>
         <span title={projectStatus}>{projectStatus}</span>
       </div>

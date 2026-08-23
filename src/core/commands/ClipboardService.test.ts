@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorElement } from '../adapter/types';
 import { ClipboardService, UXML_FRAGMENT_MIME } from './ClipboardService';
+import { resolveElementLocator } from '../documents/ElementLocator';
 import { entryPath, locatorWithName, openSession } from './uxmlCommands.testUtils';
 
 describe('ClipboardService', () => {
@@ -87,6 +88,88 @@ describe('ClipboardService', () => {
     expect(session.selection).toEqual([parent]);
     session.history.redo();
     expect(session.selection.map((locator) => locator.authoredName)).toEqual(['item-copy']);
+  });
+
+  it('canonicalizes a stale named parent before selecting an unnamed pasted root', async () => {
+    const source = [
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+      '  <ui:VisualElement name="parent">',
+      '    <ui:Label name="before" />',
+      '    <ui:Label />',
+      '    <ui:Label name="after" />',
+      '  </ui:VisualElement>',
+      '</ui:UXML>',
+    ].join('\n');
+    const session = openSession(source);
+    const parent = locatorWithName(session, 'parent');
+    const copied = new ClipboardService().copy(session, [session.document.root.children[0].children[1]]);
+    expect(copied.ok).toBe(true);
+    if (!copied.ok) return;
+    session.setSelection([parent]);
+    const staleParent = {
+      ...parent,
+      childPath: [99],
+      ancestorTags: ['not-the-current-parent'],
+    };
+
+    const pasted = await new ClipboardService().paste(session, staleParent, 2, copied.item);
+
+    expect(pasted.ok, JSON.stringify(pasted)).toBe(true);
+    if (!pasted.ok) return;
+    session.history.execute(pasted.transaction);
+    const expectedPastedRoot = session.document.root.children[0].children[2];
+    expect(resolveElementLocator(session.document.root, session.selection[0])).toBe(expectedPastedRoot.id);
+    expect(session.selectedNodeIds).toEqual([expectedPastedRoot.id]);
+    session.history.undo();
+    expect(session.selection).toEqual([parent]);
+    session.history.redo();
+    expect(resolveElementLocator(session.document.root, session.selection[0])).toBe(session.document.root.children[0].children[2].id);
+  });
+
+  it('keeps multi-root nonterminal paste selection stable through nested renames, undo, redo, and replay', async () => {
+    const source = [
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+      '  <ui:VisualElement name="parent">',
+      '    <ui:VisualElement name="item"><ui:Label name="caption" /></ui:VisualElement>',
+      '    <ui:Label name="item-copy" />',
+      '    <ui:Label name="caption-copy" />',
+      '    <ui:Label name="after" />',
+      '  </ui:VisualElement>',
+      '</ui:UXML>',
+    ].join('\n');
+    const session = openSession(source);
+    const parent = locatorWithName(session, 'parent');
+    const copied = new ClipboardService().copy(session, [
+      elementNamed(session.document.root, 'item'),
+      elementNamed(session.document.root, 'item-copy'),
+    ]);
+    expect(copied.ok).toBe(true);
+    if (!copied.ok) return;
+    session.setSelection([parent]);
+    const staleParent = { ...parent, childPath: [42], ancestorTags: ['stale'] };
+
+    const pasted = await new ClipboardService().paste(session, staleParent, 1, copied.item);
+
+    expect(pasted.ok, JSON.stringify(pasted)).toBe(true);
+    if (!pasted.ok) return;
+    session.history.execute(pasted.transaction);
+    const expected = session.snapshot().files.get(entryPath)?.text;
+    expect(expected).toContain('<ui:VisualElement name="item-copy-2"><ui:Label name="caption-copy-2" /></ui:VisualElement>');
+    expect(expected).toContain('<ui:Label name="item-copy-copy" />');
+    expect(session.selection.map((locator) => locator.authoredName)).toEqual(['item-copy-2', 'item-copy-copy']);
+    expect(session.selectedNodeIds).toHaveLength(2);
+    session.history.undo();
+    expect(session.snapshot().files.get(entryPath)?.text).toBe(source);
+    expect(session.selection).toEqual([parent]);
+    session.history.redo();
+    expect(session.snapshot().files.get(entryPath)?.text).toBe(expected);
+    expect(session.selection.map((locator) => locator.authoredName)).toEqual(['item-copy-2', 'item-copy-copy']);
+
+    const replayed = openSession(source);
+    replayed.history.replay([pasted.transaction]);
+    expect(replayed.snapshot().files.get(entryPath)?.text).toBe(expected);
+    expect(replayed.selection.map((locator) => locator.authoredName)).toEqual(['item-copy-2', 'item-copy-copy']);
+    expect(replayed.selectedNodeIds).toHaveLength(2);
   });
 
   it('returns a stable diagnostic for malformed structured clipboard data', async () => {
