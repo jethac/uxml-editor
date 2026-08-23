@@ -930,3 +930,14 @@ Finding 11 is therefore resolved with evidence from the declared
   682 tests passed; it was left outside the exact findings scope.
 - Vite retains the existing non-failing large-chunk warning. Playwright retains
   the existing `NO_COLOR`/`FORCE_COLOR` warning.
+
+### Round 2 Commit Finalization
+
+- BASE: `54fff984187915b797836bd00289cac8e0cdc3df`.
+- Implementation/report HEAD:
+  `8a0604804c72e0c720c413deed9fd9a17ed07742`.
+- Commit: `8a0604804c72e0c720c413deed9fd9a17ed07742`
+  (`fix: address Task 16 round 2 findings`).
+- This SHA contains all production changes, focused tests, and the complete
+  round-2 red/green evidence above. The following report-only commit records
+  this immutable implementation SHA.
