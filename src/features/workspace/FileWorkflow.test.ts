@@ -181,6 +181,96 @@ describe('FileWorkflow', () => {
     });
   });
 
+  it('aggregates a post-write Save As readback failure without retiring source authority', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, workflow, destination } = context;
+    await openDirtySaveAsSource(context);
+    const readText = host.readText.bind(host);
+    vi.spyOn(host, 'readText').mockImplementation(async (path) => {
+      if (path.projectId === destination.id) {
+        throw new HostError('read-failed', 'Injected post-write readback failure.');
+      }
+      return readText(path);
+    });
+
+    const error = await captureSaveAsFailure(workflow.saveAs(destination));
+
+    expectCompletedSaveAsFailure(error);
+    await expectDirtySourceAuthority(context);
+    expect(host.messageRequests.at(-1)).toMatchObject({
+      title: 'Save As incomplete',
+      message: 'Written: Assets/Main.uxml, Assets/Second.uxml. Pending: none.',
+    });
+  });
+
+  it('aggregates a post-write destination rescan failure without retiring source authority', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, workflow, destination } = context;
+    await openDirtySaveAsSource(context);
+    const enumerateFiles = host.enumerateFiles.bind(host);
+    let destinationScans = 0;
+    vi.spyOn(host, 'enumerateFiles').mockImplementation(async (root) => {
+      if (root.id === destination.id) {
+        destinationScans += 1;
+        if (destinationScans === 2) {
+          throw new HostError('read-failed', 'Injected destination rescan failure.');
+        }
+      }
+      return enumerateFiles(root);
+    });
+
+    const error = await captureSaveAsFailure(workflow.saveAs(destination));
+
+    expectCompletedSaveAsFailure(error);
+    await expectDirtySourceAuthority(context);
+  });
+
+  it('aggregates target watcher preparation failure without retiring source authority', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, workflow, destination } = context;
+    await openDirtySaveAsSource(context);
+    vi.spyOn(host, 'watch').mockRejectedValueOnce(
+      new HostError('read-failed', 'Injected target watcher preparation failure.'),
+    );
+
+    const error = await captureSaveAsFailure(workflow.saveAs(destination));
+
+    expectCompletedSaveAsFailure(error);
+    await expectDirtySourceAuthority(context);
+  });
+
+  it('aggregates source retirement failure and disposes the staged Save As watcher', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, store, workflow, source, destination } = context;
+    const sourceFailure = new HostError('read-failed', 'Injected source retirement failure.');
+    const sourceDispose = vi.fn();
+    const targetDispose = vi.fn();
+    vi.spyOn(host, 'watch').mockImplementation(async (root) => root.id === source.id
+      ? Object.freeze({
+          dispose: sourceDispose,
+          completion: Promise.resolve(Object.freeze({ status: 'failed' as const, error: sourceFailure })),
+        })
+      : Object.freeze({
+          dispose: targetDispose,
+          completion: Promise.resolve(Object.freeze({ status: 'disposed' as const })),
+        }));
+    await workflow.openProject(source);
+    editButtonText(store, 'Race');
+    await vi.waitFor(async () => expect(await host.readRecovery(source.id)).not.toBeNull());
+    const sourceSession = store.getSnapshot().session;
+    const sourceRecovery = await host.readRecovery(source.id);
+
+    const error = await captureSaveAsFailure(workflow.saveAs(destination));
+
+    expectCompletedSaveAsFailure(error);
+    expect(store.getSnapshot().session).toBe(sourceSession);
+    expect(workflow.getSnapshot().dirtyState).toBe('dirty');
+    expect(await host.readRecovery(source.id)).toBe(sourceRecovery);
+    expect(sourceDispose).toHaveBeenCalledOnce();
+    expect(targetDispose).toHaveBeenCalledOnce();
+    expect(host.messageRequests.at(-1)).toMatchObject({ title: 'Save As incomplete' });
+  });
+
   it('reauthorizes a recent project instead of treating recent metadata as a grant', async () => {
     const { host, workflow } = fixture();
     const root = await host.chooseProject();
@@ -406,6 +496,66 @@ describe('FileWorkflow', () => {
     expect(store.getSnapshot().session!.snapshot().files.get(ENTRY_PATH)!.text).toBe(INITIAL_SOURCE);
     expect(workflow.getSnapshot().dirtyState).toBe('clean');
     expect(await host.readRecovery(root!.id)).toBeNull();
+  });
+
+  it('retains exact dirty source authority when replacement recovery is malformed', async () => {
+    const context = replacementFailureFixture();
+    const sourceRecovery = await openDirtyReplacementSource(context);
+    await context.host.writeRecovery(context.replacement.id, '{"version":999}');
+    context.host.queueConfirmation(false);
+    context.host.queueConfirmation(true);
+
+    await expect(context.workflow.openProject(context.replacement)).rejects.toThrow();
+
+    await expectDirtyWatchedReplacementSource(context, sourceRecovery);
+  });
+
+  it('retains exact dirty source authority when replacement watcher setup fails', async () => {
+    const context = replacementFailureFixture();
+    const sourceRecovery = await openDirtyReplacementSource(context);
+    vi.spyOn(context.host, 'watch').mockRejectedValueOnce(
+      new HostError('read-failed', 'Injected replacement watcher setup failure.'),
+    );
+    context.host.queueConfirmation(false);
+    context.host.queueConfirmation(true);
+
+    await expect(context.workflow.openProject(context.replacement)).rejects.toThrow(
+      'Injected replacement watcher setup failure.',
+    );
+
+    await expectDirtyWatchedReplacementSource(context, sourceRecovery);
+  });
+
+  it('retains source authority and disposes a staged replacement watcher when discard cleanup aborts', async () => {
+    const context = replacementFailureFixture();
+    const sourceRecovery = await openDirtyReplacementSource(context);
+    const targetDispose = wrapNextWatch(context.host);
+    context.host.injectFailure({ operation: 'clearRecovery', phase: 'before' });
+    context.host.queueConfirmation(false);
+    context.host.queueConfirmation(true);
+
+    await context.workflow.openProject(context.replacement);
+
+    expect(targetDispose).toHaveBeenCalledOnce();
+    await expectDirtyWatchedReplacementSource(context, sourceRecovery);
+  });
+
+  it('retains source authority and disposes the staged watcher when replacement recent metadata read fails', async () => {
+    const context = replacementFailureFixture();
+    const sourceRecovery = await openDirtyReplacementSource(context);
+    const targetDispose = wrapNextWatch(context.host);
+    vi.spyOn(context.host, 'listRecentProjects').mockRejectedValueOnce(
+      new HostError('app-data-failed', 'Injected recent metadata read failure.'),
+    );
+    context.host.queueConfirmation(false);
+    context.host.queueConfirmation(true);
+
+    await expect(context.workflow.openProject(context.replacement)).rejects.toThrow(
+      'Injected recent metadata read failure.',
+    );
+
+    expect(targetDispose).toHaveBeenCalledOnce();
+    await expectDirtyWatchedReplacementSource(context, sourceRecovery);
   });
 
   it('keeps the current project open and reports a discard cleanup failure', async () => {
@@ -683,6 +833,103 @@ function saveAsFailureFixture(destinationFiles: Readonly<Record<string, string>>
     source: Object.freeze({ id: projectId('source'), name: 'Source' }),
     destination: Object.freeze({ id: projectId('destination'), name: 'Destination' }),
   };
+}
+
+function replacementFailureFixture() {
+  const host = new MemoryHost({
+    projects: [
+      { id: 'source', name: 'Source', files: { [ENTRY_PATH]: INITIAL_SOURCE } },
+      { id: 'replacement', name: 'Replacement', files: { [ENTRY_PATH]: '<UXML replacement="true" />\n' } },
+    ],
+  });
+  const store = new EditorStore({ host });
+  return {
+    host,
+    store,
+    workflow: new FileWorkflow(store, host, { adapter: new PersistenceTestAdapter() }),
+    source: Object.freeze({ id: projectId('source'), name: 'Source' }),
+    replacement: Object.freeze({ id: projectId('replacement'), name: 'Replacement' }),
+  };
+}
+
+async function openDirtyReplacementSource(
+  context: ReturnType<typeof replacementFailureFixture>,
+): Promise<string> {
+  await context.workflow.openProject(context.source);
+  editButtonText(context.store, 'Race');
+  await vi.waitFor(async () => expect(await context.host.readRecovery(context.source.id)).not.toBeNull());
+  return (await context.host.readRecovery(context.source.id))!;
+}
+
+async function expectDirtyWatchedReplacementSource(
+  context: ReturnType<typeof replacementFailureFixture>,
+  expectedRecovery: string,
+): Promise<void> {
+  expect(context.workflow.getSnapshot()).toMatchObject({
+    projectName: 'Source',
+    dirtyState: 'dirty',
+    canReload: true,
+  });
+  expect(context.store.getSnapshot().session?.snapshot().files.get(ENTRY_PATH)?.text)
+    .toBe('<UXML><Button text="Race" /></UXML>\r\n');
+  expect(await context.host.readRecovery(context.source.id)).toBe(expectedRecovery);
+  await context.host.externalWrite(projectPath(context.source, ENTRY_PATH), '<UXML external="true" />\n');
+  await context.host.advanceTime(50);
+  expect(context.workflow.getSnapshot().externalChanges).toEqual([
+    expect.objectContaining({ path: ENTRY_PATH, status: 'conflict' }),
+  ]);
+}
+
+function wrapNextWatch(host: MemoryHost) {
+  const dispose = vi.fn();
+  const watch = host.watch.bind(host);
+  vi.spyOn(host, 'watch').mockImplementationOnce(async (root, listener) => {
+    const underlying = await watch(root, listener);
+    return Object.freeze({
+      dispose: () => {
+        dispose();
+        underlying.dispose();
+      },
+    });
+  });
+  return dispose;
+}
+
+async function openDirtySaveAsSource(context: ReturnType<typeof saveAsFailureFixture>): Promise<void> {
+  await context.workflow.openProject(context.source);
+  editButtonText(context.store, 'Race');
+  await vi.waitFor(async () => expect(await context.host.readRecovery(context.source.id)).not.toBeNull());
+}
+
+async function expectDirtySourceAuthority(context: ReturnType<typeof saveAsFailureFixture>): Promise<void> {
+  expect(context.workflow.getSnapshot()).toMatchObject({
+    projectName: 'Source',
+    dirtyState: 'dirty',
+    canReload: true,
+  });
+  expect(context.store.getSnapshot().session?.snapshot().files.get(ENTRY_PATH)?.text)
+    .toBe('<UXML><Button text="Race" /></UXML>\r\n');
+  expect(await context.host.readRecovery(context.source.id)).not.toBeNull();
+}
+
+async function captureSaveAsFailure(operation: Promise<void>): Promise<unknown> {
+  try {
+    await operation;
+  } catch (error) {
+    return error;
+  }
+  throw new Error('Expected Save As to fail.');
+}
+
+function expectCompletedSaveAsFailure(error: unknown): void {
+  expect(error).toMatchObject({
+    name: 'SaveAsPartialError',
+    writtenPaths: [ENTRY_PATH, 'Assets/Second.uxml'],
+    pendingPaths: [],
+  });
+  const outcome = error as { readonly writtenPaths: readonly string[]; readonly pendingPaths: readonly string[] };
+  expect(Object.isFrozen(outcome.writtenPaths)).toBe(true);
+  expect(Object.isFrozen(outcome.pendingPaths)).toBe(true);
 }
 
 function deferred<T>() {

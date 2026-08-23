@@ -20,6 +20,14 @@ export const DESKTOP_COMMAND_IDS: readonly DesktopCommandId[] = Object.freeze(
   commandMetadataSource.filter(({ native }) => native).map(({ id }) => id as DesktopCommandId),
 );
 
+export type DesktopFileCommandId = Extract<DesktopCommandId, `file.${string}`>;
+
+export const DESKTOP_FILE_COMMAND_IDS: readonly DesktopFileCommandId[] = Object.freeze(
+  DESKTOP_COMMAND_IDS.filter((id): id is DesktopFileCommandId => id.startsWith('file.')),
+);
+
+export type DesktopFileCommandAvailability = Readonly<Record<DesktopFileCommandId, boolean>>;
+
 export interface DesktopEvent<T> {
   readonly payload: T;
 }

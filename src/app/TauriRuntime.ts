@@ -1,4 +1,8 @@
 import type { AppDesktopPorts } from './App';
+import {
+  DESKTOP_FILE_COMMAND_IDS,
+  type DesktopFileCommandAvailability,
+} from '../core/desktop/DesktopCommandBridge';
 import { TauriHost, type TauriEvent, type TauriTimerPorts } from '../core/host/TauriHost';
 
 export interface RawTauriRuntimePorts {
@@ -64,14 +68,18 @@ export function createTauriRuntimeBindings(raw: RawTauriRuntimePorts): TauriRunt
         },
       }),
       menu: Object.freeze({
-        setFileWorkflowEnabled: async (workflowGeneration: string, enabled: boolean) => {
+        setFileWorkflowEnabled: async (
+          workflowGeneration: string,
+          availability: DesktopFileCommandAvailability,
+        ) => {
           if (!/^workflow:v1:[0-9a-f]{16}$/.test(workflowGeneration)) {
             throw new Error('Desktop workflow generation is malformed.');
           }
+          const validatedAvailability = validateFileCommandAvailability(availability);
           await invokeVoid(
             raw,
             'desktop_set_file_workflow_enabled',
-            { request: { workflowGeneration, enabled } },
+            { request: { workflowGeneration, availability: validatedAvailability } },
           );
         },
       }),
@@ -80,6 +88,24 @@ export function createTauriRuntimeBindings(raw: RawTauriRuntimePorts): TauriRunt
       }),
     }),
   });
+}
+
+const DESKTOP_FILE_COMMAND_ID_SET: ReadonlySet<string> = new Set(DESKTOP_FILE_COMMAND_IDS);
+
+function validateFileCommandAvailability(value: unknown): DesktopFileCommandAvailability {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Desktop file-command availability is malformed.');
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== DESKTOP_FILE_COMMAND_IDS.length
+    || keys.some((key) => !DESKTOP_FILE_COMMAND_ID_SET.has(key))
+    || DESKTOP_FILE_COMMAND_IDS.some((id) => typeof record[id] !== 'boolean')) {
+    throw new Error('Desktop file-command availability is malformed.');
+  }
+  return Object.freeze(Object.fromEntries(
+    DESKTOP_FILE_COMMAND_IDS.map((id) => [id, record[id] as boolean]),
+  )) as DesktopFileCommandAvailability;
 }
 
 async function invokeVoid(raw: RawTauriRuntimePorts, command: string, payload: unknown): Promise<void> {

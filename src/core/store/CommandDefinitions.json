@@ -1,6 +1,6 @@
 [
   { "id": "file.new-project", "label": "New Project", "section": "File", "windowsAccelerator": "Ctrl+N", "macAccelerator": "Meta+N", "native": false, "nativeEnabledByDefault": false },
-  { "id": "file.open-project", "label": "Open Project", "section": "File", "windowsAccelerator": "Ctrl+O", "macAccelerator": "Meta+O", "native": true, "nativeEnabledByDefault": true },
+  { "id": "file.open-project", "label": "Open Project", "section": "File", "windowsAccelerator": "Ctrl+O", "macAccelerator": "Meta+O", "native": true, "nativeEnabledByDefault": false },
   { "id": "file.open-recent", "label": "Open Recent Project", "section": "File", "windowsAccelerator": null, "macAccelerator": null, "native": false, "nativeEnabledByDefault": false },
   { "id": "file.save", "label": "Save", "section": "File", "windowsAccelerator": "Ctrl+S", "macAccelerator": "Meta+S", "native": true, "nativeEnabledByDefault": false },
   { "id": "file.save-as", "label": "Save As", "section": "File", "windowsAccelerator": "Ctrl+Shift+S", "macAccelerator": "Meta+Shift+S", "native": false, "nativeEnabledByDefault": false },

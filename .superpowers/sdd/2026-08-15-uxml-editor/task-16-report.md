@@ -706,3 +706,227 @@ wave stabilized. No machine-wide runtime or dependency pin was changed.
 
 Finding 11 is therefore resolved with evidence from the declared
 `>=24.15.0 <25` runtime range.
+
+---
+
+## Fix Round 2/5
+
+### Status And Revision
+
+- Status: `DONE_WITH_CONCERNS`.
+- Fix base: `54fff984187915b797836bd00289cac8e0cdc3df`.
+- Branch: `agent/uxml-editor`.
+- Implementation/report commit SHA is recorded in the round-finalization
+  addendum after the implementation commit is created.
+- No push or PR was performed.
+
+### Finding 1: Aggregate Every Post-Write Save As Failure
+
+- Red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Expected failure: post-write readback, destination rescan, target watcher
+  preparation, and source retirement failures must throw
+  `SaveAsPartialError` with frozen exact sorted paths, retain the original
+  session/recovery authority, show the partial outcome, and dispose staged
+  target resources.
+- Observed red: 4 failed and 28 passed (32 total). Each injection escaped as a
+  raw `HostError` instead of the required aggregate error.
+- Production change: target runtime/recent state is prepared before source
+  retirement. Every failure after completed writes is routed through the one
+  aggregate outcome path; staged target runtime is retired on failure.
+- Green command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Green result: 32/32 passed.
+
+### Finding 2: Retain The Owned Workflow Across Desktop Replacement
+
+- Red command: `npm test -- src/app/App.test.tsx`.
+- Expected failure: replacing only the desktop prop must retain the owned
+  workflow, exact session, watcher, and subscribers; unmount disposes once and
+  reports asynchronous disposal failure through the latest desktop error port.
+- Observed red: 1 failed and 6 passed (7 total). Desktop rerender disposed the
+  retained watcher.
+- Production change: the ownership cleanup effect depends only on the owned
+  workflow. A ref supplies the latest desktop error port to asynchronous
+  unmount cleanup without making desktop identity an ownership dependency.
+- The first green attempt exposed a test-harness error because its watcher mock
+  replaced the real `MemoryHost` watcher. The mock was corrected to wrap the
+  real watcher so the test proves live external reload behavior.
+- Green command: `npm test -- src/app/App.test.tsx`.
+- Green result: 7/7 passed.
+
+### Finding 3: Prepare Replacement Targets Before Discard Finalization
+
+- Red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Expected failure: malformed target recovery, watcher setup failure, recent
+  metadata failure, or discard cleanup failure must retain the exact dirty,
+  watched source and byte-identical recovery, disposing any staged target.
+- Observed red: 4 failed and 32 passed (36 total). Three cases erased source
+  recovery; the discard-cleanup abort did not dispose its staged watcher.
+- Production change: scan/read, recovery replay, watcher/history setup, and
+  recent metadata preparation now complete before source recovery is cleared
+  or source authority is retired. Same-root explicit discard reconstructs the
+  pristine scanned session only after validating target recovery. All aborts
+  retire staged resources.
+- Green command: `npm test -- src/features/workspace/FileWorkflow.test.ts`.
+- Green result: 36/36 passed.
+
+### Finding 4: Exact Native File Command Availability
+
+- TypeScript App red command:
+  `npm test -- src/app/App.desktop.test.tsx`.
+- Expected failure: the native menu must receive exact no-session, untitled,
+  and active states from the registry, while direct activation of an
+  unavailable command remains contained and side-effect-free.
+- Observed red: 1 failed and 14 passed (15 total). App published boolean
+  `true` instead of the four-command availability object.
+- Tauri adapter red command: `npm test -- src/app/TauriRuntime.test.ts`.
+- Expected failure: IPC must emit an exact availability object and reject
+  missing, extra, or non-boolean keys before invocation.
+- Observed red: 5 failed and 9 passed (14 total). The adapter emitted the old
+  `enabled` field and accepted all four malformed values.
+- Rust red command:
+  `cargo test --manifest-path src-tauri/Cargo.toml desktop::tests`.
+- Expected failure: Rust must deserialize the exact four-key contract and
+  transactionally transition no-session, untitled, active, mixed rollback,
+  and stale-generation states.
+- Observed red: compilation failed because
+  `NativeFileCommandAvailability` did not exist and the transition helper still
+  inferred a single boolean.
+- Production change: native file IDs are filtered from the shared declarative
+  command definitions and typed as one exact map. App subscribes to the same
+  `CommandRegistry` snapshot used by every other command surface, serializes
+  updates, publishes all-false on teardown, and preserves the monotonic owner
+  gate. Tauri validates and freezes the exact IPC value. Rust denies unknown
+  fields, reads every prior state before writes, restores all successfully
+  changed items on failure, and commits a generation only after success.
+  Native Open Project now also starts disabled until Task 16 binds ownership.
+- First compatibility rerun: Tauri passed 14/14 and Rust passed 19/19; five
+  legacy App assertions still modeled the old boolean contract. Those tests
+  were updated to assert exact all-enabled/all-disabled maps without changing
+  lifecycle behavior.
+- Final green commands/results:
+  - `npm test -- src/app/App.desktop.test.tsx`: 15/15 passed.
+  - `npm test -- src/app/TauriRuntime.test.ts`: 14/14 passed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml desktop::tests`: 19/19
+    passed; 67 filtered out; 0 main tests.
+
+### Round 2 Green Verification
+
+- Covering matrix:
+  `npm test -- src/features/workspace/FileWorkflow.test.ts src/app/App.test.tsx src/app/App.desktop.test.tsx src/core/store/CommandRegistry.test.ts`
+  - PASS: 4 files, 66/66 tests.
+- Brief matrix: `npm test -- src/features/workspace src/core/store`
+  - PASS: 6 files, 127/127 tests.
+- Full frontend: `npm test -- --reporter=dot`
+  - PASS: 44 files, 682/682 tests in 52.09 seconds.
+- TypeScript: `npx tsc --noEmit`
+  - PASS, no diagnostics.
+- Production frontend: `npm run build`
+  - PASS: 1,917 modules transformed. Output included
+    `dist/assets/index-Dl33MfwH.js` at 1,061.90 kB (337.94 kB gzip).
+- Rust formatting:
+  `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
+  - Initial check found two formatter-only test wraps. `cargo fmt` was applied;
+    final check PASS.
+- Full Rust: `cargo test --manifest-path src-tauri/Cargo.toml`
+  - PASS: 86/86 library tests; 0 main tests; 0 doc tests.
+- Rust quality: `cargo check --manifest-path src-tauri/Cargo.toml` and
+  `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
+  - PASS.
+- Focused accessibility Playwright:
+  `npx playwright test tests/e2e/accessibility-workflow.spec.ts --grep "workflow has no automated axe violations and is keyboard operable"`
+  - PASS: 1/1 in 14.6 seconds.
+- Desktop release boundary: `npm run tauri:build -- --no-bundle`
+  - PASS: release executable produced at
+    `src-tauri/target/release/uxml-editor.exe`.
+
+### Browser, Keyboard, Axe, And Visual Evidence
+
+- The focused Playwright scenario ran a real `AxeBuilder.analyze()` scan with
+  zero violations and completed the keyboard-only open, command-palette focus,
+  Escape focus-return, named canvas focus, and canvas Escape assertions.
+- Round 2 changes no visual layout or canvas rendering code. The excluded
+  canvas heading, toolbar, grid, geometry files, and their tests were not
+  touched. The previously recorded desktop and 720px nonblank/no-overlap visual
+  baseline remains applicable.
+- Component tests additionally prove the exact native state progression and
+  side-effect-free unavailable native activation.
+
+### Changed Files
+
+- Workflow: `src/features/workspace/FileWorkflow.ts` and
+  `src/features/workspace/FileWorkflow.test.ts`.
+- App ownership/native publication: `src/app/App.tsx`, `src/app/App.test.tsx`,
+  and `src/app/App.desktop.test.tsx`.
+- Tauri frontend boundary: `src/app/TauriRuntime.ts` and
+  `src/app/TauriRuntime.test.ts`.
+- Shared native identity/defaults: `src/core/desktop/DesktopCommandBridge.ts`
+  and `src/core/store/CommandDefinitions.json`.
+- Rust boundary/transaction: `src-tauri/src/desktop.rs` and
+  `src-tauri/src/lib.rs`.
+- Evidence: this append-only report.
+
+### Dependency And License Audit
+
+- No npm or Rust dependency/version changed. `package.json`,
+  `package-lock.json`, and Cargo dependency manifests are unchanged.
+- `uxml-preview` remains exactly `0.4.0` in `package.json` and
+  `package-lock.json`.
+- No license or notice changed; Apache-2.0 original code and all existing
+  third-party notices are preserved.
+
+### Round 2 Requirement Checklist
+
+- [x] Every tested failure after completed Save As writes reports frozen exact
+  written/pending paths, shows the partial outcome, retains the original
+  session/recovery authority, and disposes staged target runtime.
+- [x] Desktop prop replacement retains one owned workflow; unmount disposes it
+  once and asynchronous failure reaches the latest desktop error port.
+- [x] Replacement target recovery, watcher/runtime, and recent metadata work is
+  staged before source discard/retirement; aborts retain exact dirty source
+  bytes, recovery, and watch authority.
+- [x] Exact native file availability is state-derived from `CommandRegistry`,
+  generation-safe, serialized, schema-validated, and transactionally restored
+  on partial native failure.
+- [x] No-session, untitled, active, stale generation, partial update, malformed
+  IPC, and unavailable direct activation are covered in TypeScript and Rust.
+- [x] `DocumentSession` remains the sole exact source/parsed-state authority;
+  no second visual model or filesystem authority was added.
+- [x] Native work remains behind the existing HostPort/Tauri runtime boundary;
+  command IDs remain exact and no execution, upload, telemetry, network,
+  shell/process, or broad path authority was introduced.
+- [x] Byte-preserving open/save behavior and malformed/unsupported diagnostic
+  behavior were not changed.
+- [x] No excluded layout/geometry file or test, dependency, license, or notice
+  was changed; no push or PR was performed.
+
+### Round 2 Self-Review
+
+- Reviewed every round-2 finding, production diff, test diff, shared command
+  schema, native generation gate, and replacement ordering.
+- Confirmed App menu transitions are serialized per owner, teardown is queued
+  after prior updates, stale generations cannot regain ownership, and failed
+  registry-driven updates are contained through the desktop error port.
+- Confirmed Rust reads all four prior menu states before mutation, rolls back
+  every successfully changed state in reverse order, and leaves generation
+  unchanged when transition or rollback reports failure.
+- Confirmed target watcher/history callbacks cannot publish before activation
+  or after staged retirement, and Save As does not claim rollback of completed
+  destination writes.
+- The Task 7 recovery serialization and Task 9 listener-throw containment
+  remain on their established fixes. This round directly exercises recovery
+  and subscription cleanup but required no additional ledger-wide refactor.
+- `git diff --check` passed apart from informational CRLF conversion warnings.
+
+### Round 2 Concerns
+
+- This agent environment provides Node `25.2.1` with npm `11.6.2`, outside the
+  declared `>=24.15.0 <25` range. All round-2 frontend, build, Playwright, and
+  Tauri frontend commands passed on Node 25, but this report does not claim a
+  supported-runtime pass for the new wave. Per the findings, the controller
+  will independently rerun Node 24 after commit.
+- Full Vitest emitted a pre-existing warning at
+  `src/core/host/BrowserHost.test.ts:74` for an unawaited
+  `expect(...).resolves` assertion. That file is unchanged in round 2 and all
+  682 tests passed; it was left outside the exact findings scope.
+- Vite retains the existing non-failing large-chunk warning. Playwright retains
+  the existing `NO_COLOR`/`FORCE_COLOR` warning.

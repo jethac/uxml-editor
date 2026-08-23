@@ -1,14 +1,124 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { UxmlPreviewAdapter } from '../core/adapter/UxmlPreviewAdapter';
 import { DocumentSession } from '../core/documents/DocumentSession';
-import type { DesktopEvent } from '../core/desktop/DesktopCommandBridge';
+import type {
+  DesktopEvent,
+  DesktopFileCommandAvailability,
+} from '../core/desktop/DesktopCommandBridge';
 import { EditorStore } from '../core/store/EditorStore';
 import { MemoryHost } from '../core/host/MemoryHost';
 import { App, type AppDesktopPorts, type Task16FileLifecyclePort } from './App';
 import type { CloseChoice } from '../core/desktop/DesktopLifecycleController';
 
+const DISABLED_FILE_COMMANDS: DesktopFileCommandAvailability = Object.freeze({
+  'file.open-project': false,
+  'file.save': false,
+  'file.save-all': false,
+  'file.close-project': false,
+});
+
+const ENABLED_FILE_COMMANDS: DesktopFileCommandAvailability = Object.freeze({
+  'file.open-project': true,
+  'file.save': true,
+  'file.save-all': true,
+  'file.close-project': true,
+});
+
+function fileCommandsDisabled(availability: DesktopFileCommandAvailability): boolean {
+  return Object.values(availability).every((enabled) => !enabled);
+}
+
 describe('App desktop integration', () => {
+  it('publishes exact native file availability for no-session, untitled, and active workflows', async () => {
+    const events = new FakeDesktopEvents();
+    const menuStates: unknown[] = [];
+    const host = new MemoryHost({
+      projects: [{ id: 'destination', name: 'Destination', files: {} }],
+    });
+    const desktop = {
+      commandAuthority: Object.freeze({}),
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation: string, ready: boolean) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: {
+        setFileWorkflowEnabled: async (_generation: string, availability: unknown) => {
+          menuStates.push(availability);
+        },
+      },
+      errors: { report: () => undefined },
+    } as unknown as AppDesktopPorts;
+    const rendered = render(<App store={new EditorStore({ host })} desktop={desktop} />);
+    await listenersReady(events);
+    await waitFor(() => expect(menuStates.at(-1)).toEqual({
+      'file.open-project': true,
+      'file.save': false,
+      'file.save-all': false,
+      'file.close-project': false,
+    }));
+
+    fireEvent.keyDown(document.body, { key: 'n', ctrlKey: true });
+    await waitFor(() => expect(screen.getByLabelText('Project status')).toHaveTextContent('Untitled Project'));
+    await waitFor(() => expect(menuStates.at(-1)).toEqual({
+      'file.open-project': true,
+      'file.save': true,
+      'file.save-all': false,
+      'file.close-project': true,
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByLabelText('Project status')).toHaveTextContent('Destination'));
+    await waitFor(() => expect(menuStates.at(-1)).toEqual({
+      'file.open-project': true,
+      'file.save': true,
+      'file.save-all': true,
+      'file.close-project': true,
+    }));
+    rendered.unmount();
+  });
+
+  it('contains manually delivered native activation when the registry marks the command unavailable', async () => {
+    const events = new FakeDesktopEvents();
+    const saveAll = vi.fn();
+    const errors = vi.fn();
+    const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: { setFileWorkflowEnabled: async () => undefined },
+      errors: { report: errors },
+    };
+    const disabledSnapshot = Object.freeze({
+      ...task16Lifecycle().getSnapshot(),
+      capabilities: Object.freeze({
+        ...task16Lifecycle().getSnapshot().capabilities,
+        saveAll: false,
+      }),
+    });
+    const rendered = render(<App
+      store={new EditorStore()}
+      desktop={desktop}
+      task16FileLifecycle={task16Lifecycle({ saveAll, getSnapshot: () => disabledSnapshot })}
+    />);
+    await listenersReady(events);
+
+    await act(() => events.emit('uxml://menu-command', { commandId: 'file.save-all' }));
+
+    expect(saveAll).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    rendered.unmount();
+  });
+
   it('uses the injected lifecycle owner for native commands when the store also has a host', async () => {
     const events = new FakeDesktopEvents();
     let saves = 0;
@@ -101,14 +211,14 @@ describe('App desktop integration', () => {
   });
 
   it('rolls native file workflow back to disabled and reports bridge startup failures', async () => {
-    const menuStates: boolean[] = [];
+    const menuStates: DesktopFileCommandAvailability[] = [];
     const errors: unknown[] = [];
     const desktop = {
       commandAuthority: Object.freeze({}),
       events: { listen: async () => { throw new Error('listen failed'); } },
       confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
       window: { setLifecycleReady: async () => undefined, resolveClose: async () => undefined, abandonClose: async () => undefined },
-      menu: { setFileWorkflowEnabled: async (_generation: string, enabled: boolean) => { menuStates.push(enabled); } },
+      menu: { setFileWorkflowEnabled: async (_generation: string, availability: DesktopFileCommandAvailability) => { menuStates.push(availability); } },
       errors: { report: (error: unknown) => { errors.push(error); } },
     } as unknown as AppDesktopPorts;
 
@@ -120,14 +230,14 @@ describe('App desktop integration', () => {
     await act(() => Promise.resolve());
     await act(() => Promise.resolve());
 
-    expect(menuStates).toEqual([false]);
+    expect(menuStates).toEqual([DISABLED_FILE_COMMANDS]);
     expect(errors).toHaveLength(1);
     rendered.unmount();
   });
 
   it('enables file workflow only after both listeners are ready and disables it on disposal', async () => {
     const events = new FakeDesktopEvents();
-    const menuStates: boolean[] = [];
+    const menuStates: DesktopFileCommandAvailability[] = [];
     const desktop: AppDesktopPorts = {
       commandAuthority: Object.freeze({}),
       events,
@@ -137,7 +247,7 @@ describe('App desktop integration', () => {
         resolveClose: async () => undefined,
         abandonClose: async () => undefined,
       },
-      menu: { setFileWorkflowEnabled: async (_generation, enabled) => { menuStates.push(enabled); } },
+      menu: { setFileWorkflowEnabled: async (_generation, availability) => { menuStates.push(availability); } },
       errors: { report: () => undefined },
     };
     const rendered = render(<App
@@ -146,11 +256,11 @@ describe('App desktop integration', () => {
       task16FileLifecycle={task16Lifecycle()}
     />);
     await listenersReady(events);
-    expect(menuStates).toEqual([true]);
+    expect(menuStates).toEqual([ENABLED_FILE_COMMANDS]);
 
     rendered.unmount();
     await act(() => Promise.resolve());
-    expect(menuStates).toEqual([true, false]);
+    expect(menuStates).toEqual([ENABLED_FILE_COMMANDS, DISABLED_FILE_COMMANDS]);
   });
 
   it('keeps functioning command listeners attached when disposal disable fails', async () => {
@@ -168,8 +278,8 @@ describe('App desktop integration', () => {
         abandonClose: async () => undefined,
       },
       menu: {
-        setFileWorkflowEnabled: async (_generation, enabled) => {
-          if (!enabled) {
+        setFileWorkflowEnabled: async (_generation, availability) => {
+          if (fileCommandsDisabled(availability)) {
             disableAttempts += 1;
             if (disableAttempts === 1) throw new Error('disable failed');
           }
@@ -216,7 +326,7 @@ describe('App desktop integration', () => {
           const generation = args.length === 2
             ? Number.parseInt(String(args[0]).slice('workflow:v1:'.length), 16)
             : 0;
-          const requested = Boolean(args.at(-1));
+          const requested = !fileCommandsDisabled(args.at(-1) as DesktopFileCommandAvailability);
           if (!requested) {
             disableCalls += 1;
             if (disableCalls === 1) await oldDisableBlocked;
@@ -259,8 +369,8 @@ describe('App desktop integration', () => {
         abandonClose: async () => undefined,
       },
       menu: {
-        setFileWorkflowEnabled: async (_generation, enabled) => {
-          if (!enabled) {
+        setFileWorkflowEnabled: async (_generation, availability) => {
+          if (fileCommandsDisabled(availability)) {
             disableAttempts += 1;
             if (disableAttempts === 1) throw new Error('disable response lost');
           }
@@ -311,8 +421,8 @@ describe('App desktop integration', () => {
         abandonClose: async () => undefined,
       },
       menu: {
-        setFileWorkflowEnabled: async (_generation, enabled) => {
-          if (!enabled) {
+        setFileWorkflowEnabled: async (_generation, availability) => {
+          if (fileCommandsDisabled(availability)) {
             disableAttempts += 1;
             if (disableAttempts === 1) throw new Error('old disable response lost');
           }

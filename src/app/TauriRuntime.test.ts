@@ -26,7 +26,7 @@ describe('createTauriRuntimeBindings', () => {
       .toBe(commandAuthority);
   });
 
-  it('resolves an exact close lease with one native command and exposes file-workflow menu enablement', async () => {
+  it('resolves an exact close lease and publishes exact native file-command availability', async () => {
     const calls: Array<{ command: string; payload: unknown }> = [];
     const runtime = createTauriRuntimeBindings({
       commandAuthority: TEST_COMMAND_AUTHORITY,
@@ -52,15 +52,20 @@ describe('createTauriRuntimeBindings', () => {
       setLifecycleReady(generation: string, ready: boolean): Promise<void>;
     }).setLifecycleReady(lifecycleGeneration, true);
     await (runtime.desktop as unknown as {
-      menu: { setFileWorkflowEnabled(generation: string, enabled: boolean): Promise<void> };
-    }).menu.setFileWorkflowEnabled(`workflow:v1:${'1'.repeat(16)}`, true);
+      menu: { setFileWorkflowEnabled(generation: string, availability: typeof FILE_AVAILABILITY): Promise<void> };
+    }).menu.setFileWorkflowEnabled(`workflow:v1:${'1'.repeat(16)}`, FILE_AVAILABILITY);
 
     expect(calls).toEqual([
       { command: 'desktop_resolve_close', payload: { request: { lease, lifecycleGeneration, action: 'close' } } },
       { command: 'desktop_set_lifecycle_ready', payload: { request: { lifecycleGeneration, ready: true } } },
       {
         command: 'desktop_set_file_workflow_enabled',
-        payload: { request: { workflowGeneration: `workflow:v1:${'1'.repeat(16)}`, enabled: true } },
+        payload: {
+          request: {
+            workflowGeneration: `workflow:v1:${'1'.repeat(16)}`,
+            availability: FILE_AVAILABILITY,
+          },
+        },
       },
     ]);
   });
@@ -171,8 +176,42 @@ describe('createTauriRuntimeBindings', () => {
 
     await expect(runtime.desktop.window.setLifecycleReady('lifecycle:v1:SHORT', true))
       .rejects.toThrow('lifecycle generation is malformed');
-    await expect(runtime.desktop.menu.setFileWorkflowEnabled('workflow:v1:SHORT', true))
+    await expect((runtime.desktop.menu as unknown as {
+      setFileWorkflowEnabled(generation: string, availability: typeof FILE_AVAILABILITY): Promise<void>;
+    }).setFileWorkflowEnabled('workflow:v1:SHORT', FILE_AVAILABILITY))
       .rejects.toThrow('workflow generation is malformed');
     expect(commands).toEqual([]);
   });
+
+  it.each([
+    {},
+    { ...FILE_AVAILABILITY, 'file.save-all': 'yes' },
+    { ...FILE_AVAILABILITY, 'file.save-as': true },
+    { 'file.open-project': true, 'file.save': false, 'file.save-all': false },
+  ])('rejects malformed native file availability before invocation: %j', async (availability) => {
+    const commands: string[] = [];
+    const runtime = createTauriRuntimeBindings({
+      commandAuthority: TEST_COMMAND_AUTHORITY,
+      invoke: async (command) => { commands.push(command); return null; },
+      listen: async () => () => undefined,
+      timers: {
+        now: () => 0,
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+    });
+
+    await expect((runtime.desktop.menu as unknown as {
+      setFileWorkflowEnabled(generation: string, availability: unknown): Promise<void>;
+    }).setFileWorkflowEnabled(`workflow:v1:${'1'.repeat(16)}`, availability))
+      .rejects.toThrow('availability is malformed');
+    expect(commands).toEqual([]);
+  });
+});
+
+const FILE_AVAILABILITY = Object.freeze({
+  'file.open-project': true,
+  'file.save': false,
+  'file.save-all': false,
+  'file.close-project': false,
 });

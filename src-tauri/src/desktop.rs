@@ -87,7 +87,32 @@ pub struct MenuCommandPayload {
 pub struct FileWorkflowEnabledRequest {
     #[serde(deserialize_with = "deserialize_workflow_generation")]
     pub workflow_generation: String,
-    pub enabled: bool,
+    pub availability: NativeFileCommandAvailability,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeFileCommandAvailability {
+    #[serde(rename = "file.open-project")]
+    pub open_project: bool,
+    #[serde(rename = "file.save")]
+    pub save: bool,
+    #[serde(rename = "file.save-all")]
+    pub save_all: bool,
+    #[serde(rename = "file.close-project")]
+    pub close_project: bool,
+}
+
+impl NativeFileCommandAvailability {
+    fn enabled(self, id: &str) -> bool {
+        match id {
+            "file.open-project" => self.open_project,
+            "file.save" => self.save,
+            "file.save-all" => self.save_all,
+            "file.close-project" => self.close_project,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,7 +328,7 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 pub fn set_file_workflow_enabled<R: Runtime>(
     menu: &Menu<R>,
-    enabled: bool,
+    availability: NativeFileCommandAvailability,
 ) -> Result<(), HostError> {
     let mut items = Vec::new();
     for item in menu.items().map_err(|error| {
@@ -315,20 +340,20 @@ pub fn set_file_workflow_enabled<R: Runtime>(
         let Some(submenu) = item.as_submenu() else {
             continue;
         };
-        for id in ["file.save", "file.save-all", "file.close-project"] {
+        for id in FILE_WORKFLOW_MENU_IDS {
             if let Some(item) = submenu.get(id).and_then(|item| item.as_menuitem().cloned()) {
                 items.push((id, item));
             }
         }
     }
-    if items.len() != 3 {
+    if items.len() != FILE_WORKFLOW_MENU_IDS.len() {
         return Err(HostError::new(
             "read-failed",
             "Native file-workflow menu items are unavailable.",
         ));
     }
     transition_file_workflow_items(
-        enabled,
+        availability,
         |id| {
             items
                 .iter()
@@ -361,7 +386,7 @@ pub fn set_file_workflow_enabled<R: Runtime>(
 }
 
 fn transition_file_workflow_items(
-    enabled: bool,
+    availability: NativeFileCommandAvailability,
     mut read: impl FnMut(&str) -> Result<bool, HostError>,
     mut write: impl FnMut(&str, bool) -> Result<(), HostError>,
 ) -> Result<(), HostError> {
@@ -370,7 +395,7 @@ fn transition_file_workflow_items(
         prior.push(read(id)?);
     }
     for (index, id) in FILE_WORKFLOW_MENU_IDS.into_iter().enumerate() {
-        if let Err(failure) = write(id, enabled) {
+        if let Err(failure) = write(id, availability.enabled(id)) {
             let mut rollback_failure = None;
             for rollback_index in (0..index).rev() {
                 if let Err(error) = write(
@@ -395,7 +420,12 @@ fn transition_file_workflow_items(
     Ok(())
 }
 
-const FILE_WORKFLOW_MENU_IDS: [&str; 3] = ["file.save", "file.save-all", "file.close-project"];
+const FILE_WORKFLOW_MENU_IDS: [&str; 4] = [
+    "file.open-project",
+    "file.save",
+    "file.save-all",
+    "file.close-project",
+];
 
 #[derive(Default)]
 pub struct FileWorkflowGate {
@@ -463,10 +493,24 @@ mod tests {
     use super::{
         close_choice, is_desktop_command, menu_commands, transition_file_workflow_items, CloseGate,
         CloseGateDecision, CloseResolution, CloseResolutionRequest, FileWorkflowEnabledRequest,
-        FileWorkflowGate, MenuSection, FILE_WORKFLOW_MENU_IDS,
+        FileWorkflowGate, MenuSection, NativeFileCommandAvailability, FILE_WORKFLOW_MENU_IDS,
     };
     use crate::error::HostError;
     use tauri_plugin_dialog::MessageDialogResult;
+
+    fn file_availability(
+        open_project: bool,
+        save: bool,
+        save_all: bool,
+        close_project: bool,
+    ) -> NativeFileCommandAvailability {
+        NativeFileCommandAvailability {
+            open_project,
+            save,
+            save_all,
+            close_project,
+        }
+    }
 
     #[test]
     fn menu_ids_exactly_match_the_typed_frontend_bridge() {
@@ -568,32 +612,67 @@ mod tests {
 
     #[test]
     fn file_workflow_items_are_disabled_until_task_16_binds_ownership() {
-        for id in ["file.save", "file.save-all", "file.close-project"] {
+        for id in FILE_WORKFLOW_MENU_IDS {
             let command = menu_commands()
                 .iter()
                 .find(|command| command.id == id)
                 .unwrap();
             assert!(!command.enabled_by_default, "{id} must start disabled");
         }
-        assert!(
-            menu_commands()
-                .iter()
-                .find(|command| command.id == "file.open-project")
-                .unwrap()
-                .enabled_by_default
-        );
     }
 
     #[test]
-    fn partial_file_menu_failure_rolls_every_item_back_to_its_prior_state() {
+    fn file_menu_transition_applies_no_session_untitled_and_active_availability() {
         let states = std::cell::RefCell::new(std::collections::HashMap::from([
+            ("file.open-project", false),
             ("file.save", false),
             ("file.save-all", false),
             ("file.close-project", false),
         ]));
 
+        for expected in [
+            file_availability(true, false, false, false),
+            file_availability(true, true, false, true),
+            file_availability(true, true, true, true),
+        ] {
+            transition_file_workflow_items(
+                expected,
+                |id| {
+                    states
+                        .borrow()
+                        .get(id)
+                        .copied()
+                        .ok_or_else(|| HostError::new("read-failed", "missing fake menu item"))
+                },
+                |id, enabled| {
+                    *states
+                        .borrow_mut()
+                        .get_mut(id)
+                        .ok_or_else(|| HostError::new("read-failed", "missing fake menu item"))? =
+                        enabled;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+            for id in FILE_WORKFLOW_MENU_IDS {
+                assert_eq!(states.borrow()[id], expected.enabled(id), "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn partial_file_menu_failure_rolls_every_item_back_to_its_prior_state() {
+        let prior = std::collections::HashMap::from([
+            ("file.open-project", true),
+            ("file.save", false),
+            ("file.save-all", true),
+            ("file.close-project", false),
+        ]);
+        let states = std::cell::RefCell::new(prior.clone());
+
         let result = transition_file_workflow_items(
-            true,
+            file_availability(false, true, false, true),
             |id| {
                 states
                     .borrow()
@@ -602,11 +681,8 @@ mod tests {
                     .ok_or_else(|| HostError::new("read-failed", "missing fake menu item"))
             },
             |id, enabled| {
-                if id == "file.save-all" && enabled {
-                    return Err(HostError::new(
-                        "read-failed",
-                        "injected second-item failure",
-                    ));
+                if id == "file.save-all" {
+                    return Err(HostError::new("read-failed", "injected third-item failure"));
                 }
                 *states
                     .borrow_mut()
@@ -619,35 +695,43 @@ mod tests {
 
         assert!(result.is_err());
         for id in FILE_WORKFLOW_MENU_IDS {
-            assert!(!states.borrow()[id], "{id} was not rolled back");
+            assert_eq!(states.borrow()[id], prior[id], "{id} was not rolled back");
         }
     }
 
     #[test]
-    fn stale_file_workflow_generation_cannot_disable_current_items() {
+    fn stale_file_workflow_generation_cannot_replace_current_availability() {
         let gate = FileWorkflowGate::default();
-        let enabled = std::cell::Cell::new(false);
+        let current = std::cell::RefCell::new(file_availability(false, false, false, false));
         gate.transition("workflow:v1:0000000000000002", || {
-            enabled.set(true);
+            *current.borrow_mut() = file_availability(true, true, false, true);
             Ok(())
         })
         .unwrap();
 
         gate.transition("workflow:v1:0000000000000001", || {
-            enabled.set(false);
+            *current.borrow_mut() = file_availability(false, false, false, false);
             Ok(())
         })
         .unwrap();
 
-        assert!(enabled.get());
+        assert_eq!(
+            *current.borrow(),
+            file_availability(true, true, false, true)
+        );
     }
 
     #[test]
-    fn file_workflow_schema_requires_an_exact_generation_and_boolean() {
+    fn file_workflow_schema_requires_an_exact_generation_and_availability() {
         assert!(
             serde_json::from_value::<FileWorkflowEnabledRequest>(serde_json::json!({
                 "workflowGeneration": "workflow:v1:0000000000000001",
-                "enabled": true,
+                "availability": {
+                    "file.open-project": true,
+                    "file.save": false,
+                    "file.save-all": false,
+                    "file.close-project": false,
+                },
             }))
             .is_ok()
         );
@@ -659,11 +743,52 @@ mod tests {
             assert!(
                 serde_json::from_value::<FileWorkflowEnabledRequest>(serde_json::json!({
                     "workflowGeneration": generation,
-                    "enabled": false,
+                    "availability": {
+                        "file.open-project": false,
+                        "file.save": false,
+                        "file.save-all": false,
+                        "file.close-project": false,
+                    },
                 }))
                 .is_err()
             );
         }
+        for availability in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "file.open-project": true,
+                "file.save": false,
+                "file.save-all": "yes",
+                "file.close-project": false,
+            }),
+            serde_json::json!({
+                "file.open-project": true,
+                "file.save": false,
+                "file.save-all": false,
+                "file.close-project": false,
+                "file.save-as": true,
+            }),
+            serde_json::json!({
+                "file.open-project": true,
+                "file.save": false,
+                "file.save-all": false,
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<FileWorkflowEnabledRequest>(serde_json::json!({
+                    "workflowGeneration": "workflow:v1:0000000000000001",
+                    "availability": availability,
+                }))
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<FileWorkflowEnabledRequest>(serde_json::json!({
+                "workflowGeneration": "workflow:v1:0000000000000001",
+                "enabled": true,
+            }))
+            .is_err()
+        );
     }
 
     #[test]

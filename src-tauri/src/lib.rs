@@ -286,7 +286,7 @@ fn desktop_set_file_workflow_enabled(
     state
         .file_workflow_gate
         .transition(&request.workflow_generation, || {
-            desktop::set_file_workflow_enabled(&menu, request.enabled)
+            desktop::set_file_workflow_enabled(&menu, request.availability)
         })
 }
 

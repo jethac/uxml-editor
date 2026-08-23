@@ -1,8 +1,10 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   DesktopCommandBridge,
+  DESKTOP_FILE_COMMAND_IDS,
   EditorDesktopCommandController,
   type DesktopEventPort,
+  type DesktopFileCommandAvailability,
   type Task16FileCommandPort,
 } from '../core/desktop/DesktopCommandBridge';
 import {
@@ -44,7 +46,10 @@ export interface AppDesktopPorts {
     abandonClose(lease: CloseLease, generation: LifecycleGeneration): void | Promise<void>;
   };
   readonly menu: {
-    setFileWorkflowEnabled(generation: WorkflowGeneration, enabled: boolean): void | Promise<void>;
+    setFileWorkflowEnabled(
+      generation: WorkflowGeneration,
+      availability: DesktopFileCommandAvailability,
+    ): void | Promise<void>;
   };
   readonly errors: { report(error: unknown): void };
 }
@@ -77,6 +82,8 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
     [host, store, task16FileLifecycle],
   );
   const fileWorkflow = task16FileLifecycle ?? ownedFileWorkflow;
+  const latestDesktopErrors = useRef(desktop?.errors);
+  latestDesktopErrors.current = desktop?.errors;
   const workspaceUi = useMemo(() => new WorkspaceUiController(), []);
   const editingCommands = useMemo(() => new WorkspaceEditingCommands(store), [store]);
   const commandRegistry = useMemo(
@@ -94,9 +101,9 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
   useEffect(() => () => {
     if (ownedFileWorkflow === null) return;
     void Promise.resolve(ownedFileWorkflow.dispose()).catch((error) => {
-      if (desktop !== undefined) desktop.errors.report(error);
+      latestDesktopErrors.current?.report(error);
     });
-  }, [desktop, ownedFileWorkflow]);
+  }, [ownedFileWorkflow]);
 
   useEffect(() => {
     const updateViewport = () => {
@@ -114,6 +121,7 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
     const commandGenerations = commandGenerationGate(desktop);
     let commandGenerationRegistered = false;
     const disposables: Disposable[] = [];
+    let menuTransitionTail = Promise.resolve();
     const commandBridge = new DesktopCommandBridge(
       desktop.events,
       commandRegistry === null
@@ -142,9 +150,18 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
         disposable.dispose();
       }
     };
+    const transitionFileWorkflow = (
+      availability: DesktopFileCommandAvailability,
+    ): Promise<void> => {
+      const transition = menuTransitionTail.then(async () => {
+        await desktop.menu.setFileWorkflowEnabled(workflowGeneration, availability);
+      });
+      menuTransitionTail = transition.catch(() => undefined);
+      return transition;
+    };
     const disableFileWorkflow = async (reportFailure = true): Promise<boolean> => {
       try {
-        await desktop.menu.setFileWorkflowEnabled(workflowGeneration, false);
+        await transitionFileWorkflow(DISABLED_FILE_COMMAND_AVAILABILITY);
         disposeStarted();
         return true;
       } catch (error) {
@@ -174,10 +191,21 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
         disposables.push(commandDisposable);
         commandGenerations.register(workflowGeneration);
         commandGenerationRegistered = true;
-        await desktop.menu.setFileWorkflowEnabled(
-          workflowGeneration,
-          task16FileLifecycle !== undefined || fileWorkflow !== null,
-        );
+        if (commandRegistry !== null) {
+          disposables.push(Object.freeze({
+            dispose: commandRegistry.subscribe(() => {
+              if (!active || !commandGenerationRegistered) return;
+              void transitionFileWorkflow(fileCommandAvailability(commandRegistry)).catch((error) => {
+                try {
+                  desktop.errors.report(error);
+                } catch {
+                  // Registry-driven native updates stay contained at the desktop boundary.
+                }
+              });
+            }),
+          }));
+        }
+        await transitionFileWorkflow(fileCommandAvailability(commandRegistry));
         if (!active) await disableFileWorkflow();
       } catch (error) {
         await disableFileWorkflow();
@@ -200,6 +228,19 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
       />
     </main>
   );
+}
+
+const DISABLED_FILE_COMMAND_AVAILABILITY = fileCommandAvailability(null);
+
+function fileCommandAvailability(
+  registry: CommandRegistry | null,
+): DesktopFileCommandAvailability {
+  const enabledById = new Map(
+    registry?.getSnapshot().commands.map(({ id, enabled }) => [id, enabled] as const) ?? [],
+  );
+  return Object.freeze(Object.fromEntries(
+    DESKTOP_FILE_COMMAND_IDS.map((id) => [id, enabledById.get(id) ?? false]),
+  )) as DesktopFileCommandAvailability;
 }
 
 let workflowSequence = 1;

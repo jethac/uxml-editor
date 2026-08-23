@@ -334,16 +334,33 @@ export class FileWorkflow implements FileWorkflowPort {
         revision: file.revision,
       }));
     const entryPath = chooseEntryPath(initialFiles);
-    const session = DocumentSession.open(
+    let session = DocumentSession.open(
       new Map(initialFiles.map((file) => [file.path.relativePath, file.text])),
       entryPath,
       this.adapter,
     );
     const recovery = new RecoveryJournal(this.host, index.root);
-    if (!await this.finalizeDiscard(preparation)) return;
     await recovery.recover(session);
+    if (preparation === 'discard' && this.active?.root.id === index.root.id) {
+      session = DocumentSession.open(
+        new Map(initialFiles.map((file) => [file.path.relativePath, file.text])),
+        entryPath,
+        this.adapter,
+      );
+    }
     const active = this.createActiveProject(index.root, session, initialFiles, recovery);
-    await this.installActiveProject(active, index.files.map((file) => file.path));
+    try {
+      const recentProjects = await this.prepareActiveProject(active);
+      if (!await this.finalizeDiscard(preparation)) {
+        await this.disposeStagedActiveProject(active);
+        return;
+      }
+      await this.retireCurrentActiveProject();
+      this.activatePreparedProject(active, index.files.map((file) => file.path), recentProjects);
+    } catch (error) {
+      await this.disposeStagedActiveProject(active);
+      throw error;
+    }
   }
 
   private async prepareForReplacement(): Promise<ReplacementPreparation> {
@@ -420,12 +437,7 @@ export class FileWorkflow implements FileWorkflowPort {
     };
   }
 
-  private async installActiveProject(active: ActiveProject, assetPaths: readonly string[]): Promise<void> {
-    await this.retireCurrentActiveProject();
-    this.active = active;
-    this.unsavedSession = null;
-    this.lastClosedRoot = null;
-    this.externalChanges = Object.freeze([]);
+  private async prepareActiveProject(active: ActiveProject): Promise<readonly RecentProject[]> {
     active.historyDispose = active.session.history.subscribe((results) => {
       const localResults = results.filter((result) => !result.forward.id.startsWith('external-reload:v1:'));
       if (localResults.length === 0 || active.retired || this.active !== active) return;
@@ -439,10 +451,6 @@ export class FileWorkflow implements FileWorkflowPort {
           if (!active.retired && this.active === active) this.publish();
         });
     });
-    this.store.dispatch({ type: 'context/set', session: active.session, host: this.host });
-    this.store.dispatch({ type: 'project-assets/set', paths: assetPaths });
-    await this.host.rememberRecentProject(active.root);
-    await this.refreshRecentProjects();
     try {
       active.watch = await active.save.watch(
         () => active.session,
@@ -453,7 +461,31 @@ export class FileWorkflow implements FileWorkflowPort {
     } catch (error) {
       if (!(error instanceof HostError) || error.code !== 'unsupported') throw error;
     }
+    await this.host.rememberRecentProject(active.root);
+    return Object.freeze([...(await this.host.listRecentProjects())]);
+  }
+
+  private activatePreparedProject(
+    active: ActiveProject,
+    assetPaths: readonly string[],
+    recentProjects: readonly RecentProject[],
+  ): void {
+    this.active = active;
+    this.unsavedSession = null;
+    this.lastClosedRoot = null;
+    this.externalChanges = Object.freeze([]);
+    this.recentProjects = Object.freeze([...recentProjects]);
+    this.store.dispatch({ type: 'context/set', session: active.session, host: this.host });
+    this.store.dispatch({ type: 'project-assets/set', paths: assetPaths });
     this.publish();
+  }
+
+  private async disposeStagedActiveProject(active: ActiveProject): Promise<void> {
+    try {
+      await this.retireActiveProject(active);
+    } catch {
+      // The primary preparation or replacement failure remains authoritative.
+    }
   }
 
   private async retireCurrentActiveProject(): Promise<ActiveProject | null> {
@@ -614,14 +646,23 @@ export class FileWorkflow implements FileWorkflowPort {
       }
     }
 
-    const initialFiles = await Promise.all([...snapshot.files.keys()]
-      .map((path) => this.host.readText(projectPath(selected, path))));
-    const recovery = new RecoveryJournal(this.host, selected);
-    const active = this.createActiveProject(selected, session, initialFiles, recovery);
-    const savedIndex = await ProjectIndex.scan(this.host, selected);
-    await this.installActiveProject(active, savedIndex.files.map((file) => file.path));
-    this.store.dispatch({ type: 'session/sync' });
-    this.publish();
+    let stagedActive: ActiveProject | null = null;
+    try {
+      const initialFiles = await Promise.all(writes
+        .map((write) => this.host.readText(projectPath(selected, write.path))));
+      const recovery = new RecoveryJournal(this.host, selected);
+      stagedActive = this.createActiveProject(selected, session, initialFiles, recovery);
+      const savedIndex = await ProjectIndex.scan(this.host, selected);
+      const recentProjects = await this.prepareActiveProject(stagedActive);
+      await this.retireCurrentActiveProject();
+      this.activatePreparedProject(stagedActive, savedIndex.files.map((file) => file.path), recentProjects);
+      stagedActive = null;
+      this.store.dispatch({ type: 'session/sync' });
+      this.publish();
+    } catch (error) {
+      if (stagedActive !== null) await this.disposeStagedActiveProject(stagedActive);
+      await this.reportSaveAsFailure(writes.map((write) => write.path), [], error);
+    }
   }
 
   private async reportSaveAsFailure(
