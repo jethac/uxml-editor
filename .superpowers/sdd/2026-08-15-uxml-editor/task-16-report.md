@@ -682,3 +682,27 @@
 - The browser FSA host now intentionally disables New Project and Save As
   because that API cannot guarantee exclusive create. Demo-memory and desktop
   modes retain the complete creation workflow.
+
+## Controller-Supplied Supported Toolchain Verification
+
+The controller resolved Finding 11 with a portable Node runtime after the fix
+wave stabilized. No machine-wide runtime or dependency pin was changed.
+
+- Runtime: Node `24.15.0`, npm `11.6.2`.
+- Full frontend: `npm test` under Node 24.
+  - PASS: 44 files, 667/667 tests.
+- Production frontend: `npm run build` under Node 24.
+  - PASS: 1,917 modules transformed; output included
+    `dist/assets/index-D_SzMJ8_.js` at 1,060.42 kB (337.61 kB gzip).
+  - The already-recorded non-failing chunk-size warning remains.
+- Focused accessibility browser workflow under Node 24:
+  `playwright test tests/e2e/accessibility-workflow.spec.ts --grep
+  "workflow has no automated axe violations and is keyboard operable"`.
+  - PASS: 1/1 in 17.1 seconds.
+  - The already-recorded `NO_COLOR`/`FORCE_COLOR` warning remains.
+- Desktop release boundary: `npm run tauri:build -- --no-bundle` under Node 24.
+  - PASS: the frontend rebuilt under Node 24 and Rust completed the optimized
+    release profile; `src-tauri/target/release/uxml-editor.exe` was produced.
+
+Finding 11 is therefore resolved with evidence from the declared
+`>=24.15.0 <25` runtime range.
