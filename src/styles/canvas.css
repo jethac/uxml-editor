@@ -1,5 +1,5 @@
 .workspace-pane--canvas {
-  grid-template-rows: 30px auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .canvas-toolbar {

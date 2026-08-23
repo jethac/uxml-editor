@@ -681,6 +681,24 @@ test('authors inspector values through existing-rule, inline, and new-rule desti
   await runPaletteCommand(page, 'Redo');
   await expectVisibleSource(page, MENU_USS, MENU_USS_AFTER_INSPECTOR_NEW_RULE);
   await expectStructuralSelection(page, play, 'ui:Button');
+
+  await runPaletteCommand(page, 'Save All');
+  await settled(page);
+  const saved = await project(page, MENU);
+  expect(saved.files[MENU_UXML]?.text).toBe(MENU_UXML_AFTER_INSPECTOR_BOX_ALIGNMENT);
+  expectOnlyCrLf(saved.files[MENU_UXML]?.text ?? '');
+  expect(saved.files[MENU_USS]?.text).toBe(MENU_USS_AFTER_INSPECTOR_NEW_RULE);
+  expectOnlyCrLf(saved.files[MENU_USS]?.text ?? '');
+
+  await runPaletteCommand(page, 'Close Project');
+  await expectClosedProject(page);
+  await runPaletteCommand(page, 'Reopen Project');
+  await expectOpenProject(page, 'Menu Fixture');
+  expect(await project(page, MENU)).toEqual(saved);
+  await showSource(page, MENU_UXML);
+  await expectVisibleSource(page, MENU_UXML, MENU_UXML_AFTER_INSPECTOR_BOX_ALIGNMENT);
+  await page.getByRole('combobox', { name: 'Source file' }).selectOption(MENU_USS);
+  await expectVisibleSource(page, MENU_USS, MENU_USS_AFTER_INSPECTOR_NEW_RULE);
 });
 
 test('authors typed inspector attributes and class tokens, then persists an explicit mixed multi-edit', async ({ page }) => {

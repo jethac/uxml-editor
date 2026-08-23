@@ -36,6 +36,18 @@ const UXML = `<ui:UXML xmlns:ui="UnityEngine.UIElements">
 </ui:UXML>`;
 
 describe('PreviewCanvas frame lifecycle and selection', () => {
+  it('uses the canvas controls as its only visible header band', () => {
+    const store = new EditorStore();
+
+    render(<PreviewCanvas store={store} />);
+
+    const pane = screen.getByTestId('canvas-pane');
+    expect(pane).toHaveAccessibleName('Canvas');
+    expect(screen.queryByRole('heading', { name: 'Canvas' })).not.toBeInTheDocument();
+    expect(pane.firstElementChild).toHaveAttribute('aria-label', 'Canvas controls');
+    expect(pane.children).toHaveLength(2);
+  });
+
   it('disposes the current frame before rendering a replacement session', async () => {
     const events: string[] = [];
     const firstAdapter = new ControlledPreviewPort('first', events);

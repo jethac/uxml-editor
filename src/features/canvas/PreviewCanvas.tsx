@@ -410,8 +410,7 @@ export function PreviewCanvas({
   };
 
   return (
-    <section className="workspace-pane workspace-pane--canvas" data-testid="canvas-pane" aria-labelledby="canvas-heading">
-      <h2 id="canvas-heading">Canvas</h2>
+    <section className="workspace-pane workspace-pane--canvas" data-testid="canvas-pane" aria-label="Canvas">
       <div className="canvas-toolbar" aria-label="Canvas controls">
         <label className="canvas-control canvas-control--preset">
           <span>Preset</span>
