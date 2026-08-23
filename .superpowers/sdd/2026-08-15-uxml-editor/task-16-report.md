@@ -376,3 +376,309 @@
 - Vite retains its non-failing large-chunk warning. Playwright retains the
   pre-existing `NO_COLOR`/`FORCE_COLOR` warning from its server environment.
   Neither changed behavior or test results.
+
+---
+
+# Task 16 Fix Round 1/5
+
+## Fix Status
+
+`DONE_WITH_CONCERNS`
+
+## Fix Baseline And Commits
+
+- Review BASE and verified starting HEAD:
+  `db83384db93ff3b2f2e79e0b9a8b0530109f7f91`
+- Branch: `agent/uxml-editor`
+- Starting worktree: clean
+- Implementation HEAD: `407d53658025d01ecf6c9194ca1985edb030f0af`
+- Implementation commit: `407d536 fix: address Task 16 review findings`
+- Report commit: the report-only commit containing this append (self-reference;
+  resolve final HEAD with `git rev-parse HEAD`).
+- No push or pull request was performed.
+
+## Fix Red-Green Evidence
+
+### Finding 1: Discard Owns Recovery Cleanup
+
+- Red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`
+- Expected failure before production change: discard-confirmed close and
+  replacement leave the recovery journal available, and cleanup failure closes
+  the session instead of aborting visibly.
+- Observed red: 3 of 20 tests failed. Reopen restored `Race` instead of the
+  exact disk `Play` source in both lifecycle regressions, and injected recovery
+  cleanup failure left the session null.
+- Green command: `npm test -- src/features/workspace/FileWorkflow.test.ts`
+- Green result after the initial slice: 20/20 tests passed.
+- Self-review red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`
+- Expected failure: same-root replacement must clear recovery before replaying
+  the selected root.
+- Observed red: 1 of 28 tests failed; same-root replacement restored `Race`.
+- Final green: 28/28 tests passed after moving recovery replay behind validated
+  discard cleanup.
+
+### Finding 2: One Recovery Serialization Authority
+
+- Red command: `npm test -- src/core/persistence/RecoveryJournal.test.ts src/features/workspace/FileWorkflow.test.ts`
+- Expected failure: `prepareSave`, append, recover, and clear can overtake a
+  blocked append, and ordinary Save can write before active recovery settles.
+- Observed red: 2 of 44 tests failed. Journal writes advanced out of order and
+  ordinary Save reached replacement while the append gate remained blocked.
+- Green result: 44/44 tests passed. `RecoveryJournal` now queues all four
+  operations on one non-poisoning tail; Save and Save All await the active
+  workflow recovery tail and propagate its failure.
+
+### Finding 3: Browser Exclusive Create Is Unsupported
+
+- Red command: `npm test -- src/core/host/BrowserHost.test.ts`
+- Expected failure: browser File System Access must reject create without
+  resolving or creating a file handle, while demo-memory creation remains
+  deterministic.
+- Observed red: 2 of 16 tests failed. An existing target returned
+  `stale-revision`, and a missing target was created.
+- Green result: 16/16 tests passed. Browser FSA `createText` returns typed
+  `unsupported` without touching the target; memory/demo behavior is unchanged.
+
+### Finding 4: Shared Command Metadata
+
+- Frontend red command: `npm test -- src/core/store/CommandRegistry.test.ts`
+- Expected failure: the registry must load one declarative command source.
+- Observed red: the JSON authority was unresolved and the suite could not run.
+- Rust red command:
+  `cargo test --manifest-path src-tauri/Cargo.toml native_menu_metadata_matches_the_shared_declarative_command_source`
+- Expected failure: native menu identity, labels, sections, and current-platform
+  accelerators must derive from that same source.
+- Observed red: Rust compilation failed because the shared source did not exist.
+- Green results: frontend registry 6/6; Rust contract 1/1; registry plus desktop
+  bridge 10/10. Save As is `Ctrl/Meta+Shift+S`; Save All is
+  `Ctrl/Meta+Alt+S`. Native command IDs remain exact.
+
+### Finding 5: One App Workflow Owner
+
+- Red command:
+  `npm test -- src/app/App.test.tsx src/app/App.desktop.test.tsx src/core/store/CommandRegistry.test.ts`
+- Expected failure: host-plus-injected lifecycle must use the injected owner for
+  rendered state, registry, native commands, and close leases; only an owned
+  workflow may be disposed.
+- Observed red: 3 of 18 tests failed. Native Save did not reach the injected
+  owner, rendered status came from an internal owner, and the owned watcher was
+  not disposed on unmount.
+- Green result: 24/24 tests passed. `Task16FileLifecyclePort` now exposes the
+  complete workflow port and `App` selects exactly one owner.
+
+### Finding 6: Capabilities And One Error Boundary
+
+- Red command:
+  `npm test -- src/core/store/CommandRegistry.test.ts src/features/workspace/Accessibility.test.tsx src/app/App.desktop.test.tsx`
+- Expected failure: explicit false capabilities disable file commands and every
+  invocation surface contains rejected execution in one visible boundary.
+- Observed red: 6 of 29 tests failed and one rejected command was unhandled.
+  Toolbar, palette, shortcut, and native paths did not show the alert dialog.
+- Green result: 29/29 tests passed with no unhandled rejection. Workflow
+  snapshots publish explicit file capabilities; `CommandRegistry` is the sole
+  execution boundary and `WorkspaceUiController` owns the named command-error
+  alert dialog.
+
+### Finding 7: Editable Shortcut Semantics
+
+- Red command: `npm test -- src/features/workspace/Accessibility.test.tsx`
+- Expected failure: file and pane commands remain global from editable targets,
+  text-conflicting edit/search commands remain native, and physical Shift for
+  `Ctrl++`/`Meta++` is normalized.
+- Observed red: 2 of 9 tests failed. Focused-input Save was blocked and zoom
+  remained `1` instead of `1.1`.
+- Green result: 9/9 tests passed. Input, contenteditable, and CodeMirror only
+  suppress edit/search conflicts; file, pane, zoom, diagnostics, and palette
+  commands remain available.
+
+### Finding 8: Shared Modal Focus Authority
+
+- Red command: `npm test -- src/features/workspace/Accessibility.test.tsx`
+- Expected failure: palette and external-change dialogs must wrap Tab and
+  Shift+Tab, resolve Escape safely, and restore prior focus after Escape or an
+  explicit decision.
+- Observed red: 3 of 10 tests failed. Focus did not wrap, external Escape did
+  nothing, and external resolution returned focus to `body`.
+- Green result: 10/10 tests passed. `useModalFocus` is shared by palette,
+  external-change, and command-error dialogs. External Escape invokes the
+  existing `cancel` decision and never drops pending state silently.
+
+### Finding 9: Deterministic Save As Outcomes
+
+- Red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`
+- Expected failure: all known destination revisions are preflighted before the
+  first write, and create/replace failures expose aggregate written and pending
+  path sets while retaining source authority and recovery.
+- Observed red: 3 of 24 tests failed. Raw `HostError` escaped in all cases, and
+  stale second-file detection occurred after the first file was replaced.
+- Green result: 24/24 tests passed. `SaveAsPartialError` freezes sorted written
+  and pending paths, the host shows the same path lists, and no rollback is
+  claimed. Installation occurs only after every write and post-write read
+  succeeds.
+
+### Finding 10: Central Runtime Installation And Retirement
+
+- Red command: `npm test -- src/features/workspace/FileWorkflow.test.ts`
+- Expected failure: Close waits for watcher disposal completion, failed
+  completion is reported while retaining the exact source, and callbacks after
+  retirement cannot publish.
+- Observed red: 2 of 27 tests failed. Close settled before the completion gate
+  and ignored a failed disposal result; the stale-callback test already passed.
+- Green result: 27/27 tests passed. Open, Save As, close, grant detachment,
+  replacement, and App disposal use one runtime installer/retirer. Retirement
+  marks the runtime stale before unsubscribe/dispose, drains recovery, awaits
+  watcher completion, and falls back to an untitled authoritative session on
+  failure with a visible `Project cleanup failed` message.
+
+## Final Green Verification
+
+- Covering matrix:
+  `npm test -- src/features/workspace/FileWorkflow.test.ts src/core/persistence/RecoveryJournal.test.ts src/core/host/BrowserHost.test.ts src/core/store/CommandRegistry.test.ts src/features/workspace/Accessibility.test.tsx src/app/App.test.tsx src/app/App.desktop.test.tsx`
+  - PASS: 7 files, 104/104 tests.
+- Brief focused matrix: `npm test -- src/features/workspace src/core/store`
+  - Initial integration run exposed a test-only missing `vi` import:
+    1 failed, 117 passed.
+  - Final PASS: 6 files, 119/119 tests.
+- Full frontend suite: `npm test`
+  - PASS: 44 files, 667/667 tests.
+- TypeScript: `npx tsc --noEmit`
+  - PASS, no diagnostics.
+- Production frontend: `npm run build`
+  - PASS, 1,917 modules transformed; only the existing non-failing large-chunk
+    warning remains.
+- Shared native metadata contract:
+  `cargo test --manifest-path src-tauri/Cargo.toml native_menu_metadata_matches_the_shared_declarative_command_source`
+  - PASS: 1/1, 84 filtered.
+- Focused desktop Rust:
+  `cargo test --manifest-path src-tauri/Cargo.toml desktop::tests`
+  - PASS: 18/18, 67 filtered.
+- Full Rust: `cargo test --manifest-path src-tauri/Cargo.toml`
+  - PASS: 85/85 library tests; 0 main tests; 0 doc tests.
+- Rust quality: `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`,
+  `cargo check --manifest-path src-tauri/Cargo.toml`, and
+  `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
+  - PASS. The first format check observed formatter-only wrapping; `cargo fmt`
+    was applied and the final check passed.
+- Desktop release boundary: `npm run tauri:build -- --no-bundle`
+  - PASS; release executable built at `src-tauri/target/release/uxml-editor.exe`.
+- Focused non-geometry Playwright:
+  `npx playwright test tests/e2e/accessibility-workflow.spec.ts --grep "workflow has no automated axe violations and is keyboard operable"`
+  - PASS: 1/1 in 15.2 seconds.
+
+## Browser, Keyboard, Axe, And Visual Evidence
+
+- The final Playwright run opened the real demo workflow, asserted the canvas
+  renderer was nonempty, ran actual `AxeBuilder.analyze()`, and found zero
+  violations.
+- Keyboard-only Playwright opened the project with Enter, opened the palette
+  with `Control+Shift+P`, verified the named search field received focus,
+  dismissed with Escape, verified focus returned to the named canvas, and
+  verified canvas Escape retained focus.
+- Component keyboard coverage additionally proves focused input Save,
+  contenteditable pane switching, CodeMirror-native copy, physical-Shift zoom,
+  modal Tab wrapping, safe external Escape, explicit reload, and focus return.
+- The deliberately excluded canvas heading/toolbar/grid and their geometry
+  tests were not edited. The desktop and 720px screenshots and nonblank/no-
+  overlap geometry evidence already recorded in the main report therefore
+  remain the applicable visual baseline for this fix wave.
+
+## Changed Files
+
+- Shared command/native authority: `src/core/store/CommandDefinitions.json`,
+  `src/core/store/CommandRegistry.ts`,
+  `src/core/desktop/DesktopCommandBridge.ts`, `src-tauri/src/desktop.rs`.
+- Workflow/persistence/host: `src/features/workspace/FileWorkflow.ts`,
+  `src/core/persistence/RecoveryJournal.ts`, `src/core/host/BrowserHost.ts`.
+- App and accessible UI: `src/app/App.tsx`,
+  `src/features/workspace/CommandBar.tsx`,
+  `src/features/workspace/CommandPalette.tsx`,
+  `src/features/workspace/ExternalChangeDialog.tsx`,
+  `src/features/workspace/KeyboardShortcuts.tsx`,
+  `src/features/workspace/Workbench.tsx`,
+  `src/features/workspace/WorkspaceUiController.ts`,
+  `src/features/workspace/CommandErrorDialog.tsx`, and
+  `src/features/workspace/useModalFocus.ts`.
+- Focused tests: `src/app/App.test.tsx`, `src/app/App.desktop.test.tsx`,
+  `src/core/host/BrowserHost.test.ts`,
+  `src/core/persistence/RecoveryJournal.test.ts`,
+  `src/core/store/CommandRegistry.test.ts`,
+  `src/features/workspace/Accessibility.test.tsx`,
+  `src/features/workspace/FileWorkflow.test.ts`, and
+  `src/features/workspace/WorkspaceEditingCommands.test.ts`.
+- Evidence: `.superpowers/sdd/2026-08-15-uxml-editor/task-16-report.md`.
+- No excluded canvas layout/geometry file was changed.
+
+## Dependency And License Audit
+
+- No dependency or version changed in this fix wave; `package.json` and
+  `package-lock.json` are unchanged.
+- `uxml-preview` remains exactly `0.4.0` in both files.
+- All npm dependency versions remain exact. No notice or license file changed;
+  existing Apache-2.0 and third-party notices are preserved.
+
+## Fix Requirement Checklist
+
+- [x] Discard awaits and clears serialized recovery; failure aborts visibly.
+- [x] Same-root, close/reopen, and replacement/reopen regressions prove
+  discarded edits cannot return.
+- [x] Save and Save All await the same journal serialization authority.
+- [x] Browser FSA exclusive create is unavailable without target mutation;
+  deterministic demo/memory and native create-new remain intact.
+- [x] One declarative metadata source drives registry, toolbar/palette/
+  shortcuts, desktop bridge allowlisting, and native menu construction.
+- [x] Native file command IDs remain exact and generation-safe defaults remain
+  unchanged until App binds the Task 16 owner.
+- [x] App selects one injected-or-owned workflow for rendering, commands, and
+  lifecycle; only an owned workflow is disposed.
+- [x] File availability is explicit and state-derived; disabled controls remain
+  rendered with stable dimensions.
+- [x] Toolbar, palette, shortcut, and native errors converge on one visible,
+  contained command-error boundary.
+- [x] Editable shortcuts preserve native text conventions while global file,
+  pane, zoom, diagnostics, and palette commands remain available.
+- [x] Shared modal focus covers names, containment, Escape resolution, explicit
+  resolution, and return focus.
+- [x] Save As preflights known revisions and reports real partial outcomes
+  without claiming rollback; source `DocumentSession` and recovery remain
+  authoritative until complete installation.
+- [x] Runtime setup/teardown is centralized, completion-aware, stale-safe, and
+  used by App unmount.
+- [x] `DocumentSession` remains the sole exact-source/parsed-state authority; no
+  visual model or native authority was added.
+- [x] Browser-first HostPort boundaries, byte identity, malformed-source
+  preservation, no execution/upload/telemetry/network/shell/process authority,
+  and existing production Tauri import boundaries remain unchanged.
+- [x] The Task 7 recovery-phase race was directly exercised and fixed by the
+  serialized journal/save tails. Task 9 subscription cleanup was directly
+  exercised by centralized runtime retirement; its existing listener-throw
+  containment required no additional change in this round.
+- [x] No excluded layout files were touched and no push/PR was performed.
+
+## Fix Self-Review
+
+- Reviewed all 11 findings, the brief constraints, the final diff, and the
+  shared command/native contract. Finding 11 is recorded as a toolchain concern
+  rather than a supported pass.
+- Confirmed all replacement mutation occurs only after picker selection,
+  destination validation/confirmation, discard finalization, and Save As
+  revision preflight. Picker cancellation and invalid roots retain the current
+  session and recovery.
+- Confirmed active callbacks check retirement/current identity before publish,
+  and watcher completion failure cannot silently close or replace the exact
+  source session.
+- Confirmed `git diff --check` passed apart from informational line-ending
+  conversion warnings, dependency files are unchanged, and production Tauri
+  imports remain confined to the existing runtime boundary.
+
+## Fix Concerns
+
+- Node 24 is not installed (`nvm list` contains only `25.2.1`). All npm,
+  Playwright, TypeScript, build, and Tauri frontend commands therefore ran on
+  unsupported Node `25.2.1`, outside `>=24.15.0 <25`. This report does not claim
+  a supported-toolchain pass; the controller still needs to run the Node 24
+  matrix.
+- Vite retains its existing non-failing large-chunk warning. Playwright retains
+  the existing `NO_COLOR`/`FORCE_COLOR` warning.
+- The browser FSA host now intentionally disables New Project and Save As
+  because that API cannot guarantee exclusive create. Demo-memory and desktop
+  modes retain the complete creation workflow.
