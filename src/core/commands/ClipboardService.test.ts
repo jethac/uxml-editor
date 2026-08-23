@@ -124,6 +124,12 @@ describe('ClipboardService', () => {
     expect(session.selection).toEqual([parent]);
     session.history.redo();
     expect(resolveElementLocator(session.document.root, session.selection[0])).toBe(session.document.root.children[0].children[2].id);
+
+    const replayed = openSession(source);
+    replayed.history.replay([pasted.transaction]);
+    const replayedPastedRoot = replayed.document.root.children[0].children[2];
+    expect(resolveElementLocator(replayed.document.root, replayed.selection[0])).toBe(replayedPastedRoot.id);
+    expect(replayed.selectedNodeIds).toEqual([replayedPastedRoot.id]);
   });
 
   it('keeps multi-root nonterminal paste selection stable through nested renames, undo, redo, and replay', async () => {
@@ -266,6 +272,17 @@ describe('ClipboardService', () => {
       '</ui:UXML>',
     ].join('\n');
     const destination = openSession(destinationSource);
+    const before = {
+      snapshot: destination.snapshot(),
+      source: destination.snapshot().files.get(entryPath)?.text,
+      selection: destination.selection,
+      selectedNodeIds: destination.selectedNodeIds,
+      diagnostics: destination.diagnostics,
+      undoDepth: destination.history.undoDepth,
+      canUndo: destination.history.canUndo,
+      canRedo: destination.history.canRedo,
+      replayLog: destination.history.replayLog,
+    };
 
     const result = await new ClipboardService().paste(
       destination,
@@ -281,8 +298,20 @@ describe('ClipboardService', () => {
         message: 'Namespace binding conflict for xmlns:custom.',
       },
     });
-    expect(destination.snapshot().files.get(entryPath)?.text).toBe(destinationSource);
-    expect(destination.history.undoDepth).toBe(0);
+    expect({
+      snapshot: destination.snapshot(),
+      source: destination.snapshot().files.get(entryPath)?.text,
+      selection: destination.selection,
+      selectedNodeIds: destination.selectedNodeIds,
+      diagnostics: destination.diagnostics,
+      undoDepth: destination.history.undoDepth,
+      canUndo: destination.history.canUndo,
+      canRedo: destination.history.canRedo,
+      replayLog: destination.history.replayLog,
+    }).toEqual({
+      ...before,
+      source: destinationSource,
+    });
   });
 });
 

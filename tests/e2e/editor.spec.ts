@@ -135,6 +135,11 @@ const MENU_AFTER_DUPLICATE = menuSource([
   '    ',
 ]);
 const MENU_AFTER_DELETE = MENU_AFTER_WRAP;
+const MENU_AFTER_SOURCE_EDIT = MENU_AFTER_DELETE.replace('Main Menu', 'Edited Menu');
+const MENU_AFTER_POST_SOURCE_VISUAL = MENU_AFTER_SOURCE_EDIT.replace(
+  '    <ui:Button />\r\n    \r\n  </ui:VisualElement>',
+  '    <ui:Button />\r\n    \r\n    \r\n    \r\n    <ui:Button />\r\n    \r\n  </ui:VisualElement>',
+);
 const UNSUPPORTED_AFTER_GENERIC_CREATE = [
   '<?xml version="1.0" encoding="utf-8"?>',
   '<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:acme="Acme.Widgets">',
@@ -334,9 +339,13 @@ test('authors structure through palette, hierarchy, canvas, source, and pointer 
   await runPaletteCommand(page, 'Undo');
   await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DUPLICATE);
   await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(2);
+  await expectStructuralSelection(page, hierarchy.locator('[role="treeitem"][aria-selected="true"]'), 'ui:VisualElement');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
   await runPaletteCommand(page, 'Redo');
   await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE);
   await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(1);
+  await expectStructuralSelection(page, scrollView, 'ui:ScrollView');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
 
   await hierarchy.getByRole('treeitem', { name: 'menu-title' }).focus();
   await page.keyboard.press('Enter');
@@ -347,15 +356,39 @@ test('authors structure through palette, hierarchy, canvas, source, and pointer 
   await expect(play).toHaveAttribute('aria-selected', 'true');
 
   await replaceVisibleText(page, MENU_UXML, 'Main Menu', 'Edited Menu');
-  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE.replace('Main Menu', 'Edited Menu'));
+  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_SOURCE_EDIT);
   await expect(page.getByTestId('canvas-renderer')).toContainText('Edited Menu');
-  await expect(hierarchy.getByRole('treeitem', { name: 'menu-title' })).toBeVisible();
+  await expectStructuralSelection(page, hierarchy.getByRole('treeitem', { name: 'menu-title' }), '2 elements');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
   await runPaletteCommand(page, 'Undo');
-  await expectVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE);
+  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE);
   await expect(page.getByTestId('canvas-renderer')).toContainText('Main Menu');
+  await expectStructuralSelection(page, hierarchy.getByRole('treeitem', { name: 'menu-title' }), '2 elements');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
   await runPaletteCommand(page, 'Redo');
-  const finalExpectedSource = MENU_AFTER_DELETE.replace('Main Menu', 'Edited Menu');
-  await expectVisibleSource(page, MENU_UXML, finalExpectedSource);
+  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_SOURCE_EDIT);
+  await expectStructuralSelection(page, hierarchy.getByRole('treeitem', { name: 'menu-title' }), '2 elements');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+
+  await menuRoot.focus();
+  await page.keyboard.press('Enter');
+  await expectStructuralSelection(page, menuRoot, 'ui:VisualElement');
+  await page.getByRole('button', { name: 'Add Button' }).click();
+  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_POST_SOURCE_VISUAL);
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:Button' })).toHaveCount(2);
+  await expectStructuralSelection(page, hierarchy.locator('[role="treeitem"][aria-selected="true"]'), 'ui:Button');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+  await runPaletteCommand(page, 'Undo');
+  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_SOURCE_EDIT);
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:Button' })).toHaveCount(1);
+  await expectStructuralSelection(page, menuRoot, 'ui:VisualElement');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+  await runPaletteCommand(page, 'Redo');
+  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_POST_SOURCE_VISUAL);
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:Button' })).toHaveCount(2);
+  await expectStructuralSelection(page, hierarchy.locator('[role="treeitem"][aria-selected="true"]'), 'ui:Button');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+  const finalExpectedSource = MENU_AFTER_POST_SOURCE_VISUAL;
   await page.getByRole('button', { name: 'Save' }).click();
   await settled(page);
   const persisted = await project(page, MENU);
@@ -386,6 +419,7 @@ test('preserves an authored non-UI namespace through generic palette creation an
   const widget = hierarchy.getByRole('treeitem', { name: 'acme:Widget' });
   await expectVisibleSource(page, UNSUPPORTED_UXML, UNSUPPORTED_AFTER_GENERIC_CREATE);
   await expectStructuralSelection(page, widget, 'acme:Widget');
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
   expect(before.files[UNSUPPORTED_USS]?.text).toBe(UNSUPPORTED_USS_BASELINE);
   await page.getByRole('button', { name: 'Save' }).click();
   await settled(page);
@@ -393,6 +427,7 @@ test('preserves an authored non-UI namespace through generic palette creation an
   expect(saved.files[UNSUPPORTED_UXML]?.text).toBe(UNSUPPORTED_AFTER_GENERIC_CREATE);
   expect(saved.files[UNSUPPORTED_UXML]?.revision).not.toBe(before.files[UNSUPPORTED_UXML]?.revision);
   expect(saved.files[UNSUPPORTED_USS]).toEqual(before.files[UNSUPPORTED_USS]);
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has no unsaved changes.');
   await runPaletteCommand(page, 'Close Project');
   await expectClosedProject(page);
   await runPaletteCommand(page, 'Reopen Project');
@@ -759,6 +794,11 @@ async function visibleSourceTextAfterSourceOpen(page: Page, path: string): Promi
 
 async function expectVisibleSource(page: Page, path: string, expected: string): Promise<void> {
   await showSource(page, path);
+  expect(await visibleSourceText(page, path)).toBe(normalizeVisibleSource(expected));
+}
+
+async function expectMountedVisibleSource(page: Page, path: string, expected: string): Promise<void> {
+  await expect(sourceEditor(page, path)).toBeVisible();
   expect(await visibleSourceText(page, path)).toBe(normalizeVisibleSource(expected));
 }
 

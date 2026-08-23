@@ -2,10 +2,11 @@
 
 ## Status
 
-PASS (fix round 1/5)
+PASS (fix round 2/5)
 
 - Original task base: `12c49ad5b985becbfba2a2b7e66c095b5c56d53a`
 - Fix-round base: `221758d5f71c60a8e6d29e0eb95070f6c4378ea2`
+- Fix-round 2 base: `a714a06291b3bb99b96490b5e11c1edf3e1de8bc`
 - Runtime target: Node `v24.15.0`
 
 ## Scope And Architecture
@@ -249,3 +250,103 @@ src/features/workspace/CommandBar.tsx
 src/features/workspace/Accessibility.test.tsx
 tests/e2e/editor.spec.ts
 ```
+
+## Fix Round 2 Evidence
+
+### Scope And Test-First Outcome
+
+- Extended the stale-parent unnamed-root clipboard case through replay into a
+  fresh session and verified the replayed unnamed selection locator resolves to
+  the pasted node.
+- Strengthened the namespace-transform rejection path with an exact immutable
+  live-session assertion: snapshot, source, selection, resolved node ids,
+  diagnostics, undo depth, undo/redo availability, and replay log remain
+  unchanged after the rejection.
+- Kept the same CodeMirror instance mounted after source editing and source
+  Undo/Redo, then added a visible palette insertion. Its complete CRLF oracle,
+  structural Undo/Redo source, hierarchy, selection, inspector, canvas overlay,
+  and dirty-state assertions all pass without reopening Source or switching
+  files.
+- Added those semantic state assertions to the existing structural delete and
+  source Undo/Redo boundaries, and dirty-before-save/clean-after-save coverage
+  to the authored `acme:Widget` creation workflow.
+- No production code changed: the focused ClipboardService tests were green on
+  first execution, so no new product defect was proven.
+
+### Exact Focused RED And GREEN Evidence
+
+The new ClipboardService contract extensions were green immediately:
+
+```text
+npx vitest run src/core/commands/ClipboardService.test.ts
+Test Files  1 passed (1)
+Tests       9 passed (9)
+```
+
+The first static browser oracle correctly identified preserved whitespace in
+the existing visual insertion result:
+
+```text
+npx playwright test tests/e2e/editor.spec.ts --grep "authors structure|preserves an authored"
+1 failed, 1 passed (22.7s)
+Expected post-source source without whitespace-only lines before the appended
+Button; received three preserved CRLF whitespace-only lines.
+```
+
+The oracle was corrected to those independent literal bytes; no production
+behavior changed.
+
+```text
+npx playwright test tests/e2e/editor.spec.ts --grep "authors structure|preserves an authored"
+2 passed (23.9s)
+
+npx playwright test tests/e2e/editor.spec.ts
+12 passed (40.9s)
+
+npm test
+Test Files  46 passed (46)
+Tests       709 passed (709)
+Duration     46.72s
+
+npm run test:e2e
+28 passed (1.0m)
+
+npm run build
+tsc --noEmit: passed
+vite build: passed, 1917 modules transformed
+```
+
+### Round 2 Files And Audit
+
+```text
+.superpowers/sdd/2026-08-15-uxml-editor/task-17a2b1-report.md
+src/core/commands/ClipboardService.test.ts
+tests/e2e/editor.spec.ts
+```
+
+- The bridge remains unchanged and host/scheduler-only. No component, store,
+  session, command, history, or selection capability was exposed through it.
+- No layout, CSS, canvas, toolbar, workbench, screenshot, visual baseline,
+  fixture, dependency, packaging, license, or release change was made.
+- No arbitrary sleeps were added. The remaining measured limitation is the
+  pre-existing build chunk-size warning.
+
+### Post-Commit Integrity Commands
+
+Executed after the round-2 commit; each command exited `0` with the literal
+empty output shown.
+
+```text
+git diff --check 221758d5f71c60a8e6d29e0eb95070f6c4378ea2..HEAD
+(no output)
+
+git status --short
+(no output)
+
+Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match [regex]::Escape('B:\usagi_dev\uxml-editor\.worktrees\uxml-editor') -and $_.CommandLine -match 'playwright|vite|vitest' } | Select-Object ProcessId, Name, CommandLine | Format-List
+(no output)
+```
+
+This confirms the requested range is whitespace-clean, the worktree is empty,
+and zero matching Playwright, Vite, or Vitest processes remain for this
+worktree.
