@@ -10,6 +10,21 @@ const OPTIONS_UXML = 'Assets/UI/Options.uxml';
 const NEW_PROJECT_UXML = 'Assets/Main.uxml';
 const NEW_PROJECT_SOURCE = '<ui:UXML xmlns:ui="UnityEngine.UIElements">\n</ui:UXML>\n';
 const RECOVERED_MENU_UXML_REVISION = 'memory:v1:26';
+const MENU_AFTER_PASTE_PLAY = [
+  '<?xml version="1.0" encoding="utf-8"?>',
+  "<ui:UXML xmlns:ui='UnityEngine.UIElements'>",
+  '  <Style src = "Menu.uss" />',
+  '  <ui:VisualElement name="menu-root" class="menu-root">',
+  '    <ui:Label name="menu-title" text="Main Menu" />',
+  "    <ui:Button name = 'play-button' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '    <!-- Task 17A menu: keep this comment byte-for-byte. -->',
+  '    <!-- keep-between-buttons -->',
+  "    <ui:Button name=\"quit-button\" class = 'menu-button' text='Quit &#x26; Save' />",
+  "    <ui:Button name = 'play-button-copy' class='menu-button primary' text=\"Play &amp; Go\" tooltip='Press &quot;Enter&quot;' />",
+  '  </ui:VisualElement>',
+  '</ui:UXML>',
+  '',
+].join('\r\n');
 
 test('opens, closes, and reopens the menu project through the production editor', async ({ page }) => {
   await openEditor(page);
@@ -44,6 +59,135 @@ test('clean Save and Save All preserve every menu byte and revision', async ({ p
   const after = await project(page, MENU);
   expect(Object.keys(after.files).sort()).toEqual([MENU_USS, MENU_UXML].sort());
   expect(after).toEqual(before);
+});
+
+test('copies and pastes a selected subtree through visible controls, selecting the generated node', async ({ page }) => {
+  await openMenu(page);
+  const before = await project(page, MENU);
+
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expect(play).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'Copy selection' }).click();
+  const menuRoot = hierarchy.getByRole('treeitem', { name: 'menu-root' });
+  await menuRoot.focus();
+  await page.keyboard.press('Enter');
+  await expect(menuRoot).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'Paste' }).click();
+
+  const pasted = hierarchy.getByRole('treeitem', { name: 'play-button-copy' });
+  await expect(pasted).toBeVisible();
+  await expect(pasted).toHaveAttribute('aria-selected', 'true');
+  await expect(menuRoot).toHaveAttribute('aria-selected', 'false');
+
+  await showSource(page, MENU_UXML);
+  expect(await visibleSourceText(page, MENU_UXML)).toBe(normalizeVisibleSource(MENU_AFTER_PASTE_PLAY));
+  await runPaletteCommand(page, 'Undo');
+  expect(await visibleSourceText(page, MENU_UXML)).toBe(normalizeVisibleSource(before.files[MENU_UXML]!.text));
+  await expect(menuRoot).toHaveAttribute('aria-selected', 'true');
+  await runPaletteCommand(page, 'Redo');
+  expect(await visibleSourceText(page, MENU_UXML)).toBe(normalizeVisibleSource(MENU_AFTER_PASTE_PLAY));
+  await expect(pasted).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await settled(page);
+  const after = await project(page, MENU);
+  expect(after.files[MENU_UXML]?.text).toBe(MENU_AFTER_PASTE_PLAY);
+  expect(after.files[MENU_UXML]?.revision).not.toBe(before.files[MENU_UXML]?.revision);
+  await runPaletteCommand(page, 'Close Project');
+  await expectClosedProject(page);
+  await runPaletteCommand(page, 'Reopen Project');
+  await expectOpenProject(page, 'Menu Fixture');
+  expect(await project(page, MENU)).toEqual(after);
+});
+
+test('rejects an unavailable production clipboard read without mutating source bytes', async ({ page }) => {
+  await openMenu(page);
+  const before = await project(page, MENU);
+  const sourceBefore = await visibleSourceTextAfterSourceOpen(page, MENU_UXML);
+
+  await page.getByRole('button', { name: 'Paste' }).click();
+
+  await expect(page.locator('.canvas-interaction-status')).toContainText(/clipboard/i);
+  expect(await visibleSourceText(page, MENU_UXML)).toBe(sourceBefore);
+  expect(await project(page, MENU)).toEqual(before);
+});
+
+test('authors structure through palette, hierarchy, canvas, source, and pointer controls', async ({ page }) => {
+  await openMenu(page);
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const menuRoot = hierarchy.getByRole('treeitem', { name: 'menu-root' });
+  await menuRoot.focus();
+  await page.keyboard.press('Enter');
+
+  await page.getByRole('searchbox', { name: 'Search elements' }).fill('button');
+  await page.getByRole('button', { name: 'Add Button' }).click();
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:Button' })).toBeVisible();
+  await page.getByRole('textbox', { name: 'Generic qualified name' }).fill('ui:VisualElement');
+  await page.getByRole('button', { name: 'Add generic element' }).click();
+  const generic = hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' });
+  await expect(generic).toHaveAttribute('aria-selected', 'true');
+
+  await page.getByRole('button', { name: 'Rename selected' }).click();
+  await page.getByRole('textbox', { name: 'Qualified element name' }).fill('ui:ScrollView');
+  await page.getByRole('button', { name: 'Apply rename' }).click();
+  const scrollView = hierarchy.getByRole('treeitem', { name: 'ui:ScrollView' });
+  await page.getByRole('button', { name: 'Move selected up' }).click();
+  await page.getByRole('button', { name: 'Move selected up' }).click();
+  await page.getByRole('button', { name: 'Move selected up' }).click();
+
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Alt+ArrowRight');
+  await expect(play).toHaveAttribute('aria-level', '4');
+
+  const quit = hierarchy.getByRole('treeitem', { name: 'quit-button' });
+  await quit.dragTo(scrollView);
+  await expect(quit).toHaveAttribute('aria-level', '4');
+  const beforeIllegalDrop = await visibleSourceTextAfterSourceOpen(page, MENU_UXML);
+  await play.dragTo(quit);
+  await expect(page.getByRole('alert')).toContainText('Button cannot contain children');
+  expect(await visibleSourceText(page, MENU_UXML)).toBe(beforeIllegalDrop);
+
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await quit.focus();
+  await page.keyboard.press('Control+Enter');
+  await expect(play).toHaveAttribute('aria-selected', 'true');
+  await expect(quit).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'Wrap selected' }).click();
+  await page.getByRole('textbox', { name: 'Wrapper element name' }).fill('ui:VisualElement');
+  await page.getByRole('button', { name: 'Apply wrap' }).click();
+  const wrapper = hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' });
+  await expect(wrapper).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'Duplicate selected' }).click();
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(2);
+  await page.getByRole('button', { name: 'Remove selected' }).click();
+  await expect(hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' })).toHaveCount(1);
+
+  await hierarchy.getByRole('treeitem', { name: 'menu-title' }).focus();
+  await page.keyboard.press('Enter');
+  await page.getByTestId('canvas-renderer').getByText('Main Menu', { exact: true }).click();
+  await expect(hierarchy.getByRole('treeitem', { name: 'menu-title' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByTestId('canvas-renderer').getByText('Play & Go', { exact: true }).click({ modifiers: ['Shift'] });
+  await expect(hierarchy.getByRole('treeitem', { name: 'menu-title' })).toHaveAttribute('aria-selected', 'true');
+  await expect(play).toHaveAttribute('aria-selected', 'true');
+
+  await replaceVisibleText(page, MENU_UXML, 'Main Menu', 'Edited Menu');
+  await expect(page.getByTestId('canvas-renderer')).toContainText('Edited Menu');
+  await expect(hierarchy.getByRole('treeitem', { name: 'menu-title' })).toBeVisible();
+  const finalVisibleSource = await visibleSourceText(page, MENU_UXML);
+  await page.getByRole('button', { name: 'Save' }).click();
+  await settled(page);
+  const persisted = await project(page, MENU);
+  expect(normalizeVisibleSource(persisted.files[MENU_UXML]!.text)).toBe(finalVisibleSource);
+  expectOnlyCrLf(persisted.files[MENU_UXML]!.text);
+  await runPaletteCommand(page, 'Close Project');
+  await runPaletteCommand(page, 'Reopen Project');
+  await showSource(page, MENU_UXML);
+  expect(await visibleSourceText(page, MENU_UXML)).toBe(finalVisibleSource);
 });
 
 test('creates, saves, closes, and reopens an unsaved project with exact bytes', async ({ page }) => {
@@ -396,6 +540,11 @@ function sourceEditor(page: Page, path: string): Locator {
 
 async function visibleSourceText(page: Page, path: string): Promise<string> {
   return (await sourceEditor(page, path).locator('.cm-line').allTextContents()).join('\n');
+}
+
+async function visibleSourceTextAfterSourceOpen(page: Page, path: string): Promise<string> {
+  await showSource(page, path);
+  return visibleSourceText(page, path);
 }
 
 async function replaceVisibleText(page: Page, path: string, search: string, replacement: string): Promise<void> {

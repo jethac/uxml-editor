@@ -49,6 +49,17 @@ export type ClipboardReadResult =
   | { readonly ok: true; readonly item: ClipboardItemLike }
   | { readonly ok: false; readonly diagnostic: ClipboardDiagnostic };
 
+interface TransformedFragment {
+  readonly source: string;
+  readonly root: PastedFragmentRoot;
+}
+
+interface PastedFragmentRoot {
+  readonly qualifiedTag: string;
+  readonly attributes: readonly Readonly<{ readonly name: string; readonly value: string }>[];
+  readonly authoredName?: string;
+}
+
 export class ClipboardService {
   constructor(private readonly port?: ClipboardPort) {}
 
@@ -124,7 +135,7 @@ export class ClipboardService {
     try {
       const occupied = authoredNames(session.document.root);
       const destinationBindings = namespaceBindingsAt(session.document.root, parent);
-      const fragments: string[] = [];
+      const fragments: TransformedFragment[] = [];
       for (const fragment of decoded.payload.fragments) {
         const transformed = transformFragment(
           session,
@@ -134,22 +145,27 @@ export class ClipboardService {
           destinationBindings,
         );
         if (!transformed.ok) return transformed;
-        fragments.push(transformed.source);
+        fragments.push(transformed);
       }
-      for (const fragment of fragments) insertElement(session, parentLocator, index, fragment);
-      const first = insertElement(session, parentLocator, index, fragments[0]);
+      for (const fragment of fragments) insertElement(session, parentLocator, index, fragment.source);
+      const first = insertElement(session, parentLocator, index, fragments[0].source);
       const patches = first.patchesByFile.get(session.entryPath);
       if (patches === undefined || patches.length !== 1) {
         return pasteFailure('AMBIGUOUS_PASTE_TARGET', 'The paste destination has no single safe insertion boundary.');
       }
-      const patch = combineFragments(patches[0], fragments);
+      const patch = combineFragments(patches[0], fragments.map((fragment) => fragment.source));
       return Object.freeze({
         ok: true,
         transaction: normalizeEditorTransaction({
           id: 'paste-uxml-fragment',
           label: fragments.length === 1 ? 'Paste element' : `Paste ${fragments.length} elements`,
           patchesByFile: new Map([[session.entryPath, [patch]]]),
-          ...(session.selection.length === 0 ? {} : { selectionAfter: session.selection }),
+          selectionAfter: fragments.map((fragment, offset) => pastedFragmentLocator(
+            parentLocator,
+            parent,
+            index + offset,
+            fragment.root,
+          )),
         }),
       });
     } catch (error) {
@@ -209,12 +225,12 @@ function transformFragment(
   fragment: ClipboardFragment,
   occupied: Set<string>,
   destinationBindings: ReadonlyMap<string, string>,
-): { readonly ok: true; readonly source: string } | { readonly ok: false; readonly diagnostic: ClipboardDiagnostic } {
+): { readonly ok: true; readonly source: string; readonly root: PastedFragmentRoot } | { readonly ok: false; readonly diagnostic: ClipboardDiagnostic } {
   try {
-    const attributes = fragment.namespaces
+    const namespaceAttributes = fragment.namespaces
       .map(({ name, value }) => ` ${name}="${escapeXmlAttributeValue(value, '"')}"`)
       .join('');
-    const prefix = `<uxml-editor-fragment${attributes}>`;
+    const prefix = `<uxml-editor-fragment${namespaceAttributes}>`;
     const wrapper = `${prefix}${fragment.source}</uxml-editor-fragment>`;
     const files = new Map<string, string>([[payload.sourcePath, wrapper]]);
     for (const stylesheet of payload.stylesheets) files.set(stylesheet.path, stylesheet.source);
@@ -245,6 +261,7 @@ function transformFragment(
     const fragmentStart = transformedChild.spans.openTag.start;
     const fragmentEnd = outerEnd(transformedWrapper, transformedChild);
     const patches: { readonly start: number; readonly end: number; readonly replacement: string }[] = [];
+    const renamedAuthoredNames = new Map<EditorElement['id'], string>();
     for (const element of walk(transformedChild)) {
       for (const attribute of element.attributes.filter((candidate) => candidate.name === 'name')) {
         const lexeme = readXmlAttributeLexeme(transformedWrapper, attribute.source);
@@ -254,6 +271,7 @@ function transformFragment(
         const renamed = availableName(attribute.value, occupied);
         occupied.add(renamed);
         if (renamed !== attribute.value) {
+          renamedAuthoredNames.set(element.id, renamed);
           patches.push({
             start: lexeme.valueStart - fragmentStart,
             end: lexeme.valueEnd - fragmentStart,
@@ -266,10 +284,40 @@ function transformFragment(
     for (const patch of patches.sort((left, right) => right.start - left.start)) {
       source = source.slice(0, patch.start) + patch.replacement + source.slice(patch.end);
     }
-    return Object.freeze({ ok: true, source });
+    const attributes = Object.freeze(transformedChild.attributes.map((attribute) => Object.freeze({
+      name: attribute.name,
+      value: attribute.name === 'name'
+        ? renamedAuthoredNames.get(transformedChild.id) ?? attribute.value
+        : attribute.value,
+    })));
+    const authoredName = attributes.find((attribute) => attribute.name === 'name')?.value;
+    return Object.freeze({
+      ok: true,
+      source,
+      root: Object.freeze({
+        qualifiedTag: transformedChild.name,
+        attributes,
+        ...(authoredName === undefined ? {} : { authoredName }),
+      }),
+    });
   } catch (error) {
     return pasteFailure('INVALID_CLIPBOARD_FRAGMENT', errorMessage(error, 'A clipboard fragment could not be parsed structurally.'));
   }
+}
+
+function pastedFragmentLocator(
+  parentLocator: ElementLocator,
+  parent: EditorElement,
+  index: number,
+  root: PastedFragmentRoot,
+): ElementLocator {
+  return Object.freeze({
+    qualifiedTag: root.qualifiedTag,
+    childPath: Object.freeze([...parentLocator.childPath, index]),
+    ancestorTags: Object.freeze([...parentLocator.ancestorTags, parent.name]),
+    attributeHints: root.attributes,
+    ...(root.authoredName === undefined ? {} : { authoredName: root.authoredName }),
+  });
 }
 
 function requiredInheritedNamespaces(

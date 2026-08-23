@@ -61,6 +61,34 @@ describe('ClipboardService', () => {
     expect(session.snapshot().files.get(entryPath)?.text).not.toContain('item-copy');
   });
 
+  it('selects the generated pasted root and restores the previous selection through undo and redo', async () => {
+    const session = openSession([
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+      '  <ui:VisualElement name="parent">',
+      '    <ui:Label name="item" />',
+      '  </ui:VisualElement>',
+      '</ui:UXML>',
+    ].join('\n'));
+    const item = elementNamed(session.document.root, 'item');
+    const parent = locatorWithName(session, 'parent');
+    const service = new ClipboardService();
+    const copied = service.copy(session, [item]);
+    expect(copied.ok).toBe(true);
+    if (!copied.ok) return;
+    session.setSelection([parent]);
+
+    const paste = await service.paste(session, parent, 1, copied.item);
+
+    expect(paste.ok, JSON.stringify(paste)).toBe(true);
+    if (!paste.ok) return;
+    session.history.execute(paste.transaction);
+    expect(session.selection.map((locator) => locator.authoredName)).toEqual(['item-copy']);
+    session.history.undo();
+    expect(session.selection).toEqual([parent]);
+    session.history.redo();
+    expect(session.selection.map((locator) => locator.authoredName)).toEqual(['item-copy']);
+  });
+
   it('returns a stable diagnostic for malformed structured clipboard data', async () => {
     const session = openSession('<ui:UXML xmlns:ui="UnityEngine.UIElements"><ui:VisualElement name="parent" /></ui:UXML>');
     const service = new ClipboardService();
