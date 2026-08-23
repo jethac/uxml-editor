@@ -609,15 +609,22 @@ export class FileWorkflow implements FileWorkflowPort {
           failure ??= error;
         }
       }
-      const retirementHistoryDispose = active.session.history.subscribe((results) => {
-        const localResults = results.filter((result) => !result.forward.id.startsWith('external-reload:v1:'));
-        if (localResults.length === 0 || this.active !== active) return;
-        this.queueRecoveryResults(active, localResults);
-      });
+      let retirementHistoryDispose: (() => void) | null = null;
       try {
-        active.historyDispose();
+        retirementHistoryDispose = active.session.history.subscribe((results) => {
+          const localResults = results.filter((result) => !result.forward.id.startsWith('external-reload:v1:'));
+          if (localResults.length === 0 || this.active !== active) return;
+          this.queueRecoveryResults(active, localResults);
+        });
       } catch (error) {
         failure ??= error;
+      }
+      if (retirementHistoryDispose !== null) {
+        try {
+          active.historyDispose();
+        } catch (error) {
+          failure ??= error;
+        }
       }
       while (true) {
         const recoveryTail = active.recoveryTail;
@@ -630,7 +637,8 @@ export class FileWorkflow implements FileWorkflowPort {
       }
       if (active.recoveryError !== null) failure ??= active.recoveryError;
       try {
-        retirementHistoryDispose();
+        if (retirementHistoryDispose === null) active.historyDispose();
+        else retirementHistoryDispose();
       } catch (error) {
         failure ??= error;
       }

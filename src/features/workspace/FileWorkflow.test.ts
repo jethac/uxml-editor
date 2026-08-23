@@ -14,6 +14,7 @@ import { FileWorkflow } from './FileWorkflow';
 
 const ENTRY_PATH = 'Assets/Main.uxml';
 const INITIAL_SOURCE = '<UXML><Button text="Play" /></UXML>\r\n';
+const commandHistorySubscribe = CommandHistory.prototype.subscribe;
 
 describe('FileWorkflow', () => {
   it('opens, edits, saves, closes, and reopens the same exact source', async () => {
@@ -499,7 +500,7 @@ describe('FileWorkflow', () => {
     const context = saveAsFailureFixture({});
     const { host, store, workflow, source, destination } = context;
     const historyUnsubscribed = deferred<void>();
-    const subscribe = CommandHistory.prototype.subscribe;
+    const subscribe = commandHistorySubscribe;
     vi.spyOn(CommandHistory.prototype, 'subscribe').mockImplementationOnce(function (
       this: CommandHistory,
       listener: Parameters<CommandHistory['subscribe']>[0],
@@ -572,6 +573,104 @@ describe('FileWorkflow', () => {
     expectCompletedSaveAsFailure(error);
     expect(targetDispose).toHaveBeenCalledOnce();
     expect(sourceWatches).toBe(2);
+    await expectConcurrentSourceRecoverable(context, sourceSession, 'Concurrent');
+  });
+
+  it('drains recovery with the original history listener when retirement subscription setup fails', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, store, workflow, source, destination } = context;
+    const watcherFailure = new HostError('read-failed', 'Injected source retirement failure.');
+    const subscriptionFailure = new Error('Injected retirement subscription failure.');
+    const retirementSubscribeAttempted = deferred<void>();
+    const concurrentEditQueued = deferred<void>();
+    const originalHistoryDispose = vi.fn();
+    const subscribe = commandHistorySubscribe;
+    let subscribeCalls = 0;
+    let failNextSubscribe = false;
+    vi.spyOn(CommandHistory.prototype, 'subscribe').mockImplementation(function (
+      this: CommandHistory,
+      listener: Parameters<CommandHistory['subscribe']>[0],
+    ) {
+      subscribeCalls += 1;
+      if (failNextSubscribe) {
+        failNextSubscribe = false;
+        retirementSubscribeAttempted.resolve();
+        queueMicrotask(() => {
+          replaceButtonText(store, 'Queued', 'Concurrent');
+          concurrentEditQueued.resolve();
+        });
+        throw subscriptionFailure;
+      }
+      const dispose = subscribe.call(this, listener);
+      if (subscribeCalls !== 1) return dispose;
+      return () => {
+        dispose();
+        originalHistoryDispose();
+      };
+    });
+    const sourceRetirement = deferred<DisposalOutcome>();
+    const sourceDisposeStarted = deferred<void>();
+    const targetDispose = vi.fn();
+    const watch = host.watch.bind(host);
+    let sourceWatches = 0;
+    vi.spyOn(host, 'watch').mockImplementation(async (root, listener) => {
+      const underlying = await watch(root, listener);
+      if (root.id === source.id) {
+        sourceWatches += 1;
+        if (sourceWatches === 1) {
+          return Object.freeze({
+            dispose: () => {
+              underlying.dispose();
+              sourceDisposeStarted.resolve();
+            },
+            completion: sourceRetirement.promise,
+          });
+        }
+        return underlying;
+      }
+      return Object.freeze({
+        dispose: () => {
+          targetDispose();
+          underlying.dispose();
+        },
+      });
+    });
+    await openDirtySaveAsSource(context);
+    const sourceSession = store.getSnapshot().session!;
+    const appendStarted = deferred<void>();
+    const releaseAppend = deferred<void>();
+    const writeRecovery = host.writeRecovery.bind(host);
+    let sourceAppendBlocked = false;
+    vi.spyOn(host, 'writeRecovery').mockImplementation(async (project, stored) => {
+      if (project === source.id && !sourceAppendBlocked) {
+        sourceAppendBlocked = true;
+        appendStarted.resolve();
+        await releaseAppend.promise;
+      }
+      await writeRecovery(project, stored);
+    });
+
+    const saving = workflow.saveAs(destination);
+    await sourceDisposeStarted.promise;
+    replaceButtonText(store, 'Race', 'Queued');
+    await appendStarted.promise;
+    failNextSubscribe = true;
+    sourceRetirement.resolve(Object.freeze({ status: 'failed', error: watcherFailure }));
+    await retirementSubscribeAttempted.promise;
+    await concurrentEditQueued.promise;
+
+    expect(originalHistoryDispose).not.toHaveBeenCalled();
+    releaseAppend.resolve();
+    const error = await captureSaveAsFailure(saving);
+
+    expectCompletedSaveAsFailure(error);
+    expect.soft((error as { readonly originalError: unknown }).originalError).toBe(watcherFailure);
+    expect.soft(originalHistoryDispose).toHaveBeenCalledOnce();
+    expect(targetDispose).toHaveBeenCalledOnce();
+    expect(sourceWatches).toBe(2);
+    await host.externalWrite(projectPath(destination, ENTRY_PATH), '<UXML stale-target="true" />\n');
+    await host.advanceTime(50);
+    expect(workflow.getSnapshot().externalChanges).toEqual([]);
     await expectConcurrentSourceRecoverable(context, sourceSession, 'Concurrent');
   });
 
