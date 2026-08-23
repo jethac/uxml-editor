@@ -133,6 +133,90 @@ describe('SourcePanel', () => {
       crlfUxml.replace('Assets/UI/Main.uss', 'M.uss').replace('Original', 'Typed'),
     );
   });
+
+  it('maps CRLF newline insertion to exact persisted source bytes', () => {
+    const crlfUxml = uxml.replace(/\n/g, '\r\n');
+    const coordinator = createCoordinator(crlfUxml);
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+    const editor = screen.getByRole('textbox', { name: `${entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    const from = view.state.doc.toString().indexOf('  <ui:Label');
+
+    act(() => view.dispatch({ changes: { from, insert: '  <!-- inserted -->\n' } }));
+
+    expect(coordinator.getSnapshot().drafts.get(entryPath)).toBe(
+      crlfUxml.replace('  <ui:Label', '  <!-- inserted -->\r\n  <ui:Label'),
+    );
+  });
+
+  it('maps CRLF multiline paste to exact persisted source bytes', () => {
+    const crlfUxml = uxml.replace(/\n/g, '\r\n');
+    const coordinator = createCoordinator(crlfUxml);
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+    const editor = screen.getByRole('textbox', { name: `${entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    const from = view.state.doc.toString().indexOf('Original');
+
+    act(() => view.dispatch({
+      changes: { from, to: from + 'Original'.length, insert: 'First\nSecond\nThird' },
+    }));
+
+    expect(coordinator.getSnapshot().drafts.get(entryPath)).toBe(
+      crlfUxml.replace('Original', 'First\r\nSecond\r\nThird'),
+    );
+  });
+
+  it('selects a deterministic local newline for mixed-separator source edits', () => {
+    const mixedUxml = '<ui:UXML xmlns:ui="UnityEngine.UIElements">\r\n'
+      + '  <Style src="Assets/UI/Main.uss" />\n'
+      + '  <ui:Label name="title" text="Original" />\r'
+      + '</ui:UXML>\r\n';
+    const coordinator = createCoordinator(mixedUxml);
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+    const editor = screen.getByRole('textbox', { name: `${entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    const from = view.state.doc.toString().indexOf('Assets/UI/Main.uss');
+
+    act(() => view.dispatch({
+      changes: {
+        from,
+        to: from + 'Assets/UI/Main.uss'.length,
+        insert: 'Assets/UI/First.uss\nAssets/UI/Second.uss',
+      },
+    }));
+
+    expect(coordinator.getSnapshot().drafts.get(entryPath)).toBe(
+      mixedUxml.replace('Assets/UI/Main.uss', 'Assets/UI/First.uss\r\nAssets/UI/Second.uss'),
+    );
+  });
+
+  it('maps a diagnostic span after multiple CRLF separators into CodeMirror offsets', () => {
+    const crlfUxml = uxml.replace(/\n/g, '\r\n');
+    const coordinator = createCoordinator(crlfUxml);
+    const start = crlfUxml.indexOf('Original');
+    coordinator.activate(entryPath, { start, end: start + 'Original'.length });
+
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+
+    const editor = screen.getByRole('textbox', { name: `${entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    const selection = view.state.selection.main;
+    expect(view.state.sliceDoc(selection.from, selection.to)).toBe('Original');
+    expect(selection.from).toBe(normalizeForEditor(crlfUxml).indexOf('Original'));
+  });
+
+  it('does not map a diagnostic boundary that splits a CRLF separator', () => {
+    const crlfUxml = uxml.replace(/\n/g, '\r\n');
+    const coordinator = createCoordinator(crlfUxml);
+    const splitBoundary = crlfUxml.indexOf('\r\n') + 1;
+    coordinator.activate(entryPath, { start: splitBoundary, end: splitBoundary });
+
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+
+    const editor = screen.getByRole('textbox', { name: `${entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    expect(view.state.selection.main).toMatchObject({ anchor: 0, head: 0 });
+  });
 });
 
 function createCoordinator(entrySource = uxml, sheetSource = uss): SourceEditCoordinator {
@@ -153,4 +237,8 @@ function diagnostic(path: string, start: number, end: number, message: string): 
     message,
     source: { path, start, end },
   };
+}
+
+function normalizeForEditor(source: string): string {
+  return source.replace(/\r\n?/g, '\n');
 }

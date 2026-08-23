@@ -10,7 +10,11 @@ import {
 } from '../../core/store/EditorLayoutStorage';
 import type { EditorPanel, EditorSnapshot, EditorStore } from '../../core/store/EditorStore';
 import type { CommandRegistry } from '../../core/store/CommandRegistry';
-import { SourceEditCoordinator, type SourceEditSnapshot } from '../../core/documents/SourceEditCoordinator';
+import {
+  SourceEditCoordinator,
+  type SourceEditScheduler,
+  type SourceEditSnapshot,
+} from '../../core/documents/SourceEditCoordinator';
 import { PreviewCanvas } from '../canvas/PreviewCanvas';
 import { DiagnosticsPanel } from '../diagnostics/DiagnosticsPanel';
 import { HierarchyPanel } from '../hierarchy/HierarchyPanel';
@@ -34,6 +38,7 @@ export interface WorkbenchProps {
   readonly registry?: CommandRegistry;
   readonly workflow?: FileWorkflowPort;
   readonly ui?: WorkspaceUiController;
+  readonly sourceEditScheduler?: SourceEditScheduler;
 }
 
 type WorkbenchStyle = CSSProperties & {
@@ -47,7 +52,7 @@ type WorkbenchStyle = CSSProperties & {
 const PANELS: readonly EditorPanel[] = Object.freeze(['hierarchy', 'inspector', 'diagnostics', 'source']);
 type BottomView = 'diagnostics' | 'source';
 
-export function Workbench({ store, registry, workflow, ui }: WorkbenchProps) {
+export function Workbench({ store, registry, workflow, ui, sourceEditScheduler }: WorkbenchProps) {
   const workbench = useRef<HTMLDivElement>(null);
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const uiSnapshot = useSyncExternalStore(
@@ -57,10 +62,11 @@ export function Workbench({ store, registry, workflow, ui }: WorkbenchProps) {
   );
   const [bottomView, setBottomView] = useState<BottomView>('diagnostics');
   const coordinator = useMemo(() => snapshot.session === null ? null : new SourceEditCoordinator(snapshot.session, {
+    scheduler: sourceEditScheduler,
     onAccepted: () => {
       if (store.getSnapshot().session === snapshot.session) store.dispatch({ type: 'session/sync' });
     },
-  }), [snapshot.session, store]);
+  }), [snapshot.session, sourceEditScheduler, store]);
   const sourceSnapshot = useSyncExternalStore(
     coordinator?.subscribe ?? nullSourceSubscribe,
     coordinator?.getSnapshot ?? nullSourceSnapshot,

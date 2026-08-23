@@ -105,7 +105,7 @@ export function SourcePanel({ coordinator, diagnostics }: SourcePanelProps) {
     const draft = snapshot.drafts.get(snapshot.activePath) ?? '';
     const editorDraft = normalizeEditorLineEndings(draft);
     const current = view.state.doc.toString();
-    const span = spanForActiveFile(snapshot.activeSpan, snapshot.activePath, draft.length);
+    const span = spanForActiveFile(snapshot.activeSpan, snapshot.activePath, draft);
     const effects = span === null ? undefined : EditorView.scrollIntoView(span.start, { y: 'center' });
     if (current === editorDraft && span === null) return;
     synchronizingRef.current = true;
@@ -204,8 +204,11 @@ function navigableDiagnostics(
   });
 }
 
-function spanForActiveFile(span: EditorSourceSpan | null, path: string, length: number): EditorSourceSpan | null {
-  return span !== null && span.path === path && validSpan(span, length) ? span : null;
+function spanForActiveFile(span: EditorSourceSpan | null, path: string, source: string): EditorSourceSpan | null {
+  if (span === null || span.path !== path || !validSpan(span, source.length)) return null;
+  const start = sourceOffsetToEditorOffset(source, span.start);
+  const end = sourceOffsetToEditorOffset(source, span.end);
+  return start === null || end === null ? null : { path, start, end };
 }
 
 function validSpan(span: Readonly<{ start: number; end: number }>, length: number): boolean {
@@ -226,11 +229,15 @@ interface EditorTextChange {
 }
 
 function applyEditorChanges(source: string, changes: readonly EditorTextChange[]): string {
-  const mapped = changes.map((change) => ({
-    from: editorOffsetToSourceOffset(source, change.from),
-    to: editorOffsetToSourceOffset(source, change.to),
-    insert: change.insert,
-  }));
+  const mapped = changes.map((change) => {
+    const from = editorOffsetToSourceOffset(source, change.from);
+    const to = editorOffsetToSourceOffset(source, change.to);
+    return {
+      from,
+      to,
+      insert: change.insert.replace(/\n/g, localNewline(source, from)),
+    };
+  });
   let result = source;
   for (let index = mapped.length - 1; index >= 0; index -= 1) {
     const change = mapped[index]!;
@@ -248,6 +255,34 @@ function editorOffsetToSourceOffset(source: string, target: number): number {
   }
   if (editorOffset !== target) throw new RangeError(`Editor offset is outside the source: ${target}`);
   return sourceOffset;
+}
+
+function sourceOffsetToEditorOffset(source: string, target: number): number | null {
+  if (!Number.isInteger(target) || target < 0 || target > source.length) return null;
+  let sourceOffset = 0;
+  let editorOffset = 0;
+  while (sourceOffset < target) {
+    if (source[sourceOffset] === '\r' && source[sourceOffset + 1] === '\n') {
+      if (target === sourceOffset + 1) return null;
+      sourceOffset += 2;
+    } else {
+      sourceOffset += 1;
+    }
+    editorOffset += 1;
+  }
+  return sourceOffset === target ? editorOffset : null;
+}
+
+function localNewline(source: string, offset: number): '\r\n' | '\r' | '\n' {
+  for (let index = offset - 1; index >= 0; index -= 1) {
+    if (source[index] === '\n') return source[index - 1] === '\r' ? '\r\n' : '\n';
+    if (source[index] === '\r') return '\r';
+  }
+  for (let index = offset; index < source.length; index += 1) {
+    if (source[index] === '\r') return source[index + 1] === '\n' ? '\r\n' : '\r';
+    if (source[index] === '\n') return '\n';
+  }
+  return '\n';
 }
 
 function normalizeEditorLineEndings(source: string): string {

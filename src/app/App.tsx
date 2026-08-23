@@ -20,6 +20,7 @@ import {
 import { EditorStore } from '../core/store/EditorStore';
 import { CommandRegistry, type EditorCommandId } from '../core/store/CommandRegistry';
 import type { Disposable } from '../core/host/HostPort';
+import type { SourceEditScheduler } from '../core/documents/SourceEditCoordinator';
 import { FileWorkflow, type FileWorkflowPort } from '../features/workspace/FileWorkflow';
 import { Workbench } from '../features/workspace/Workbench';
 import { WorkspaceUiController } from '../features/workspace/WorkspaceUiController';
@@ -30,6 +31,7 @@ export interface AppProps {
   readonly store: EditorStore;
   readonly desktop?: AppDesktopPorts;
   readonly task16FileLifecycle?: Task16FileLifecyclePort;
+  readonly sourceEditScheduler?: SourceEditScheduler;
 }
 
 export interface AppDesktopPorts {
@@ -75,7 +77,7 @@ export class DesktopWorkflowDisableError extends Error {
   }
 }
 
-export function App({ store, desktop, task16FileLifecycle }: AppProps) {
+export function App({ store, desktop, task16FileLifecycle, sourceEditScheduler }: AppProps) {
   const host = store.getSnapshot().host;
   const ownedFileWorkflow = useMemo(
     () => host === null || task16FileLifecycle !== undefined ? null : new FileWorkflow(store, host),
@@ -225,6 +227,7 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
         registry={commandRegistry ?? undefined}
         workflow={fileWorkflow ?? undefined}
         ui={commandRegistry === null ? undefined : workspaceUi}
+        sourceEditScheduler={sourceEditScheduler}
       />
     </main>
   );

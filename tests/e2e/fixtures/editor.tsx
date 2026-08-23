@@ -1,6 +1,10 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { App } from '../../../src/app/App';
 import { createRuntimeEditorStore } from '../../../src/app/createRuntimeEditorStore';
+import type {
+  SourceEditScheduledTask,
+  SourceEditScheduler,
+} from '../../../src/core/documents/SourceEditCoordinator';
 import {
   projectId,
   projectPath,
@@ -57,12 +61,22 @@ interface RuntimeState {
   readonly activeRuntime: number;
   readonly completedTeardowns: readonly number[];
   readonly lateHostOperations: number;
+  readonly sourceSchedulers: readonly SourceSchedulerSnapshot[];
+}
+
+interface SourceSchedulerSnapshot {
+  readonly runtime: number;
+  readonly scheduled: number;
+  readonly cancelled: number;
+  readonly executed: number;
+  readonly pending: number;
 }
 
 export interface EditorFixtureBridge {
   reset(source?: Exclude<EditorFixtureProjectKey, 'blank' | 'collision'>): Promise<void>;
   restart(): Promise<void>;
   settled(): Promise<void>;
+  drainSourceCallbacks(): Promise<void>;
   selectProject(key: EditorFixtureProjectKey): void;
   queueConfirmation(confirmed: boolean): void;
   injectReplacementFailure(message: string): void;
@@ -238,6 +252,47 @@ class SelectableMemoryHost extends MemoryHost {
   }
 }
 
+class DeterministicSourceEditScheduler implements SourceEditScheduler {
+  private readonly tasks: Array<{ active: boolean; readonly callback: () => void }> = [];
+  private scheduled = 0;
+  private cancelled = 0;
+  private executed = 0;
+
+  constructor(private readonly runtime: number) {}
+
+  schedule(_delayMs: number, callback: () => void): SourceEditScheduledTask {
+    const task = { active: true, callback };
+    this.tasks.push(task);
+    this.scheduled += 1;
+    return Object.freeze({
+      cancel: () => {
+        if (!task.active) return;
+        task.active = false;
+        this.cancelled += 1;
+      },
+    });
+  }
+
+  drain(): void {
+    for (const task of this.tasks) {
+      if (!task.active) continue;
+      task.active = false;
+      this.executed += 1;
+      task.callback();
+    }
+  }
+
+  snapshot(): SourceSchedulerSnapshot {
+    return Object.freeze({
+      runtime: this.runtime,
+      scheduled: this.scheduled,
+      cancelled: this.cancelled,
+      executed: this.executed,
+      pending: this.tasks.filter((task) => task.active).length,
+    });
+  }
+}
+
 class ProductionEditorHarness {
   private reactRoot: Root | null = null;
   private host: SelectableMemoryHost | null = null;
@@ -247,6 +302,7 @@ class ProductionEditorHarness {
   private activeRuntime = 0;
   private readonly completedTeardowns: number[] = [];
   private readonly retiredHosts: SelectableMemoryHost[] = [];
+  private readonly sourceSchedulers: DeterministicSourceEditScheduler[] = [];
 
   constructor(private readonly element: HTMLElement) {}
 
@@ -271,6 +327,10 @@ class ProductionEditorHarness {
     reset: (source) => this.reset(source),
     restart: () => this.restart(),
     settled: () => this.requireHost().settled(),
+    drainSourceCallbacks: async () => {
+      for (const scheduler of this.sourceSchedulers) scheduler.drain();
+      await this.requireHost().settled();
+    },
     selectProject: (key) => this.requireHost().selectProject(key),
     queueConfirmation: (confirmed) => this.requireHost().queueConfirmation(confirmed),
     injectReplacementFailure: (message) => this.requireHost().injectFailure(replacementFailure(message)),
@@ -301,6 +361,7 @@ class ProductionEditorHarness {
       activeRuntime: this.activeRuntime,
       completedTeardowns: Object.freeze([...this.completedTeardowns]),
       lateHostOperations: this.retiredHosts.reduce((total, host) => total + host.lateOperations, 0),
+      sourceSchedulers: Object.freeze(this.sourceSchedulers.map((scheduler) => scheduler.snapshot())),
     }),
   });
 
@@ -322,8 +383,12 @@ class ProductionEditorHarness {
     this.workflow = workflow;
     this.runtimeSequence += 1;
     this.activeRuntime = this.runtimeSequence;
+    const sourceEditScheduler = new DeterministicSourceEditScheduler(this.activeRuntime);
+    this.sourceSchedulers.push(sourceEditScheduler);
     this.reactRoot = createRoot(this.element);
-    this.reactRoot.render(<App store={store} task16FileLifecycle={workflow} />);
+    this.reactRoot.render(
+      <App store={store} task16FileLifecycle={workflow} sourceEditScheduler={sourceEditScheduler} />,
+    );
     await host.settled();
   }
 
