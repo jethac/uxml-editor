@@ -2,12 +2,13 @@
 
 ## Status
 
-PASS (fix round 3/5)
+PASS (fix round 4/5)
 
 - Original task base: `12c49ad5b985becbfba2a2b7e66c095b5c56d53a`
 - Fix-round base: `221758d5f71c60a8e6d29e0eb95070f6c4378ea2`
 - Fix-round 2 base: `a714a06291b3bb99b96490b5e11c1edf3e1de8bc`
 - Fix-round 3 base: `7672cd0756c5cd9a42299fbba11ce118c9a11c5e`
+- Fix-round 4 base: `ff081e3e8c0db34a10c588c80191d2ed533f0bd3`
 - Runtime target: Node `v24.15.0`
 
 ## Scope And Architecture
@@ -357,9 +358,11 @@ worktree.
 ### Scope And Test-First Outcome
 
 - Added one source-history assertion helper used at source edit, Undo, and Redo.
-  It proves the complete static source, nine-row hierarchy shape and levels,
-  selected `menu-title` and `play-button`, explicit unselected unrelated rows,
-  two-element inspector context, selected canvas overlay, and dirty state.
+  It proves the complete static source, nine-row hierarchy count, selected
+  `menu-title` and `play-button`, two-element inspector context, selected canvas
+  overlay, and dirty state. Its round-3 level oracle named only eight rows, and
+  its unrelated-row selection assertions omitted the UXML root, `Style`, and
+  wrapper; round 4 completes those assertions.
 - After namespace save/close/reopen, the E2E now compares the complete reopened
   host snapshot with the saved snapshot, reasserts exact UXML and USS text plus
   revisions, and opens `Unsupported.uss` through the visible Source file picker
@@ -415,6 +418,78 @@ output shown.
 
 ```text
 git diff --check 7672cd0756c5cd9a42299fbba11ce118c9a11c5e..HEAD
+(no output)
+
+git status --short
+(no output)
+
+Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match [regex]::Escape('B:\usagi_dev\uxml-editor\.worktrees\uxml-editor') -and $_.CommandLine -match 'playwright|vite|vitest' } | Select-Object ProcessId, Name, CommandLine | Format-List
+(no output)
+```
+
+This confirms the requested base range is whitespace-clean, the worktree is
+empty, and zero matching Playwright, Vite, or Vitest processes remain.
+
+## Fix Round 4 Evidence
+
+### Scope And Test-First Outcome
+
+- Completed the shared source-history hierarchy oracle with all nine static
+  rows and levels: UXML root at level 1; `Style` and menu root at level 2;
+  title, `ScrollView`, and unnamed `Button` at level 3; wrapper at level 4; and
+  quit and play at level 5.
+- At source edit, Undo, and Redo, the helper now explicitly asserts that only
+  title and play are selected. It explicitly asserts false selection for the
+  UXML root, `Style`, menu root, `ScrollView`, wrapper, quit, and unnamed
+  `Button`.
+- The complete source, inspector, selected canvas overlay, and dirty-state
+  assertions remain in the shared helper.
+- The focused structural E2E passed on its first run, so the added assertions
+  exposed no production defect. No RED or production change was required.
+
+### Focused And Full Verification
+
+Runtime: Node `v24.15.0`, npm `11.12.1`.
+
+```text
+npx playwright test tests/e2e/editor.spec.ts --grep "authors structure through palette"
+1 passed (25.4s)
+
+npx playwright test tests/e2e/editor.spec.ts
+12 passed (53.1s)
+
+npm test
+Test Files  46 passed (46)
+Tests       709 passed (709)
+Duration    65.11s
+
+npm run test:e2e
+28 passed (1.2m)
+
+npm run build
+tsc --noEmit: passed
+vite build: passed, 1917 modules transformed
+```
+
+### Round 4 Files And Audit
+
+```text
+.superpowers/sdd/2026-08-15-uxml-editor/task-17a2b1-report.md
+tests/e2e/editor.spec.ts
+```
+
+- No production, bridge, layout, CSS, visual, fixture, dependency, packaging,
+  license, or release file changed. No arbitrary sleep was added.
+- The pre-existing production chunk-size warning remains the only measured
+  limitation.
+
+### Post-Commit Integrity Commands
+
+Executed after the round-4 commit; each command exited `0` with the literal
+empty output shown.
+
+```text
+git diff --check ff081e3e8c0db34a10c588c80191d2ed533f0bd3..HEAD
 (no output)
 
 git status --short

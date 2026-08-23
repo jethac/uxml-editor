@@ -817,6 +817,7 @@ async function expectStructuralSelection(page: Page, row: Locator, inspectorName
 
 async function expectSourceHistoryState(page: Page, hierarchy: Locator, expectedSource: string): Promise<void> {
   const uxmlRoot = hierarchy.getByRole('treeitem', { name: 'ui:UXML' });
+  const style = hierarchy.getByRole('treeitem', { name: 'Style' });
   const menuRoot = hierarchy.getByRole('treeitem', { name: 'menu-root' });
   const title = hierarchy.getByRole('treeitem', { name: 'menu-title' });
   const scrollView = hierarchy.getByRole('treeitem', { name: 'ui:ScrollView' });
@@ -828,6 +829,7 @@ async function expectSourceHistoryState(page: Page, hierarchy: Locator, expected
   await expectMountedVisibleSource(page, MENU_UXML, expectedSource);
   await expect(hierarchy.getByRole('treeitem')).toHaveCount(9);
   await expect(uxmlRoot).toHaveAttribute('aria-level', '1');
+  await expect(style).toHaveAttribute('aria-level', '2');
   await expect(menuRoot).toHaveAttribute('aria-level', '2');
   await expect(title).toHaveAttribute('aria-level', '3');
   await expect(scrollView).toHaveAttribute('aria-level', '3');
@@ -837,8 +839,11 @@ async function expectSourceHistoryState(page: Page, hierarchy: Locator, expected
   await expect(unnamedButton).toHaveAttribute('aria-level', '3');
   await expect(title).toHaveAttribute('aria-selected', 'true');
   await expect(play).toHaveAttribute('aria-selected', 'true');
+  await expect(uxmlRoot).toHaveAttribute('aria-selected', 'false');
+  await expect(style).toHaveAttribute('aria-selected', 'false');
   await expect(menuRoot).toHaveAttribute('aria-selected', 'false');
   await expect(scrollView).toHaveAttribute('aria-selected', 'false');
+  await expect(wrapper).toHaveAttribute('aria-selected', 'false');
   await expect(quit).toHaveAttribute('aria-selected', 'false');
   await expect(unnamedButton).toHaveAttribute('aria-selected', 'false');
   await expect(page.getByLabel('Inspector selection context')).toContainText('2 elements');
