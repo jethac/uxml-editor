@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BrowserHost, type BrowserDirectoryHandle, type BrowserProjectIdentityStore } from './BrowserHost';
 import { projectId, projectPath, type ProjectPath } from './HostPort';
 import { MemoryHost } from './MemoryHost';
@@ -56,20 +56,52 @@ describe('BrowserHost', () => {
     await expect(host.watch(root, () => undefined)).rejects.toMatchObject({ code: 'unsupported' });
   });
 
-  it('creates a missing nested file once through granted browser handles', async () => {
+  it('rejects FSA createText as unsupported without touching an existing target or its handles', async () => {
+    const existing = new FakeFileHandle('Main.uxml', 'existing bytes');
+    const assets = new FakeDirectoryHandle('Assets', { 'Main.uxml': existing });
+    const directory = new FakeDirectoryHandle('Chosen Project', { Assets: assets });
+    const host = new BrowserHost({
+      scope: { showDirectoryPicker: async () => directory },
+      identityStore: new FakeProjectIdentityStore(),
+    });
+    const root = (await host.chooseProject())!;
+    const rootDirectoryLookup = vi.spyOn(directory, 'getDirectoryHandle');
+    const nestedFileLookup = vi.spyOn(assets, 'getFileHandle');
+
+    await expect(host.createText(projectPath(root, 'Assets/Main.uxml'), 'replacement'))
+      .rejects.toMatchObject({ code: 'unsupported' });
+
+    expect((await existing.getFile()).text()).resolves.toBe('existing bytes');
+    expect(rootDirectoryLookup).not.toHaveBeenCalled();
+    expect(nestedFileLookup).not.toHaveBeenCalled();
+  });
+
+  it('rejects FSA createText without creating missing directories or files', async () => {
     const directory = new FakeDirectoryHandle('Chosen Project', {});
     const host = new BrowserHost({
       scope: { showDirectoryPicker: async () => directory },
       identityStore: new FakeProjectIdentityStore(),
     });
     const root = (await host.chooseProject())!;
+    const directoryLookup = vi.spyOn(directory, 'getDirectoryHandle');
+    const fileLookup = vi.spyOn(directory, 'getFileHandle');
+
+    await expect(host.createText(projectPath(root, 'Assets/UI/Main.uxml'), '<UXML />\r\n'))
+      .rejects.toMatchObject({ code: 'unsupported' });
+
+    expect(directoryLookup).not.toHaveBeenCalled();
+    expect(fileLookup).not.toHaveBeenCalled();
+  });
+
+  it('keeps deterministic createText in the demo-memory fallback', async () => {
+    const fallback = new MemoryHost({ projects: [{ id: 'demo', name: 'Demo', files: {} }] });
+    const host = new BrowserHost({ scope: {}, fallback });
+    const root = (await host.chooseProject())!;
     const path = projectPath(root, 'Assets/UI/Main.uxml');
 
     const revision = await host.createText(path, '<UXML />\r\n');
 
     expect(await host.readText(path)).toMatchObject({ text: '<UXML />\r\n', revision });
-    await expect(host.createText(path, 'overwrite')).rejects.toMatchObject({ code: 'stale-revision' });
-    expect((await host.readText(path)).text).toBe('<UXML />\r\n');
   });
 
   it('enumerates files recursively through the granted directory handle in deterministic order', async () => {

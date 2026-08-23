@@ -18,9 +18,10 @@ import { PalettePanel } from '../palette/PalettePanel';
 import { InspectorPanel } from '../inspector/InspectorPanel';
 import { SourcePanel } from '../source/SourcePanel';
 import { CommandBar } from './CommandBar';
+import { CommandErrorDialog } from './CommandErrorDialog';
 import { CommandPalette } from './CommandPalette';
 import { ExternalChangeDialog } from './ExternalChangeDialog';
-import type { FileWorkflow } from './FileWorkflow';
+import type { FileWorkflowPort } from './FileWorkflow';
 import { KeyboardShortcuts } from './KeyboardShortcuts';
 import { PaneResizer } from './PaneResizer';
 import type { WorkspaceUiController, WorkspaceUiSnapshot } from './WorkspaceUiController';
@@ -31,7 +32,7 @@ import '../../styles/inspector.css';
 export interface WorkbenchProps {
   readonly store: EditorStore;
   readonly registry?: CommandRegistry;
-  readonly workflow?: FileWorkflow;
+  readonly workflow?: FileWorkflowPort;
   readonly ui?: WorkspaceUiController;
 }
 
@@ -145,11 +146,18 @@ export function Workbench({ store, registry, workflow, ui }: WorkbenchProps) {
         <CommandPalette registry={registry} ui={ui} />
       )}
       {workflow !== undefined && <ExternalChangeDialog workflow={workflow} />}
+      {ui !== undefined && uiSnapshot.commandError !== null && (
+        <CommandErrorDialog error={uiSnapshot.commandError} ui={ui} />
+      )}
     </div>
   );
 }
 
-const CLOSED_UI_SNAPSHOT: WorkspaceUiSnapshot = Object.freeze({ commandPaletteOpen: false, searchRequest: 0 });
+const CLOSED_UI_SNAPSHOT: WorkspaceUiSnapshot = Object.freeze({
+  commandPaletteOpen: false,
+  searchRequest: 0,
+  commandError: null,
+});
 const nullUiSubscribe = (_listener: () => void) => () => undefined;
 const nullUiSnapshot = () => CLOSED_UI_SNAPSHOT;
 

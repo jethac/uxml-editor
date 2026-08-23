@@ -3,27 +3,30 @@ import type { CommandRegistry, EditorCommandState } from '../../core/store/Comma
 
 export interface KeyboardShortcutsProps {
   readonly registry: CommandRegistry;
-  readonly onError?: (error: unknown) => void;
 }
 
-export function KeyboardShortcuts({ registry, onError }: KeyboardShortcutsProps) {
+export function KeyboardShortcuts({ registry }: KeyboardShortcutsProps) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || editableTarget(event.target)) return;
+      if (event.defaultPrevented) return;
       const command = registry.getSnapshot().commands.find((candidate) => (
         candidate.enabled && matchesShortcut(candidate, event)
       ));
-      if (command === undefined) return;
+      if (command === undefined || (editableTarget(event.target) && conflictsWithEditableTarget(command.id))) {
+        return;
+      }
       event.preventDefault();
-      void registry.execute(command.id).catch((error) => {
-        try { onError?.(error); } catch { /* Shortcut errors stay contained at the UI boundary. */ }
-      });
+      void registry.execute(command.id);
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [onError, registry]);
+  }, [registry]);
 
   return null;
+}
+
+function conflictsWithEditableTarget(commandId: EditorCommandState['id']): boolean {
+  return commandId.startsWith('edit.') || commandId === 'view.search';
 }
 
 function editableTarget(target: EventTarget | null): boolean {
@@ -42,9 +45,10 @@ function matchesShortcut(command: EditorCommandState, event: KeyboardEvent): boo
   const parts = shortcut.split('+');
   const required = new Set(parts.slice(0, -1));
   const expectedKey = parts.at(-1) === '' ? '+' : parts.at(-1)!;
+  const requiresPhysicalShift = expectedKey === '+';
   return event.ctrlKey === required.has('Ctrl')
     && event.metaKey === required.has('Meta')
-    && event.shiftKey === required.has('Shift')
+    && event.shiftKey === (required.has('Shift') || requiresPhysicalShift)
     && event.altKey === required.has('Alt')
     && normalizeKey(event.key) === normalizeKey(expectedKey);
 }

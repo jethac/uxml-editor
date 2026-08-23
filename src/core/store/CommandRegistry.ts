@@ -1,36 +1,34 @@
 import type { RecentProject } from '../host/HostPort';
 import type { EditorStore } from './EditorStore';
+import commandMetadataSource from './CommandDefinitions.json';
 
-export const EDITOR_COMMAND_IDS = Object.freeze([
-  'file.new-project',
-  'file.open-project',
-  'file.open-recent',
-  'file.save',
-  'file.save-as',
-  'file.save-all',
-  'file.close-project',
-  'file.reopen-project',
-  'file.reload-project',
-  'edit.undo',
-  'edit.redo',
-  'edit.cut',
-  'edit.copy',
-  'edit.paste',
-  'edit.duplicate',
-  'edit.delete',
-  'view.zoom-in',
-  'view.zoom-out',
-  'view.zoom-reset',
-  'view.search',
-  'view.diagnostics',
-  'view.pane-hierarchy',
-  'view.pane-inspector',
-  'view.pane-diagnostics',
-  'view.pane-source',
-  'workspace.command-palette',
-] as const);
-
-export type EditorCommandId = typeof EDITOR_COMMAND_IDS[number];
+export type EditorCommandId =
+  | 'file.new-project'
+  | 'file.open-project'
+  | 'file.open-recent'
+  | 'file.save'
+  | 'file.save-as'
+  | 'file.save-all'
+  | 'file.close-project'
+  | 'file.reopen-project'
+  | 'file.reload-project'
+  | 'edit.undo'
+  | 'edit.redo'
+  | 'edit.cut'
+  | 'edit.copy'
+  | 'edit.paste'
+  | 'edit.duplicate'
+  | 'edit.delete'
+  | 'view.zoom-in'
+  | 'view.zoom-out'
+  | 'view.zoom-reset'
+  | 'view.search'
+  | 'view.diagnostics'
+  | 'view.pane-hierarchy'
+  | 'view.pane-inspector'
+  | 'view.pane-diagnostics'
+  | 'view.pane-source'
+  | 'workspace.command-palette';
 export type CommandCategory = 'File' | 'Edit' | 'View';
 export type CommandPlatform = 'windows' | 'mac';
 
@@ -40,6 +38,19 @@ export interface EditorFileCommandSnapshot {
   readonly recentProjects: readonly RecentProject[];
   readonly canReopen: boolean;
   readonly canReload: boolean;
+  readonly capabilities: EditorFileCommandCapabilities;
+}
+
+export interface EditorFileCommandCapabilities {
+  readonly newProject: boolean;
+  readonly openProject: boolean;
+  readonly openRecent: boolean;
+  readonly save: boolean;
+  readonly saveAs: boolean;
+  readonly saveAll: boolean;
+  readonly closeProject: boolean;
+  readonly reopenProject: boolean;
+  readonly reloadProject: boolean;
 }
 
 export interface EditorFileCommandPort {
@@ -79,7 +90,12 @@ export interface CommandRegistryOptions {
   readonly file: EditorFileCommandPort;
   readonly editing?: EditorEditingCommandPort;
   readonly ui?: EditorUiCommandPort;
+  readonly errors: CommandErrorPort;
   readonly platform?: CommandPlatform;
+}
+
+export interface CommandErrorPort {
+  report(command: EditorCommandState, error: unknown): void | Promise<void>;
 }
 
 export interface EditorCommandState {
@@ -94,17 +110,21 @@ export interface CommandRegistrySnapshot {
   readonly commands: readonly EditorCommandState[];
 }
 
-export type CommandExecutionResult = Readonly<{ readonly status: 'executed' | 'unavailable' }>;
+export type CommandExecutionResult =
+  | Readonly<{ readonly status: 'executed' | 'unavailable' }>
+  | Readonly<{ readonly status: 'failed'; readonly error: unknown }>;
 
 interface CommandDefinition {
   readonly id: EditorCommandId;
   readonly label: string;
-  readonly category: CommandCategory;
-  readonly windowsShortcut?: string;
-  readonly macShortcut?: string;
+  readonly section: CommandCategory;
+  readonly windowsAccelerator: string | null;
+  readonly macAccelerator: string | null;
   readonly enabled: (options: CommandRegistryOptions) => boolean;
   readonly execute: (options: CommandRegistryOptions, argument?: unknown) => void | Promise<void>;
 }
+
+type CommandBehavior = Pick<CommandDefinition, 'enabled' | 'execute'>;
 
 export class CommandRegistry {
   private readonly options: CommandRegistryOptions;
@@ -144,8 +164,17 @@ export class CommandRegistry {
     if (definition === undefined || !definition.enabled(this.options)) {
       return Object.freeze({ status: 'unavailable' });
     }
-    await definition.execute(this.options, argument);
-    return Object.freeze({ status: 'executed' });
+    try {
+      await definition.execute(this.options, argument);
+      return Object.freeze({ status: 'executed' });
+    } catch (error) {
+      try {
+        await this.options.errors.report(commandState(definition, this.platform, true), error);
+      } catch {
+        // Execution callers stay contained even if the visible error boundary itself fails.
+      }
+      return Object.freeze({ status: 'failed', error });
+    }
   }
 
   dispose(): void {
@@ -171,11 +200,7 @@ export class CommandRegistry {
   private createSnapshot(): CommandRegistrySnapshot {
     return Object.freeze({
       commands: Object.freeze(DEFINITIONS.map((definition) => Object.freeze({
-        id: definition.id,
-        label: definition.label,
-        category: definition.category,
-        shortcut: shortcutFor(definition, this.platform),
-        enabled: definition.enabled(this.options),
+        ...commandState(definition, this.platform, definition.enabled(this.options)),
       }))),
     });
   }
@@ -196,144 +221,126 @@ export class CommandRegistry {
   }
 }
 
-const DEFINITIONS: readonly CommandDefinition[] = Object.freeze([
-  fileCommand('file.new-project', 'New Project', 'Ctrl+N', 'Meta+N', ({ file }) => file.newProject()),
-  fileCommand('file.open-project', 'Open Project', 'Ctrl+O', 'Meta+O', ({ file }) => file.openProject()),
-  {
-    ...fileCommand('file.open-recent', 'Open Recent Project', undefined, undefined, ({ file }, argument) => (
-      file.openRecent(argument as RecentProject | undefined)
-    )),
-    enabled: ({ file }) => file.getSnapshot().recentProjects.length > 0,
-  },
-  sessionFileCommand('file.save', 'Save', 'Ctrl+S', 'Meta+S', ({ file }) => file.save()),
-  sessionFileCommand('file.save-as', 'Save As', 'Ctrl+Shift+S', 'Meta+Shift+S', ({ file }) => file.saveAs()),
-  sessionFileCommand('file.save-all', 'Save All', 'Ctrl+Alt+S', 'Meta+Alt+S', ({ file }) => file.saveAll()),
-  sessionFileCommand('file.close-project', 'Close Project', 'Ctrl+W', 'Meta+W', ({ file }) => file.closeProject()),
-  {
-    ...fileCommand('file.reopen-project', 'Reopen Project', undefined, undefined, ({ file }) => file.reopenProject()),
-    enabled: ({ file }) => file.getSnapshot().canReopen,
-  },
-  {
-    ...fileCommand('file.reload-project', 'Reload Project', 'Ctrl+Shift+R', 'Meta+Shift+R', ({ file }) => file.reloadProject()),
-    enabled: ({ file }) => file.getSnapshot().canReload,
-  },
-  storeCommand('edit.undo', 'Undo', 'Edit', 'Ctrl+Z', 'Meta+Z', 'undo', { type: 'command/undo' }),
-  storeCommand('edit.redo', 'Redo', 'Edit', 'Ctrl+Y', 'Meta+Shift+Z', 'redo', { type: 'command/redo' }),
-  editingCommand('edit.cut', 'Cut', 'Ctrl+X', 'Meta+X', 'canCut', 'cut'),
-  editingCommand('edit.copy', 'Copy', 'Ctrl+C', 'Meta+C', 'canCopy', 'copy'),
-  editingCommand('edit.paste', 'Paste', 'Ctrl+V', 'Meta+V', 'canPaste', 'paste'),
-  editingCommand('edit.duplicate', 'Duplicate', 'Ctrl+D', 'Meta+D', 'canDuplicate', 'duplicate'),
-  editingCommand('edit.delete', 'Delete', 'Delete', 'Backspace', 'canDelete', 'delete'),
-  storeCommand('view.zoom-in', 'Zoom In', 'View', 'Ctrl++', 'Meta++', 'zoomIn', { type: 'command/zoom-in' }),
-  storeCommand('view.zoom-out', 'Zoom Out', 'View', 'Ctrl+-', 'Meta+-', 'zoomOut', { type: 'command/zoom-out' }),
-  viewCommand('view.zoom-reset', 'Actual Size', 'Ctrl+0', 'Meta+0', ({ store }) => store.dispatch({ type: 'zoom/set', zoom: 1 })),
-  {
-    ...viewCommand('view.search', 'Search', 'Ctrl+F', 'Meta+F', ({ ui }) => ui?.openSearch()),
+const BEHAVIORS = {
+  'file.new-project': fileCommand('newProject', ({ file }) => file.newProject()),
+  'file.open-project': fileCommand('openProject', ({ file }) => file.openProject()),
+  'file.open-recent': fileCommand('openRecent', ({ file }, argument) => (
+    file.openRecent(argument as RecentProject | undefined)
+  )),
+  'file.save': fileCommand('save', ({ file }) => file.save()),
+  'file.save-as': fileCommand('saveAs', ({ file }) => file.saveAs()),
+  'file.save-all': fileCommand('saveAll', ({ file }) => file.saveAll()),
+  'file.close-project': fileCommand('closeProject', ({ file }) => file.closeProject()),
+  'file.reopen-project': fileCommand('reopenProject', ({ file }) => file.reopenProject()),
+  'file.reload-project': fileCommand('reloadProject', ({ file }) => file.reloadProject()),
+  'edit.undo': storeCommand('undo', { type: 'command/undo' }),
+  'edit.redo': storeCommand('redo', { type: 'command/redo' }),
+  'edit.cut': editingCommand('canCut', 'cut'),
+  'edit.copy': editingCommand('canCopy', 'copy'),
+  'edit.paste': editingCommand('canPaste', 'paste'),
+  'edit.duplicate': editingCommand('canDuplicate', 'duplicate'),
+  'edit.delete': editingCommand('canDelete', 'delete'),
+  'view.zoom-in': storeCommand('zoomIn', { type: 'command/zoom-in' }),
+  'view.zoom-out': storeCommand('zoomOut', { type: 'command/zoom-out' }),
+  'view.zoom-reset': viewCommand(({ store }) => store.dispatch({ type: 'zoom/set', zoom: 1 })),
+  'view.search': {
+    ...viewCommand(({ ui }) => ui?.openSearch()),
     enabled: ({ ui }) => ui !== undefined,
   },
-  viewCommand('view.diagnostics', 'Show Diagnostics', 'Ctrl+Shift+M', 'Meta+Shift+M', ({ store }) => store.dispatch({ type: 'panel/set', panel: 'diagnostics' })),
-  viewCommand('view.pane-hierarchy', 'Show Hierarchy', 'Ctrl+1', 'Meta+1', ({ store }) => store.dispatch({ type: 'panel/set', panel: 'hierarchy' })),
-  viewCommand('view.pane-inspector', 'Show Inspector', 'Ctrl+2', 'Meta+2', ({ store }) => store.dispatch({ type: 'panel/set', panel: 'inspector' })),
-  viewCommand('view.pane-diagnostics', 'Show Diagnostics', 'Ctrl+3', 'Meta+3', ({ store }) => store.dispatch({ type: 'panel/set', panel: 'diagnostics' })),
-  viewCommand('view.pane-source', 'Show Source', 'Ctrl+4', 'Meta+4', ({ store }) => store.dispatch({ type: 'panel/set', panel: 'source' })),
-  {
-    ...viewCommand('workspace.command-palette', 'Command Palette', 'Ctrl+Shift+P', 'Meta+Shift+P', ({ ui }) => ui?.openCommandPalette()),
+  'view.diagnostics': viewCommand(({ store }) => store.dispatch({ type: 'panel/set', panel: 'diagnostics' })),
+  'view.pane-hierarchy': viewCommand(({ store }) => store.dispatch({ type: 'panel/set', panel: 'hierarchy' })),
+  'view.pane-inspector': viewCommand(({ store }) => store.dispatch({ type: 'panel/set', panel: 'inspector' })),
+  'view.pane-diagnostics': viewCommand(({ store }) => store.dispatch({ type: 'panel/set', panel: 'diagnostics' })),
+  'view.pane-source': viewCommand(({ store }) => store.dispatch({ type: 'panel/set', panel: 'source' })),
+  'workspace.command-palette': {
+    ...viewCommand(({ ui }) => ui?.openCommandPalette()),
     enabled: ({ ui }) => ui !== undefined,
   },
-]);
+} satisfies Record<EditorCommandId, CommandBehavior>;
+
+const DEFINITIONS: readonly CommandDefinition[] = Object.freeze(commandMetadataSource.map((metadata) => {
+  const id = metadata.id as EditorCommandId;
+  const behavior = BEHAVIORS[id];
+  if (behavior === undefined || !isCommandCategory(metadata.section)) {
+    throw new Error(`Invalid shared command definition: ${metadata.id}`);
+  }
+  return Object.freeze({
+    id,
+    label: metadata.label,
+    section: metadata.section,
+    windowsAccelerator: metadata.windowsAccelerator,
+    macAccelerator: metadata.macAccelerator,
+    ...behavior,
+  });
+}));
+
+if (new Set(DEFINITIONS.map(({ id }) => id)).size !== Object.keys(BEHAVIORS).length) {
+  throw new Error('Shared command definitions must contain each editor command exactly once.');
+}
+
+export const EDITOR_COMMAND_IDS: readonly EditorCommandId[] = Object.freeze(
+  DEFINITIONS.map(({ id }) => id),
+);
 
 const DEFINITIONS_BY_ID = new Map(DEFINITIONS.map((definition) => [definition.id, definition]));
 
 function fileCommand(
-  id: EditorCommandId,
-  label: string,
-  windowsShortcut: string | undefined,
-  macShortcut: string | undefined,
+  capability: keyof EditorFileCommandCapabilities,
   execute: CommandDefinition['execute'],
-): CommandDefinition {
+): CommandBehavior {
   return Object.freeze({
-    id,
-    label,
-    category: 'File',
-    windowsShortcut,
-    macShortcut,
-    enabled: ({ store }: CommandRegistryOptions) => store.getSnapshot().host !== null,
+    enabled: ({ file }: CommandRegistryOptions) => file.getSnapshot().capabilities[capability],
     execute,
   });
 }
 
-function sessionFileCommand(
-  id: EditorCommandId,
-  label: string,
-  windowsShortcut: string,
-  macShortcut: string,
-  execute: CommandDefinition['execute'],
-): CommandDefinition {
-  return Object.freeze({
-    ...fileCommand(id, label, windowsShortcut, macShortcut, execute),
-    enabled: ({ store }: CommandRegistryOptions) => store.getSnapshot().session !== null,
-  });
-}
-
 function storeCommand(
-  id: EditorCommandId,
-  label: string,
-  category: CommandCategory,
-  windowsShortcut: string,
-  macShortcut: string,
   availability: 'undo' | 'redo' | 'zoomIn' | 'zoomOut',
   action: Parameters<EditorStore['dispatch']>[0],
-): CommandDefinition {
+): CommandBehavior {
   return Object.freeze({
-    id,
-    label,
-    category,
-    windowsShortcut,
-    macShortcut,
     enabled: ({ store }: CommandRegistryOptions) => store.getSnapshot().commands[availability],
     execute: ({ store }: CommandRegistryOptions) => store.dispatch(action),
   });
 }
 
 function editingCommand(
-  id: EditorCommandId,
-  label: string,
-  windowsShortcut: string,
-  macShortcut: string,
   availability: 'canCut' | 'canCopy' | 'canPaste' | 'canDuplicate' | 'canDelete',
   action: 'cut' | 'copy' | 'paste' | 'duplicate' | 'delete',
-): CommandDefinition {
+): CommandBehavior {
   return Object.freeze({
-    id,
-    label,
-    category: 'Edit',
-    windowsShortcut,
-    macShortcut,
     enabled: ({ editing }: CommandRegistryOptions) => editing?.[availability]() ?? false,
     execute: ({ editing }: CommandRegistryOptions) => editing?.[action](),
   });
 }
 
-function viewCommand(
-  id: EditorCommandId,
-  label: string,
-  windowsShortcut: string | undefined,
-  macShortcut: string | undefined,
-  execute: CommandDefinition['execute'],
-): CommandDefinition {
+function viewCommand(execute: CommandDefinition['execute']): CommandBehavior {
   return Object.freeze({
-    id,
-    label,
-    category: 'View',
-    windowsShortcut,
-    macShortcut,
     enabled: () => true,
     execute,
   });
 }
 
 function shortcutFor(definition: CommandDefinition, platform: CommandPlatform): string | null {
-  return (platform === 'mac' ? definition.macShortcut : definition.windowsShortcut) ?? null;
+  return platform === 'mac' ? definition.macAccelerator : definition.windowsAccelerator;
+}
+
+function commandState(
+  definition: CommandDefinition,
+  platform: CommandPlatform,
+  enabled: boolean,
+): EditorCommandState {
+  return Object.freeze({
+    id: definition.id,
+    label: definition.label,
+    category: definition.section,
+    shortcut: shortcutFor(definition, platform),
+    enabled,
+  });
+}
+
+function isCommandCategory(value: string): value is CommandCategory {
+  return value === 'File' || value === 'Edit' || value === 'View';
 }
 
 function runtimePlatform(): CommandPlatform {

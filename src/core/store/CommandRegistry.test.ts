@@ -4,6 +4,7 @@ import { MemoryHost } from '../host/MemoryHost';
 import { PersistenceTestAdapter } from '../persistence/persistenceTestSupport';
 import { CommandRegistry, EDITOR_COMMAND_IDS, type EditorFileCommandPort } from './CommandRegistry';
 import { EditorStore } from './EditorStore';
+import commandDefinitions from './CommandDefinitions.json';
 
 describe('CommandRegistry', () => {
   it('defines the complete stable editor command surface once', () => {
@@ -27,6 +28,27 @@ describe('CommandRegistry', () => {
     expect(mac.command('edit.delete').shortcut).toBe('Backspace');
   });
 
+  it('uses the shared declarative identity, label, section, and platform accelerator metadata', () => {
+    const windows = fixture('windows').registry;
+    const mac = fixture('mac').registry;
+
+    expect(windows.getSnapshot().commands.map((command) => ({
+      id: command.id,
+      label: command.label,
+      section: command.category,
+      accelerator: command.shortcut,
+    }))).toEqual(commandDefinitions.map((definition) => ({
+      id: definition.id,
+      label: definition.label,
+      section: definition.section,
+      accelerator: definition.windowsAccelerator,
+    })));
+    expect(mac.getSnapshot().commands.map((command) => command.shortcut))
+      .toEqual(commandDefinitions.map((definition) => definition.macAccelerator));
+    expect(commandDefinitions.find(({ id }) => id === 'file.save-as')?.windowsAccelerator)
+      .not.toBe(commandDefinitions.find(({ id }) => id === 'file.save-all')?.windowsAccelerator);
+  });
+
   it('derives availability and refuses unavailable actions without removing definitions', async () => {
     const { registry, file } = fixture();
 
@@ -35,6 +57,39 @@ describe('CommandRegistry', () => {
     expect(await registry.execute('file.save')).toEqual({ status: 'unavailable' });
     expect(file.save).not.toHaveBeenCalled();
     expect(registry.getSnapshot().commands).toHaveLength(EDITOR_COMMAND_IDS.length);
+  });
+
+  it('derives every file command from explicit workflow capabilities', () => {
+    const { registry, file } = fixture();
+    const snapshot = file.getSnapshot();
+    vi.spyOn(file, 'getSnapshot').mockReturnValue(Object.freeze({
+      ...snapshot,
+      capabilities: unavailableFileCapabilities(),
+    }) as ReturnType<EditorFileCommandPort['getSnapshot']>);
+
+    expect(registry.command('file.new-project').enabled).toBe(false);
+    expect(registry.command('file.open-project').enabled).toBe(false);
+    expect(registry.command('file.save').enabled).toBe(false);
+    expect(registry.command('file.close-project').enabled).toBe(false);
+  });
+
+  it('contains rejected execution and reports it through the configured command error boundary', async () => {
+    const { store, file } = fixture();
+    const failure = new Error('injected open failure');
+    file.openProject = vi.fn().mockRejectedValue(failure);
+    const report = vi.fn();
+    const registry = new CommandRegistry({
+      store,
+      file,
+      platform: 'windows',
+      errors: { report },
+    });
+
+    await expect(registry.execute('file.open-project')).resolves.toEqual({
+      status: 'failed',
+      error: failure,
+    });
+    expect(report).toHaveBeenCalledWith(registry.command('file.open-project'), failure);
   });
 
   it('routes file, history, zoom, diagnostics, and pane actions through registered definitions', async () => {
@@ -91,13 +146,42 @@ function fixture(platform: 'windows' | 'mac' = 'windows') {
     reopenProject: vi.fn(),
     reloadProject: vi.fn(),
     getSnapshot: () => Object.freeze({
-      projectName: null,
+      projectName: store.getSnapshot().session === null ? null : 'Project',
       dirtyState: 'clean' as const,
       recentProjects: Object.freeze([]),
       canReopen: false,
       canReload: false,
+      capabilities: Object.freeze({
+        newProject: true,
+        openProject: true,
+        openRecent: false,
+        save: store.getSnapshot().session !== null,
+        saveAs: store.getSnapshot().session !== null,
+        saveAll: store.getSnapshot().session !== null,
+        closeProject: store.getSnapshot().session !== null,
+        reopenProject: false,
+        reloadProject: false,
+      }),
     }),
     subscribe: () => () => undefined,
   };
-  return { store, file, registry: new CommandRegistry({ store, file, platform }) };
+  return {
+    store,
+    file,
+    registry: new CommandRegistry({ store, file, platform, errors: { report: vi.fn() } }),
+  };
+}
+
+function unavailableFileCapabilities() {
+  return Object.freeze({
+    newProject: false,
+    openProject: false,
+    openRecent: false,
+    save: false,
+    saveAs: false,
+    saveAll: false,
+    closeProject: false,
+    reopenProject: false,
+    reloadProject: false,
+  });
 }

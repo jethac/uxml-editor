@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Search } from 'lucide-react';
 import type { CommandRegistry, EditorCommandState } from '../../core/store/CommandRegistry';
 import type { WorkspaceUiController } from './WorkspaceUiController';
+import { useModalFocus } from './useModalFocus';
 
 export interface CommandPaletteProps {
   readonly registry: CommandRegistry;
@@ -11,19 +12,15 @@ export interface CommandPaletteProps {
 export function CommandPalette({ registry, ui }: CommandPaletteProps) {
   const commandSnapshot = useSyncExternalStore(registry.subscribe, registry.getSnapshot, registry.getSnapshot);
   const [query, setQuery] = useState('');
+  const dialog = useRef<HTMLElement>(null);
   const search = useRef<HTMLInputElement>(null);
-  const returnFocus = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    search.current?.focus();
-    return () => returnFocus.current?.focus();
-  }, []);
+  const close = () => ui.closeCommandPalette();
+  useModalFocus({ active: true, container: dialog, initialFocus: search, onEscape: close });
   const commands = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase('en-US');
     return commandSnapshot.commands.filter((command) => normalized.length === 0
       || `${command.category} ${command.label}`.toLocaleLowerCase('en-US').includes(normalized));
   }, [commandSnapshot, query]);
-  const close = () => ui.closeCommandPalette();
   const execute = async (command: EditorCommandState) => {
     if (!command.enabled) return;
     close();
@@ -35,15 +32,11 @@ export function CommandPalette({ registry, ui }: CommandPaletteProps) {
       if (event.target === event.currentTarget) close();
     }}>
       <section
+        ref={dialog}
         className="command-dialog"
         role="dialog"
         aria-modal="true"
         aria-label="Command Palette"
-        onKeyDown={(event) => {
-          if (event.key !== 'Escape') return;
-          event.preventDefault();
-          close();
-        }}
       >
         <label className="command-dialog-search">
           <span className="visually-hidden">Search commands</span>

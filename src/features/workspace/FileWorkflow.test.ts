@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryHost } from '../../core/host/MemoryHost';
-import { projectPath } from '../../core/host/HostPort';
+import {
+  HostError,
+  projectPath,
+  type DisposalOutcome,
+  type FileChangeListener,
+} from '../../core/host/HostPort';
 import { projectId } from '../../core/host/HostPort';
 import { PersistenceTestAdapter } from '../../core/persistence/persistenceTestSupport';
 import { EditorStore } from '../../core/store/EditorStore';
@@ -88,6 +93,94 @@ describe('FileWorkflow', () => {
       .toBe('<ui:UXML xmlns:ui="UnityEngine.UIElements">\n</ui:UXML>\n');
   });
 
+  it('reports deterministic written and pending paths when Save As creation partially fails', async () => {
+    const { host, store, workflow, source, destination } = saveAsFailureFixture({});
+    await workflow.openProject(source);
+    editButtonText(store, 'Race');
+    await vi.waitFor(async () => expect(await host.readRecovery(source.id)).not.toBeNull());
+    const sourceSession = store.getSnapshot().session;
+    const createText = host.createText.bind(host);
+    let createCount = 0;
+    vi.spyOn(host, 'createText').mockImplementation(async (path, text) => {
+      createCount += 1;
+      if (createCount === 2) throw new HostError('replace-failed', 'Injected create failure.');
+      return createText(path, text);
+    });
+
+    await expect(workflow.saveAs(destination)).rejects.toMatchObject({
+      name: 'SaveAsPartialError',
+      writtenPaths: [ENTRY_PATH],
+      pendingPaths: ['Assets/Second.uxml'],
+    });
+
+    expect(workflow.getSnapshot()).toMatchObject({ projectName: 'Source', dirtyState: 'dirty' });
+    expect(store.getSnapshot().session).toBe(sourceSession);
+    expect(await host.readRecovery(source.id)).not.toBeNull();
+    expect(host.messageRequests.at(-1)).toMatchObject({
+      kind: 'error',
+      title: 'Save As incomplete',
+      message: 'Written: Assets/Main.uxml. Pending: Assets/Second.uxml.',
+    });
+  });
+
+  it('reports deterministic written and pending paths when Save As replacement partially fails', async () => {
+    const { host, store, workflow, source, destination } = saveAsFailureFixture({
+      [ENTRY_PATH]: '<UXML destination="main" />\n',
+      'Assets/Second.uxml': '<UXML destination="second" />\n',
+    });
+    await workflow.openProject(source);
+    editButtonText(store, 'Race');
+    await vi.waitFor(async () => expect(await host.readRecovery(source.id)).not.toBeNull());
+    const sourceSession = store.getSnapshot().session;
+    host.queueConfirmation(true);
+    host.injectFailure({ operation: 'replace', phase: 'before', after: 1 });
+
+    await expect(workflow.saveAs(destination)).rejects.toMatchObject({
+      name: 'SaveAsPartialError',
+      writtenPaths: [ENTRY_PATH],
+      pendingPaths: ['Assets/Second.uxml'],
+    });
+
+    expect(workflow.getSnapshot()).toMatchObject({ projectName: 'Source', dirtyState: 'dirty' });
+    expect(store.getSnapshot().session).toBe(sourceSession);
+    expect(await host.readRecovery(source.id)).not.toBeNull();
+    expect(host.messageRequests.at(-1)).toMatchObject({
+      kind: 'error',
+      title: 'Save As incomplete',
+      message: 'Written: Assets/Main.uxml. Pending: Assets/Second.uxml.',
+    });
+  });
+
+  it('preflights every known destination revision before Save As writes any path', async () => {
+    const { host, store, workflow, source, destination } = saveAsFailureFixture({
+      [ENTRY_PATH]: '<UXML destination="main" />\n',
+      'Assets/Second.uxml': '<UXML destination="second" />\n',
+    });
+    await workflow.openProject(source);
+    editButtonText(store, 'Race');
+    const originalMain = await host.readText(projectPath(destination, ENTRY_PATH));
+    vi.spyOn(host, 'confirm').mockImplementationOnce(async () => {
+      await host.externalWrite(
+        projectPath(destination, 'Assets/Second.uxml'),
+        '<UXML destination="changed-before-preflight" />\n',
+      );
+      return Object.freeze({ confirmed: true });
+    });
+
+    await expect(workflow.saveAs(destination)).rejects.toMatchObject({
+      name: 'SaveAsPartialError',
+      writtenPaths: [],
+      pendingPaths: [ENTRY_PATH, 'Assets/Second.uxml'],
+    });
+
+    expect(await host.readText(projectPath(destination, ENTRY_PATH))).toEqual(originalMain);
+    expect(workflow.getSnapshot()).toMatchObject({ projectName: 'Source', dirtyState: 'dirty' });
+    expect(host.messageRequests.at(-1)).toMatchObject({
+      title: 'Save As incomplete',
+      message: 'Written: none. Pending: Assets/Main.uxml, Assets/Second.uxml.',
+    });
+  });
+
   it('reauthorizes a recent project instead of treating recent metadata as a grant', async () => {
     const { host, workflow } = fixture();
     const root = await host.chooseProject();
@@ -119,6 +212,52 @@ describe('FileWorkflow', () => {
     });
     await workflow.saveAll();
 
+    expect(await host.readRecovery(root!.id)).toBeNull();
+  });
+
+  it('waits for a delayed recovery append before ordinary Save writes and clears it', async () => {
+    const { host, store, workflow } = fixture();
+    const root = await host.chooseProject();
+    await workflow.openProject(root!);
+    let releaseAppend!: () => void;
+    const appendBlocked = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    let markAppendStarted!: () => void;
+    const appendStarted = new Promise<void>((resolve) => { markAppendStarted = resolve; });
+    const writeRecovery = host.writeRecovery.bind(host);
+    let writes = 0;
+    vi.spyOn(host, 'writeRecovery').mockImplementation(async (project, stored) => {
+      writes += 1;
+      if (writes === 1) {
+        markAppendStarted();
+        await appendBlocked;
+      }
+      await writeRecovery(project, stored);
+    });
+    editButtonText(store, 'Race');
+    await appendStarted;
+    let markSaveAdvanced!: () => void;
+    const saveAdvanced = new Promise<void>((resolve) => { markSaveAdvanced = resolve; });
+    const replaceText = host.replaceTextAtomically.bind(host);
+    vi.spyOn(host, 'replaceTextAtomically').mockImplementation(async (...arguments_) => {
+      markSaveAdvanced();
+      return replaceText(...arguments_);
+    });
+
+    const saving = workflow.save();
+    const earlyState = await Promise.race([
+      saveAdvanced.then(() => 'advanced' as const),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 100)),
+    ]);
+
+    expect(earlyState).toBe('blocked');
+    expect((await host.readText(projectPath(root!, ENTRY_PATH))).text).toBe(INITIAL_SOURCE);
+
+    releaseAppend();
+    await saving;
+    await workflow.closeProject();
+    await workflow.reopenProject();
+    expect(store.getSnapshot().session!.snapshot().files.get(ENTRY_PATH)!.text)
+      .toBe('<UXML><Button text="Race" /></UXML>\r\n');
     expect(await host.readRecovery(root!.id)).toBeNull();
   });
 
@@ -213,6 +352,84 @@ describe('FileWorkflow', () => {
     expect((await host.readText(projectPath(root!, ENTRY_PATH))).text).toBe(INITIAL_SOURCE);
   });
 
+  it('clears discarded recovery before close so reopening cannot restore the edits', async () => {
+    const { host, store, workflow } = fixture();
+    const root = await host.chooseProject();
+    await workflow.openProject(root!);
+    editButtonText(store, 'Race');
+    await vi.waitFor(async () => expect(await host.readRecovery(root!.id)).not.toBeNull());
+    host.queueConfirmation(false);
+    host.queueConfirmation(true);
+
+    await workflow.closeProject();
+    await workflow.reopenProject();
+
+    expect(store.getSnapshot().session!.snapshot().files.get(ENTRY_PATH)!.text).toBe(INITIAL_SOURCE);
+    expect(await host.readRecovery(root!.id)).toBeNull();
+  });
+
+  it('clears discarded recovery before replacement so reopening the old project cannot restore the edits', async () => {
+    const host = new MemoryHost({
+      projects: [
+        { id: 'old', name: 'Old Project', files: { [ENTRY_PATH]: INITIAL_SOURCE } },
+        { id: 'replacement', name: 'Replacement', files: { [ENTRY_PATH]: '<UXML replacement="true" />\n' } },
+      ],
+    });
+    const oldRoot = Object.freeze({ id: projectId('old'), name: 'Old Project' });
+    const replacementRoot = Object.freeze({ id: projectId('replacement'), name: 'Replacement' });
+    const store = new EditorStore({ host });
+    const workflow = new FileWorkflow(store, host, { adapter: new PersistenceTestAdapter() });
+    await workflow.openProject(oldRoot);
+    editButtonText(store, 'Race');
+    await vi.waitFor(async () => expect(await host.readRecovery(oldRoot.id)).not.toBeNull());
+    host.queueConfirmation(false);
+    host.queueConfirmation(true);
+
+    await workflow.openProject(replacementRoot);
+    await workflow.openProject(oldRoot);
+
+    expect(store.getSnapshot().session!.snapshot().files.get(ENTRY_PATH)!.text).toBe(INITIAL_SOURCE);
+    expect(await host.readRecovery(oldRoot.id)).toBeNull();
+  });
+
+  it('clears discarded recovery before replacing the project with the same root', async () => {
+    const { host, store, workflow } = fixture();
+    const root = await host.chooseProject();
+    await workflow.openProject(root!);
+    editButtonText(store, 'Race');
+    await vi.waitFor(async () => expect(await host.readRecovery(root!.id)).not.toBeNull());
+    host.queueConfirmation(false);
+    host.queueConfirmation(true);
+
+    await workflow.openProject(root!);
+
+    expect(store.getSnapshot().session!.snapshot().files.get(ENTRY_PATH)!.text).toBe(INITIAL_SOURCE);
+    expect(workflow.getSnapshot().dirtyState).toBe('clean');
+    expect(await host.readRecovery(root!.id)).toBeNull();
+  });
+
+  it('keeps the current project open and reports a discard cleanup failure', async () => {
+    const { host, store, workflow } = fixture();
+    const root = await host.chooseProject();
+    await workflow.openProject(root!);
+    editButtonText(store, 'Race');
+    await vi.waitFor(async () => expect(await host.readRecovery(root!.id)).not.toBeNull());
+    const session = store.getSnapshot().session;
+    host.queueConfirmation(false);
+    host.queueConfirmation(true);
+    host.injectFailure({ operation: 'clearRecovery', phase: 'before', message: 'cleanup unavailable' });
+
+    await workflow.closeProject();
+
+    expect(store.getSnapshot().session).toBe(session);
+    expect(workflow.getSnapshot().dirtyState).toBe('dirty');
+    expect(host.messageRequests.at(-1)).toMatchObject({
+      kind: 'error',
+      title: 'Changes not discarded',
+    });
+    expect(await host.readRecovery(root!.id)).not.toBeNull();
+  });
+
   it('retains the current session when a replacement picker is cancelled', async () => {
     const { host, store, workflow } = fixture();
     const root = await host.chooseProject();
@@ -271,6 +488,81 @@ describe('FileWorkflow', () => {
       kind: 'error',
       title: 'External change not resolved',
     });
+  });
+
+  it('awaits active watcher retirement before close completes', async () => {
+    const { host, workflow } = fixture();
+    const root = await host.chooseProject();
+    const completion = deferred<DisposalOutcome>();
+    const dispose = vi.fn();
+    vi.spyOn(host, 'watch').mockResolvedValue(Object.freeze({ dispose, completion: completion.promise }));
+    await workflow.openProject(root!);
+
+    let settled = false;
+    const closing = workflow.closeProject();
+    void closing.then(() => { settled = true; }, () => { settled = true; });
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    completion.resolve(Object.freeze({ status: 'disposed' }));
+    await closing;
+    expect(workflow.getSnapshot().projectName).toBeNull();
+  });
+
+  it('reports failed watcher retirement and retains the source session as untitled', async () => {
+    const { host, store, workflow } = fixture();
+    const root = await host.chooseProject();
+    const failure = new HostError('read-failed', 'Injected watcher retirement failure.');
+    vi.spyOn(host, 'watch').mockResolvedValue(Object.freeze({
+      dispose: vi.fn(),
+      completion: Promise.resolve(Object.freeze({ status: 'failed' as const, error: failure })),
+    }));
+    await workflow.openProject(root!);
+    const sourceSession = store.getSnapshot().session;
+
+    await expect(workflow.closeProject()).rejects.toBe(failure);
+
+    expect(store.getSnapshot().session).toBe(sourceSession);
+    expect(workflow.getSnapshot()).toMatchObject({
+      projectName: 'Untitled Project',
+      dirtyState: 'dirty',
+      canReload: false,
+    });
+    expect(host.messageRequests.at(-1)).toMatchObject({
+      kind: 'error',
+      title: 'Project cleanup failed',
+      message: 'Injected watcher retirement failure.',
+    });
+  });
+
+  it('prevents a retired watcher callback from publishing stale state', async () => {
+    const { host, workflow } = fixture();
+    const root = await host.chooseProject();
+    let staleListener: FileChangeListener | undefined;
+    vi.spyOn(host, 'watch').mockImplementation(async (_root, listener) => {
+      staleListener = listener;
+      return Object.freeze({
+        dispose: vi.fn(),
+        completion: Promise.resolve(Object.freeze({ status: 'disposed' as const })),
+      });
+    });
+    await workflow.openProject(root!);
+    const notifications = vi.fn();
+    workflow.subscribe(notifications);
+    await workflow.closeProject();
+    notifications.mockClear();
+    const disk = await host.readText(projectPath(root!, ENTRY_PATH));
+
+    await staleListener?.(Object.freeze({
+      kind: 'changed',
+      path: projectPath(root!, ENTRY_PATH),
+      revision: disk.revision,
+    }));
+    await host.advanceTime(50);
+
+    expect(notifications).not.toHaveBeenCalled();
+    expect(workflow.getSnapshot().externalChanges).toEqual([]);
   });
 
   it('keeps exact source as untitled when desktop Save As selection revokes the old grant', async () => {
@@ -366,4 +658,35 @@ function fixture() {
   const store = new EditorStore({ host, viewport: { width: 1280, height: 720 } });
   const workflow = new FileWorkflow(store, host, { adapter: new PersistenceTestAdapter() });
   return { host, store, workflow };
+}
+
+function saveAsFailureFixture(destinationFiles: Readonly<Record<string, string>>) {
+  const host = new MemoryHost({
+    projects: [
+      {
+        id: 'source',
+        name: 'Source',
+        files: {
+          [ENTRY_PATH]: INITIAL_SOURCE,
+          'Assets/Second.uxml': '<UXML><Label text="Second" /></UXML>\n',
+        },
+      },
+      { id: 'destination', name: 'Destination', files: destinationFiles },
+    ],
+  });
+  const store = new EditorStore({ host, viewport: { width: 1280, height: 720 } });
+  const workflow = new FileWorkflow(store, host, { adapter: new PersistenceTestAdapter() });
+  return {
+    host,
+    store,
+    workflow,
+    source: Object.freeze({ id: projectId('source'), name: 'Source' }),
+    destination: Object.freeze({ id: projectId('destination'), name: 'Destination' }),
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
 }

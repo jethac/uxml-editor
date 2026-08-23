@@ -8,7 +8,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Mutex,
+    Mutex, OnceLock,
 };
 use tauri::{
     menu::{Menu, MenuBuilder, MenuItemBuilder, Submenu, SubmenuBuilder},
@@ -16,108 +16,65 @@ use tauri::{
 };
 use tauri_plugin_dialog::MessageDialogResult;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum MenuSection {
     File,
     Edit,
     View,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuCommandSpec {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub accelerator: Option<&'static str>,
+    pub id: String,
+    pub label: String,
+    pub accelerator: Option<String>,
     pub section: MenuSection,
     pub enabled_by_default: bool,
 }
 
-pub const MENU_COMMANDS: &[MenuCommandSpec] = &[
-    MenuCommandSpec {
-        id: "file.open-project",
-        label: "Open Project...",
-        accelerator: Some("Ctrl+O"),
-        section: MenuSection::File,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "file.save",
-        label: "Save",
-        accelerator: Some("Ctrl+S"),
-        section: MenuSection::File,
-        enabled_by_default: false,
-    },
-    MenuCommandSpec {
-        id: "file.save-all",
-        label: "Save All",
-        accelerator: Some("Ctrl+Shift+S"),
-        section: MenuSection::File,
-        enabled_by_default: false,
-    },
-    MenuCommandSpec {
-        id: "file.close-project",
-        label: "Close Project",
-        accelerator: Some("Ctrl+Shift+W"),
-        section: MenuSection::File,
-        enabled_by_default: false,
-    },
-    MenuCommandSpec {
-        id: "edit.undo",
-        label: "Undo",
-        accelerator: Some("Ctrl+Z"),
-        section: MenuSection::Edit,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "edit.redo",
-        label: "Redo",
-        accelerator: Some("Ctrl+Y"),
-        section: MenuSection::Edit,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "view.zoom-in",
-        label: "Zoom In",
-        accelerator: Some("Ctrl+="),
-        section: MenuSection::View,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "view.zoom-out",
-        label: "Zoom Out",
-        accelerator: Some("Ctrl+-"),
-        section: MenuSection::View,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "view.pane-hierarchy",
-        label: "Hierarchy Pane",
-        accelerator: Some("Ctrl+Alt+1"),
-        section: MenuSection::View,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "view.pane-inspector",
-        label: "Inspector Pane",
-        accelerator: Some("Ctrl+Alt+2"),
-        section: MenuSection::View,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "view.pane-diagnostics",
-        label: "Diagnostics Pane",
-        accelerator: Some("Ctrl+Alt+3"),
-        section: MenuSection::View,
-        enabled_by_default: true,
-    },
-    MenuCommandSpec {
-        id: "view.pane-source",
-        label: "Source Pane",
-        accelerator: Some("Ctrl+Alt+4"),
-        section: MenuSection::View,
-        enabled_by_default: true,
-    },
-];
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedCommandSpec {
+    id: String,
+    label: String,
+    section: MenuSection,
+    windows_accelerator: Option<String>,
+    mac_accelerator: Option<String>,
+    native: bool,
+    native_enabled_by_default: bool,
+}
+
+fn menu_commands() -> &'static [MenuCommandSpec] {
+    static COMMANDS: OnceLock<Vec<MenuCommandSpec>> = OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        let shared: Vec<SharedCommandSpec> =
+            serde_json::from_str(include_str!("../../src/core/store/CommandDefinitions.json"))
+                .expect("shared command definitions must be valid");
+        let commands: Vec<_> = shared
+            .into_iter()
+            .filter(|command| command.native)
+            .map(|command| MenuCommandSpec {
+                id: command.id,
+                label: command.label,
+                accelerator: if cfg!(target_os = "macos") {
+                    command.mac_accelerator
+                } else {
+                    command.windows_accelerator
+                },
+                section: command.section,
+                enabled_by_default: command.native_enabled_by_default,
+            })
+            .collect();
+        let mut identities = std::collections::HashSet::new();
+        assert!(
+            commands
+                .iter()
+                .all(|command| identities.insert(command.id.clone())),
+            "native command identities must be unique"
+        );
+        commands
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,7 +132,7 @@ pub struct CloseRequestPayload {
 }
 
 pub fn is_desktop_command(id: &str) -> bool {
-    MENU_COMMANDS.iter().any(|command| command.id == id)
+    menu_commands().iter().any(|command| command.id == id)
 }
 
 #[derive(Default)]
@@ -486,10 +443,13 @@ fn build_submenu<R: Runtime>(
     section: MenuSection,
 ) -> tauri::Result<Submenu<R>> {
     let mut builder = SubmenuBuilder::new(app, title);
-    for command in MENU_COMMANDS.iter().filter(|item| item.section == section) {
-        let mut item = MenuItemBuilder::with_id(command.id, command.label);
+    for command in menu_commands()
+        .iter()
+        .filter(|item| item.section == section)
+    {
+        let mut item = MenuItemBuilder::with_id(command.id.as_str(), command.label.as_str());
         item = item.enabled(command.enabled_by_default);
-        if let Some(accelerator) = command.accelerator {
+        if let Some(accelerator) = command.accelerator.as_deref() {
             item = item.accelerator(accelerator);
         }
         let item = item.build(app)?;
@@ -501,16 +461,19 @@ fn build_submenu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        close_choice, is_desktop_command, transition_file_workflow_items, CloseGate,
+        close_choice, is_desktop_command, menu_commands, transition_file_workflow_items, CloseGate,
         CloseGateDecision, CloseResolution, CloseResolutionRequest, FileWorkflowEnabledRequest,
-        FileWorkflowGate, MenuSection, FILE_WORKFLOW_MENU_IDS, MENU_COMMANDS,
+        FileWorkflowGate, MenuSection, FILE_WORKFLOW_MENU_IDS,
     };
     use crate::error::HostError;
     use tauri_plugin_dialog::MessageDialogResult;
 
     #[test]
     fn menu_ids_exactly_match_the_typed_frontend_bridge() {
-        let actual: Vec<_> = MENU_COMMANDS.iter().map(|item| item.id).collect();
+        let actual: Vec<_> = menu_commands()
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
         assert_eq!(
             actual,
             [
@@ -529,15 +492,59 @@ mod tests {
             ]
         );
         assert_eq!(
-            MENU_COMMANDS
+            menu_commands()
                 .iter()
                 .filter(|item| item.section == MenuSection::File)
                 .count(),
             4
         );
-        assert!(MENU_COMMANDS
+        assert!(menu_commands()
             .iter()
             .all(|item| !item.label.is_empty() && item.accelerator.is_some()));
+    }
+
+    #[test]
+    fn native_menu_metadata_matches_the_shared_declarative_command_source() {
+        let shared: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/core/store/CommandDefinitions.json"))
+                .unwrap();
+        let platform_accelerator = if cfg!(target_os = "macos") {
+            "macAccelerator"
+        } else {
+            "windowsAccelerator"
+        };
+        let expected: Vec<_> = shared
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["native"].as_bool() == Some(true))
+            .map(|command| {
+                (
+                    command["id"].as_str().unwrap(),
+                    command["label"].as_str().unwrap(),
+                    command["section"].as_str().unwrap(),
+                    command[platform_accelerator].as_str(),
+                )
+            })
+            .collect();
+        let actual: Vec<_> = menu_commands()
+            .iter()
+            .map(|command| {
+                let section = match command.section {
+                    MenuSection::File => "File",
+                    MenuSection::Edit => "Edit",
+                    MenuSection::View => "View",
+                };
+                (
+                    command.id.as_str(),
+                    command.label.as_str(),
+                    section,
+                    command.accelerator.as_deref(),
+                )
+            })
+            .collect();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -562,14 +569,14 @@ mod tests {
     #[test]
     fn file_workflow_items_are_disabled_until_task_16_binds_ownership() {
         for id in ["file.save", "file.save-all", "file.close-project"] {
-            let command = MENU_COMMANDS
+            let command = menu_commands()
                 .iter()
                 .find(|command| command.id == id)
                 .unwrap();
             assert!(!command.enabled_by_default, "{id} must start disabled");
         }
         assert!(
-            MENU_COMMANDS
+            menu_commands()
                 .iter()
                 .find(|command| command.id == "file.open-project")
                 .unwrap()

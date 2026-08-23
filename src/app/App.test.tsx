@@ -1,9 +1,10 @@
 import { StrictMode } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { EDITOR_LAYOUT_STORAGE_KEY } from '../core/store/EditorLayoutStorage';
 import { EditorStore } from '../core/store/EditorStore';
+import { MemoryHost } from '../core/host/MemoryHost';
 import { createBrowserEditorStore } from './createBrowserEditorStore';
 import { App } from './App';
 
@@ -67,4 +68,77 @@ describe('application workbench', () => {
       else Object.defineProperty(window, 'localStorage', descriptor);
     }
   });
+
+  it('uses one injected workflow owner for rendered state and registry execution without disposing it', async () => {
+    const user = userEvent.setup();
+    const host = new MemoryHost();
+    const openProject = vi.fn();
+    const dispose = vi.fn();
+    const owner = injectedWorkflowOwner({ openProject, dispose });
+    const rendered = render(<App store={new EditorStore({ host })} task16FileLifecycle={owner} />);
+
+    expect(screen.getByLabelText('Project status')).toHaveTextContent('Injected Project');
+    await user.click(screen.getByRole('button', { name: 'Open Project' }));
+
+    expect(openProject).toHaveBeenCalledOnce();
+    rendered.unmount();
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('disposes an internally owned workflow watcher on unmount', async () => {
+    const user = userEvent.setup();
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Assets/Main.uxml': '<UXML />' } }],
+    });
+    const dispose = vi.fn();
+    const watch = vi.spyOn(host, 'watch').mockResolvedValue(Object.freeze({ dispose }));
+    const rendered = render(<App store={new EditorStore({ host })} />);
+    await user.click(screen.getByRole('button', { name: 'Open Project' }));
+    await waitFor(() => expect(watch).toHaveBeenCalledOnce());
+
+    rendered.unmount();
+
+    await waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+  });
 });
+
+function injectedWorkflowOwner(overrides: Record<string, unknown> = {}) {
+  const snapshot = Object.freeze({
+    projectName: 'Injected Project',
+    dirtyState: 'clean' as const,
+    recentProjects: Object.freeze([]),
+    externalChanges: Object.freeze([]),
+    canReopen: false,
+    canReload: false,
+    capabilities: Object.freeze({
+      newProject: true,
+      openProject: true,
+      openRecent: false,
+      save: true,
+      saveAs: true,
+      saveAll: true,
+      closeProject: true,
+      reopenProject: false,
+      reloadProject: false,
+    }),
+  });
+  return Object.freeze({
+    newProject: vi.fn(),
+    openProject: vi.fn(),
+    openRecent: vi.fn(),
+    save: vi.fn(),
+    saveAs: vi.fn(),
+    saveAll: vi.fn(),
+    closeProject: vi.fn(),
+    reopenProject: vi.fn(),
+    reloadProject: vi.fn(),
+    resolveExternalChange: vi.fn(),
+    runExclusiveCloseState: vi.fn(),
+    finalValidateCloseState: vi.fn(() => true),
+    saveBeforeClose: vi.fn(() => 'saved' as const),
+    getSnapshot: () => snapshot,
+    subscribe: () => () => undefined,
+    dispose: vi.fn(),
+    ...overrides,
+  });
+}

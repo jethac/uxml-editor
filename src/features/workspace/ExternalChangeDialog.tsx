@@ -1,17 +1,17 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useRef, useState, useSyncExternalStore } from 'react';
 import type { ExternalChangeDecision } from '../../core/persistence/SaveCoordinator';
-import type { FileWorkflow } from './FileWorkflow';
+import type { FileWorkflowPort } from './FileWorkflow';
+import { useModalFocus } from './useModalFocus';
 
 export interface ExternalChangeDialogProps {
-  readonly workflow: FileWorkflow;
+  readonly workflow: FileWorkflowPort;
 }
 
 export function ExternalChangeDialog({ workflow }: ExternalChangeDialogProps) {
   const snapshot = useSyncExternalStore(workflow.subscribe, workflow.getSnapshot, workflow.getSnapshot);
   const [busyPath, setBusyPath] = useState<string | null>(null);
+  const dialog = useRef<HTMLElement>(null);
   const firstAction = useRef<HTMLButtonElement>(null);
-  useEffect(() => { firstAction.current?.focus(); }, [snapshot.externalChanges.length]);
-  if (snapshot.externalChanges.length === 0) return null;
   const resolve = async (path: string, decision: ExternalChangeDecision) => {
     setBusyPath(path);
     try {
@@ -20,10 +20,20 @@ export function ExternalChangeDialog({ workflow }: ExternalChangeDialogProps) {
       setBusyPath(null);
     }
   };
+  const firstChange = snapshot.externalChanges[0];
+  useModalFocus({
+    active: firstChange !== undefined,
+    container: dialog,
+    initialFocus: firstAction,
+    onEscape: () => {
+      if (firstChange !== undefined && busyPath === null) void resolve(firstChange.path, 'cancel');
+    },
+  });
+  if (firstChange === undefined) return null;
 
   return (
     <div className="command-dialog-backdrop">
-      <section className="external-change-dialog" role="dialog" aria-modal="true" aria-label="External file changes">
+      <section ref={dialog} className="external-change-dialog" role="dialog" aria-modal="true" aria-label="External file changes">
         <header>
           <h2>External File Changes</h2>
         </header>

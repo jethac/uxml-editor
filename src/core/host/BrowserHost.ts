@@ -193,45 +193,7 @@ export class BrowserHost implements HostPort {
 
   async createText(path: ProjectPath, text: string): Promise<FileRevision> {
     if (!this.usesFileSystemAccess) return this.fallback.createText(path, text);
-    const grant = this.grantedRoots.get(path.projectId);
-    if (!grant) throw new HostError('root-not-granted', `Project root is not granted: ${path.projectId}`);
-    const normalizedPath = projectPath(grant.root, path.relativePath);
-    const segments = normalizedPath.relativePath.split('/');
-    let writable: BrowserWritableFileStream | undefined;
-    try {
-      let directory = grant.handle;
-      for (const segment of segments.slice(0, -1)) {
-        directory = await directory.getDirectoryHandle(segment, { create: true });
-      }
-      const name = segments.at(-1)!;
-      try {
-        await directory.getFileHandle(name);
-        throw new HostError('stale-revision', `File already exists: ${normalizedPath.relativePath}`);
-      } catch (error) {
-        if (error instanceof HostError) throw error;
-        if (!isNamedError(error, 'NotFoundError')) throw error;
-      }
-      const file = await directory.getFileHandle(name, { create: true });
-      if (typeof file.createWritable !== 'function') throw unsupported('createText');
-      writable = await file.createWritable();
-      await writable.write(text);
-      await writable.close();
-      writable = undefined;
-      const confirmedText = await (await file.getFile()).text();
-      if (confirmedText !== text) {
-        throw new HostError('replace-failed', `Browser file creation could not be confirmed: ${normalizedPath.relativePath}`);
-      }
-      return this.revisionFor(confirmedText);
-    } catch (error) {
-      if (writable?.abort) {
-        try { await writable.abort(); } catch { /* The primary creation failure is authoritative. */ }
-      }
-      if (error instanceof HostError) throw error;
-      if (isNamedError(error, 'NotAllowedError')) {
-        throw new HostError('permission-denied', `Could not create file: ${normalizedPath.relativePath}`, error);
-      }
-      throw new HostError('replace-failed', `Could not create file: ${normalizedPath.relativePath}`, error);
-    }
+    throw unsupported('createText');
   }
 
   async replaceTextAtomically(path: ProjectPath, expectedRevision: FileRevision, text: string): Promise<FileRevision> {

@@ -36,7 +36,7 @@ export class RecoveryJournal {
   private readonly root: ProjectRoot;
   private readonly maxEntries: number;
   private readonly maxBytes: number;
-  private appendQueue: Promise<void> = Promise.resolve();
+  private operationTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly host: HostPort, root: ProjectRoot, options: RecoveryJournalOptions = {}) {
     this.root = snapshotProjectRoot(root);
@@ -44,7 +44,23 @@ export class RecoveryJournal {
     this.maxBytes = positiveRecoveryLimit(options.maxBytes ?? 4 * 1024 * 1024, 'maxBytes');
   }
 
-  async prepareSave(input: RecoverySavePreparation): Promise<void> {
+  prepareSave(input: RecoverySavePreparation): Promise<void> {
+    return this.serialize(() => this.prepareSaveSerialized(input));
+  }
+
+  appendCommitted(result: CommitResult): Promise<void> {
+    return this.serialize(() => this.appendCommittedSerialized(result));
+  }
+
+  recover(session: DocumentSession): Promise<RecoveryOutcome> {
+    return this.serialize(() => this.recoverSerialized(session));
+  }
+
+  clear(): Promise<void> {
+    return this.serialize(() => this.clearSerialized());
+  }
+
+  private async prepareSaveSerialized(input: RecoverySavePreparation): Promise<void> {
     const entryPath = normalizeRelativePath(input.entryPath);
     const base = serializeTextFiles(input.baseFiles);
     const target = serializeTextFiles(input.targetFiles);
@@ -85,13 +101,7 @@ export class RecoveryJournal {
     await this.host.writeRecovery(this.root.id, encodeBoundedJournal(next, this.maxEntries, this.maxBytes));
   }
 
-  appendCommitted(result: CommitResult): Promise<void> {
-    const queued = this.appendQueue.then(() => this.appendCommittedSerialized(result));
-    this.appendQueue = queued.catch(() => undefined);
-    return queued;
-  }
-
-  async recover(session: DocumentSession): Promise<RecoveryOutcome> {
+  private async recoverSerialized(session: DocumentSession): Promise<RecoveryOutcome> {
     const stored = await this.host.readRecovery(this.root.id);
     if (stored === null) return noRecoveryOutcome();
     const journal = parseStoredJournal(stored);
@@ -101,7 +111,7 @@ export class RecoveryJournal {
     return replayRecoveryJournal(session, journal);
   }
 
-  async clear(): Promise<void> {
+  private async clearSerialized(): Promise<void> {
     try {
       await this.host.clearRecovery(this.root.id);
     } catch (error) {
@@ -155,5 +165,11 @@ export class RecoveryJournal {
       prepared: journal.prepared,
     };
     await this.host.writeRecovery(this.root.id, encodeBoundedJournal(next, this.maxEntries, this.maxBytes));
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = this.operationTail.then(operation);
+    this.operationTail = queued.then(() => undefined, () => undefined);
+    return queued;
   }
 }

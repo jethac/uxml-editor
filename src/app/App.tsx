@@ -18,7 +18,7 @@ import {
 import { EditorStore } from '../core/store/EditorStore';
 import { CommandRegistry, type EditorCommandId } from '../core/store/CommandRegistry';
 import type { Disposable } from '../core/host/HostPort';
-import { FileWorkflow } from '../features/workspace/FileWorkflow';
+import { FileWorkflow, type FileWorkflowPort } from '../features/workspace/FileWorkflow';
 import { Workbench } from '../features/workspace/Workbench';
 import { WorkspaceUiController } from '../features/workspace/WorkspaceUiController';
 import { WorkspaceEditingCommands } from '../features/workspace/WorkspaceEditingCommands';
@@ -49,7 +49,7 @@ export interface AppDesktopPorts {
   readonly errors: { report(error: unknown): void };
 }
 
-export interface Task16FileLifecyclePort extends Task16FileCommandPort {
+export interface Task16FileLifecyclePort extends Task16FileCommandPort, FileWorkflowPort {
   runExclusiveCloseState(
     lease: CloseLease,
     operation: (lease: DocumentStateLease) => void | Promise<void>,
@@ -72,10 +72,11 @@ export class DesktopWorkflowDisableError extends Error {
 
 export function App({ store, desktop, task16FileLifecycle }: AppProps) {
   const host = store.getSnapshot().host;
-  const fileWorkflow = useMemo(
-    () => host === null ? null : new FileWorkflow(store, host),
-    [host, store],
+  const ownedFileWorkflow = useMemo(
+    () => host === null || task16FileLifecycle !== undefined ? null : new FileWorkflow(store, host),
+    [host, store, task16FileLifecycle],
   );
+  const fileWorkflow = task16FileLifecycle ?? ownedFileWorkflow;
   const workspaceUi = useMemo(() => new WorkspaceUiController(), []);
   const editingCommands = useMemo(() => new WorkspaceEditingCommands(store), [store]);
   const commandRegistry = useMemo(
@@ -84,10 +85,18 @@ export function App({ store, desktop, task16FileLifecycle }: AppProps) {
       file: fileWorkflow,
       editing: editingCommands,
       ui: workspaceUi,
+      errors: workspaceUi,
     }),
     [editingCommands, fileWorkflow, store, workspaceUi],
   );
   const currentFileLifecycle = task16FileLifecycle ?? fileWorkflow ?? unboundTask16FileLifecycle(store);
+
+  useEffect(() => () => {
+    if (ownedFileWorkflow === null) return;
+    void Promise.resolve(ownedFileWorkflow.dispose()).catch((error) => {
+      if (desktop !== undefined) desktop.errors.report(error);
+    });
+  }, [desktop, ownedFileWorkflow]);
 
   useEffect(() => {
     const updateViewport = () => {
@@ -259,9 +268,37 @@ function unboundTask16FileLifecycle(store: EditorStore): Task16FileLifecyclePort
         && expected.generation === (session?.generation ?? 0);
     },
     saveBeforeClose: async (): Promise<SaveBeforeCloseResult> => 'cancelled',
+    newProject: async () => undefined,
+    openProject: async () => undefined,
+    openRecent: async () => undefined,
     save: async () => undefined,
+    saveAs: async () => undefined,
     saveAll: async () => undefined,
     closeProject: async () => undefined,
+    reopenProject: async () => undefined,
+    reloadProject: async () => undefined,
+    resolveExternalChange: async () => undefined,
+    getSnapshot: () => Object.freeze({
+      projectName: null,
+      dirtyState: 'clean' as const,
+      recentProjects: Object.freeze([]),
+      externalChanges: Object.freeze([]),
+      canReopen: false,
+      canReload: false,
+      capabilities: Object.freeze({
+        newProject: false,
+        openProject: false,
+        openRecent: false,
+        save: false,
+        saveAs: false,
+        saveAll: false,
+        closeProject: false,
+        reopenProject: false,
+        reloadProject: false,
+      }),
+    }),
+    subscribe: () => () => undefined,
+    dispose: () => undefined,
   });
 }
 

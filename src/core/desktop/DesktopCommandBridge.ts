@@ -1,22 +1,24 @@
 import type { Disposable } from '../host/HostPort';
 import type { EditorStore } from '../store/EditorStore';
+import commandMetadataSource from '../store/CommandDefinitions.json';
 
-export const DESKTOP_COMMAND_IDS = Object.freeze([
-  'file.open-project',
-  'file.save',
-  'file.save-all',
-  'file.close-project',
-  'edit.undo',
-  'edit.redo',
-  'view.zoom-in',
-  'view.zoom-out',
-  'view.pane-hierarchy',
-  'view.pane-inspector',
-  'view.pane-diagnostics',
-  'view.pane-source',
-] as const);
+export type DesktopCommandId =
+  | 'file.open-project'
+  | 'file.save'
+  | 'file.save-all'
+  | 'file.close-project'
+  | 'edit.undo'
+  | 'edit.redo'
+  | 'view.zoom-in'
+  | 'view.zoom-out'
+  | 'view.pane-hierarchy'
+  | 'view.pane-inspector'
+  | 'view.pane-diagnostics'
+  | 'view.pane-source';
 
-export type DesktopCommandId = typeof DESKTOP_COMMAND_IDS[number];
+export const DESKTOP_COMMAND_IDS: readonly DesktopCommandId[] = Object.freeze(
+  commandMetadataSource.filter(({ native }) => native).map(({ id }) => id as DesktopCommandId),
+);
 
 export interface DesktopEvent<T> {
   readonly payload: T;

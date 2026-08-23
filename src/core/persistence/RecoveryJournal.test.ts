@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { EditorNodeId } from '../adapter/types';
 import { projectPath } from '../host/HostPort';
 import { MemoryHost } from '../host/MemoryHost';
@@ -70,6 +70,62 @@ describe('RecoveryJournal', () => {
       transactionIds: ['concurrent-1', 'concurrent-2'],
     });
     expect(restored.snapshot().files.get('Main.uxml')?.text).toBe('<UXML   />');
+  });
+
+  it('serializes save preparation, recovery, and clear behind an active append', async () => {
+    const original = '<UXML />';
+    const host = new MemoryHost({
+      projects: [{ id: 'project-a', name: 'Project A', files: { 'Main.uxml': original } }],
+    });
+    const root = (await host.chooseProject())!;
+    const journal = new RecoveryJournal(host, root);
+    const editing = openTestSession(new Map([['Main.uxml', original]]));
+    const result = editing.commit({
+      id: 'queued-edit',
+      label: 'Queued edit',
+      patchesByFile: new Map([['Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+    });
+    const target = editing.snapshot().files.get('Main.uxml')!.text;
+    let releaseAppend!: () => void;
+    const appendBlocked = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    let markAppendStarted!: () => void;
+    const appendStarted = new Promise<void>((resolve) => { markAppendStarted = resolve; });
+    const writeRecovery = host.writeRecovery.bind(host);
+    let writes = 0;
+    vi.spyOn(host, 'writeRecovery').mockImplementation(async (project, stored) => {
+      writes += 1;
+      if (writes === 1) {
+        markAppendStarted();
+        await appendBlocked;
+      }
+      await writeRecovery(project, stored);
+    });
+    const readRecovery = vi.spyOn(host, 'readRecovery');
+    const clearRecovery = vi.spyOn(host, 'clearRecovery');
+
+    const appending = journal.appendCommitted(result);
+    await appendStarted;
+    const preparing = journal.prepareSave({
+      entryPath: 'Main.uxml',
+      baseFiles: new Map([['Main.uxml', original]]),
+      targetFiles: new Map([['Main.uxml', target]]),
+      dirtyPaths: ['Main.uxml'],
+      selectionAfter: [],
+    });
+    const restored = openTestSession(new Map([['Main.uxml', original]]));
+    const recovering = journal.recover(restored);
+    const clearing = journal.clear();
+    await Promise.resolve();
+
+    expect(writes).toBe(1);
+    expect(readRecovery).toHaveBeenCalledTimes(1);
+    expect(clearRecovery).not.toHaveBeenCalled();
+
+    releaseAppend();
+    const [, , outcome] = await Promise.all([appending, preparing, recovering, clearing]);
+    expect(outcome).toMatchObject({ status: 'recovered' });
+    expect(restored.snapshot().files.get('Main.uxml')!.text).toBe(target);
+    expect(await host.readRecovery(root.id)).toBeNull();
   });
 
   it('journals edit, undo, and redo entries in order even when transaction ids repeat', async () => {

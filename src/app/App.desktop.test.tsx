@@ -1,13 +1,74 @@
-import { act, render } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { UxmlPreviewAdapter } from '../core/adapter/UxmlPreviewAdapter';
 import { DocumentSession } from '../core/documents/DocumentSession';
 import type { DesktopEvent } from '../core/desktop/DesktopCommandBridge';
 import { EditorStore } from '../core/store/EditorStore';
+import { MemoryHost } from '../core/host/MemoryHost';
 import { App, type AppDesktopPorts, type Task16FileLifecyclePort } from './App';
 import type { CloseChoice } from '../core/desktop/DesktopLifecycleController';
 
 describe('App desktop integration', () => {
+  it('uses the injected lifecycle owner for native commands when the store also has a host', async () => {
+    const events = new FakeDesktopEvents();
+    let saves = 0;
+    const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: { setFileWorkflowEnabled: async () => undefined },
+      errors: { report: () => undefined },
+    };
+    const lifecycle = task16Lifecycle({ save: () => { saves += 1; } });
+    const rendered = render(<App
+      store={new EditorStore({ host: new MemoryHost(), viewport: { width: 1024, height: 768 } })}
+      desktop={desktop}
+      task16FileLifecycle={lifecycle}
+    />);
+    await listenersReady(events);
+
+    await events.emit('uxml://menu-command', { commandId: 'file.save' });
+
+    expect(saves).toBe(1);
+    rendered.unmount();
+  });
+
+  it('routes rejected native menu execution to the rendered command error boundary', async () => {
+    const events = new FakeDesktopEvents();
+    const desktopErrors: unknown[] = [];
+    const desktop: AppDesktopPorts = {
+      commandAuthority: Object.freeze({}),
+      events,
+      confirm: { confirmClose: async (): Promise<CloseChoice> => 'cancel' },
+      window: {
+        setLifecycleReady: async (generation, ready) => { events.setLifecycleReady(generation, ready); },
+        resolveClose: async () => undefined,
+        abandonClose: async () => undefined,
+      },
+      menu: { setFileWorkflowEnabled: async () => undefined },
+      errors: { report: (error) => { desktopErrors.push(error); } },
+    };
+    const lifecycle = task16Lifecycle({ save: async () => { throw new Error('native save failed'); } });
+    const rendered = render(<App
+      store={new EditorStore({ host: new MemoryHost(), viewport: { width: 1024, height: 768 } })}
+      desktop={desktop}
+      task16FileLifecycle={lifecycle}
+    />);
+    await listenersReady(events);
+
+    await events.emit('uxml://menu-command', { commandId: 'file.save' });
+
+    expect(await screen.findByRole('alertdialog', { name: 'Command failed' }))
+      .toHaveTextContent('native save failed');
+    expect(desktopErrors).toEqual([]);
+    rendered.unmount();
+  });
+
   it('registers close delivery before any awaited menu startup work', async () => {
     const events = new FakeDesktopEvents();
     let releaseMenu!: () => void;
@@ -207,7 +268,7 @@ describe('App desktop integration', () => {
       },
       errors: { report: (error) => { errors.push(error); } },
     };
-    const store = new EditorStore({ viewport: { width: 1024, height: 768 } });
+    const store = new EditorStore({ session: openUndoableSession(), viewport: { width: 1024, height: 768 } });
     const dispatch = vi.spyOn(store, 'dispatch');
     let oldSaves = 0;
     let currentSaves = 0;
@@ -311,8 +372,8 @@ describe('App desktop integration', () => {
       menu: { setFileWorkflowEnabled: async () => undefined },
       errors: { report: () => undefined },
     } as AppDesktopPorts);
-    const oldStore = new EditorStore({ viewport: { width: 1024, height: 768 } });
-    const currentStore = new EditorStore({ viewport: { width: 1024, height: 768 } });
+    const oldStore = new EditorStore({ session: openUndoableSession(), viewport: { width: 1024, height: 768 } });
+    const currentStore = new EditorStore({ session: openUndoableSession(), viewport: { width: 1024, height: 768 } });
     const oldDispatch = vi.spyOn(oldStore, 'dispatch');
     const currentDispatch = vi.spyOn(currentStore, 'dispatch');
     let oldSaves = 0;
@@ -506,9 +567,38 @@ function openSession(): DocumentSession {
   );
 }
 
+function openUndoableSession(): DocumentSession {
+  const session = openSession();
+  session.history.execute({
+    id: 'test-edit',
+    label: 'Test edit',
+    patchesByFile: new Map([['Assets/UI/Main.uxml', [{ start: 6, end: 6, replacement: ' ' }]]]),
+  });
+  return session;
+}
+
 const CLOSE_LEASE = `close:v1:${'d'.repeat(16)}`;
 
 function task16Lifecycle(overrides: Partial<Task16FileLifecyclePort> = {}): Task16FileLifecyclePort {
+  const snapshot = Object.freeze({
+    projectName: 'Injected Project',
+    dirtyState: 'clean' as const,
+    recentProjects: Object.freeze([]),
+    externalChanges: Object.freeze([]),
+    canReopen: false,
+    canReload: false,
+    capabilities: Object.freeze({
+      newProject: true,
+      openProject: true,
+      openRecent: false,
+      save: true,
+      saveAs: true,
+      saveAll: true,
+      closeProject: true,
+      reopenProject: false,
+      reloadProject: false,
+    }),
+  });
   return Object.freeze({
     runExclusiveCloseState: async (
       _nativeLease: string,
@@ -518,9 +608,19 @@ function task16Lifecycle(overrides: Partial<Task16FileLifecyclePort> = {}): Task
     },
     finalValidateCloseState: () => true,
     saveBeforeClose: () => 'saved' as const,
+    newProject: () => undefined,
+    openProject: () => undefined,
+    openRecent: () => undefined,
     save: () => undefined,
+    saveAs: () => undefined,
     saveAll: () => undefined,
     closeProject: () => undefined,
+    reopenProject: () => undefined,
+    reloadProject: () => undefined,
+    resolveExternalChange: () => Promise.resolve(),
+    getSnapshot: () => snapshot,
+    subscribe: () => () => undefined,
+    dispose: () => undefined,
     ...overrides,
   });
 }

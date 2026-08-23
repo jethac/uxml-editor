@@ -21,14 +21,14 @@ import {
   type CommandRegistrySnapshot,
   type EditorCommandId,
 } from '../../core/store/CommandRegistry';
-import type { FileWorkflow, FileWorkflowSnapshot } from './FileWorkflow';
+import type { FileWorkflowPort, FileWorkflowSnapshot } from './FileWorkflow';
 import { useSyncExternalStore } from 'react';
 
 export interface CommandBarProps {
   readonly store: EditorStore;
   readonly snapshot: EditorSnapshot;
   readonly registry?: CommandRegistry;
-  readonly workflow?: FileWorkflow;
+  readonly workflow?: FileWorkflowPort;
   readonly onPanelActivate: (panel: EditorPanel) => void;
 }
 
@@ -196,6 +196,17 @@ const EMPTY_WORKFLOW_SNAPSHOT: FileWorkflowSnapshot = Object.freeze({
   externalChanges: Object.freeze([]),
   canReopen: false,
   canReload: false,
+  capabilities: Object.freeze({
+    newProject: false,
+    openProject: false,
+    openRecent: false,
+    save: false,
+    saveAs: false,
+    saveAll: false,
+    closeProject: false,
+    reopenProject: false,
+    reloadProject: false,
+  }),
 });
 const nullWorkflowSubscribe = (_listener: () => void) => () => undefined;
 const nullWorkflowSnapshot = () => EMPTY_WORKFLOW_SNAPSHOT;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DocumentSession } from '../../core/documents/DocumentSession';
 import { UxmlPreviewAdapter } from '../../core/adapter/UxmlPreviewAdapter';
 import { MemoryHost } from '../../core/host/MemoryHost';
@@ -19,7 +19,13 @@ describe('WorkspaceEditingCommands', () => {
     const host = new MemoryHost();
     const store = new EditorStore({ session, host });
     const editing = new WorkspaceEditingCommands(store);
-    const registry = new CommandRegistry({ store, file: filePort(), editing, platform: 'windows' });
+    const registry = new CommandRegistry({
+      store,
+      file: filePort(),
+      editing,
+      platform: 'windows',
+      errors: { report: vi.fn() },
+    });
 
     expect(registry.command('edit.copy').enabled).toBe(true);
     expect(registry.command('edit.duplicate').enabled).toBe(true);
@@ -59,6 +65,17 @@ function filePort() {
       recentProjects: Object.freeze([]),
       canReopen: false,
       canReload: false,
+      capabilities: Object.freeze({
+        newProject: false,
+        openProject: false,
+        openRecent: false,
+        save: false,
+        saveAs: false,
+        saveAll: false,
+        closeProject: false,
+        reopenProject: false,
+        reloadProject: false,
+      }),
     }),
     subscribe: () => () => undefined,
   };
