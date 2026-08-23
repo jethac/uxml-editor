@@ -39,6 +39,7 @@ describe('Task 17A deterministic fixture corpus', () => {
     const [uxml, uss] = menuPaths.map(text);
 
     for (const relativePath of menuPaths) {
+      expect(gitAttribute('whitespace', `fixtures/projects/${relativePath}`)).toBe('cr-at-eol');
       expectOnlyCrLfBytes(bytes(relativePath), `working tree ${relativePath}`);
       expectOnlyCrLfBytes(gitBlob(`HEAD:fixtures/projects/${relativePath}`), `HEAD blob ${relativePath}`);
       expectOnlyCrLfBytes(gitBlob(`:fixtures/projects/${relativePath}`), `index blob ${relativePath}`);
@@ -227,6 +228,15 @@ function gitBlob(revisionAndPath: string): Buffer {
   return execFileSync('git', ['-C', PROJECT_ROOT, 'cat-file', 'blob', revisionAndPath], {
     encoding: 'buffer',
   });
+}
+
+function gitAttribute(attribute: string, repositoryPath: string): string {
+  const output = execFileSync('git', ['-C', PROJECT_ROOT, 'check-attr', attribute, '--', repositoryPath], {
+    encoding: 'utf8',
+  }).trim();
+  const match = output.match(new RegExp(`: ${attribute}: (.+)$`));
+  if (!match) throw new Error(`Unable to read ${attribute} for ${repositoryPath}.`);
+  return match[1];
 }
 
 function resolveRelativeFixture(source: string, reference: string): string {
