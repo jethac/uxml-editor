@@ -93,6 +93,8 @@ export class ManipulationController {
 
   startResize(node: EditorElement, pointer: LayoutPoint): GestureResult {
     if (!finitePoint(pointer)) return invalidGesture('A resize requires finite pointer coordinates.');
+    const guard = layoutCommands.canMove(this.session, node);
+    if (!guard.ok) return guard;
     const locator = this.session.locatorFor(node.id);
     const box = this.frame.boxes.get(node.id);
     if (locator === null || box === undefined || findElement(this.session.document.root, node.id) !== node) {

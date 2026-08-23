@@ -44,6 +44,28 @@ describe('ManipulationController', () => {
       guides: [{ axis: 'x', value: 50 }, { axis: 'y', value: 50 }],
     });
   });
+
+  it('refuses a resize when the source-backed selection is not absolutely positioned', () => {
+    const source = [
+      '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+      '  <ui:VisualElement name="relative" style="width: 40px; height: 20px;" />',
+      '</ui:UXML>',
+    ].join('\n');
+    const session = openSession(source);
+    const node = elementNamed(session.document.root, 'relative');
+    const resize = new ManipulationController(session, previewFrame(node, { left: 0, top: 0, width: 40, height: 20 }));
+
+    expect(resize.startResize(node, { x: 40, y: 20 })).toEqual({
+      ok: false,
+      diagnostic: {
+        code: 'AMBIGUOUS_LAYOUT_WRITE',
+        message: 'Free movement requires computed position to be exactly absolute.',
+        nodeId: node.id,
+      },
+    });
+    expect(session.snapshot().files.get(session.entryPath)?.text).toBe(source);
+    expect(session.history.undoDepth).toBe(0);
+  });
 });
 
 function previewFrame(node: EditorElement, box: { left: number; top: number; width: number; height: number }): PreviewFrame {

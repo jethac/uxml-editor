@@ -2,12 +2,19 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const MENU = 'menu';
 const OPTIONS = 'options';
+const ASSETS = 'assets';
+const NESTED_STYLES = 'nested-styles';
 const UNSUPPORTED = 'unsupported';
 const BLANK = 'blank';
 const COLLISION = 'collision';
 const MENU_UXML = 'Assets/UI/Menu.uxml';
 const MENU_USS = 'Assets/UI/Menu.uss';
 const OPTIONS_UXML = 'Assets/UI/Options.uxml';
+const ASSETS_UXML = 'Assets/UI/Assets.uxml';
+const ASSETS_USS = 'Assets/UI/Assets.uss';
+const NESTED_UXML = 'Assets/UI/Nested.uxml';
+const NESTED_BASE_USS = 'Assets/UI/base.uss';
+const NESTED_BUTTONS_USS = 'Assets/UI/components/buttons.uss';
 const UNSUPPORTED_UXML = 'Assets/UI/Unsupported.uxml';
 const UNSUPPORTED_USS = 'Assets/UI/Unsupported.uss';
 const NEW_PROJECT_UXML = 'Assets/Main.uxml';
@@ -140,6 +147,148 @@ const MENU_AFTER_POST_SOURCE_VISUAL = MENU_AFTER_SOURCE_EDIT.replace(
   '    <ui:Button />\r\n    \r\n  </ui:VisualElement>',
   '    <ui:Button />\r\n    \r\n    \r\n    \r\n    <ui:Button />\r\n    \r\n  </ui:VisualElement>',
 );
+const MENU_CANVAS_BASELINE = MENU_BASELINE
+  .replace(
+    'text="Play &amp; Go" tooltip=\'Press &quot;Enter&quot;\'',
+    'text="Play &amp; Go" style="position: absolute; left: 40px; top: 30px; width: 160px; height: 40px;" tooltip=\'Press &quot;Enter&quot;\'',
+  )
+  .replace(
+    "text='Quit &#x26; Save' />",
+    "text='Quit &#x26; Save' style=\"position: absolute; left: 225px; top: 30px; width: 160px; height: 40px;\" />",
+  );
+const MENU_CANVAS_AFTER_SNAP_MOVE = MENU_CANVAS_BASELINE.replace(
+  'left: 40px; top: 30px;',
+  'left: 45px; top: 30px;',
+);
+const MENU_CANVAS_AFTER_RESIZE = MENU_CANVAS_AFTER_SNAP_MOVE.replace(
+  'width: 160px; height: 40px;',
+  'width: 192px; height: 48px;',
+);
+const MENU_NUDGE_BASELINE = MENU_BASELINE
+  .replace(
+    'text="Main Menu" />',
+    'text="Main Menu" style="position: absolute; left: 40px; top: 20px; width: 80px; height: 20px;" />',
+  )
+  .replace(
+    'text="Play &amp; Go" tooltip=\'Press &quot;Enter&quot;\'',
+    'text="Play &amp; Go" style="position: absolute; left: 160px; top: 60px; width: 160px; height: 40px;" tooltip=\'Press &quot;Enter&quot;\'',
+  )
+  .replace(
+    "text='Quit &#x26; Save' />",
+    "text='Quit &#x26; Save' style=\"position: absolute; left: 340px; top: 120px; width: 160px; height: 40px;\" />",
+  );
+const MENU_NUDGE_AFTER_NORMAL = MENU_NUDGE_BASELINE.replace(
+  'left: 160px; top: 60px;',
+  'left: 161px; top: 60px;',
+);
+const MENU_NUDGE_AFTER_ACCELERATED = MENU_NUDGE_AFTER_NORMAL.replace(
+  'left: 161px; top: 60px;',
+  'left: 161px; top: 70px;',
+);
+const MENU_NUDGE_AFTER_DISTRIBUTE = MENU_NUDGE_AFTER_ACCELERATED.replace(
+  'left: 161px; top: 70px;',
+  'left: 138.5px; top: 70px;',
+);
+const MENU_USS_AFTER_INSPECTOR_COLOR = MENU_USS_BASELINE.replace('#18794e', '#2563eb');
+const MENU_USS_AFTER_INSPECTOR_NEW_RULE = `${MENU_USS_AFTER_INSPECTOR_COLOR}\r\n#play-button {\r\n  opacity: 0.8;\r\n}\r\n`;
+const MENU_UXML_AFTER_INSPECTOR_INLINE = MENU_BASELINE.replace(
+  "tooltip='Press &quot;Enter&quot;'",
+  "tooltip='Press &quot;Enter&quot;' style='width: 240px;'",
+);
+const MENU_UXML_AFTER_INSPECTOR_BOX_ALIGNMENT = MENU_UXML_AFTER_INSPECTOR_INLINE.replace(
+  "style='width: 240px;'",
+  "style='width: 240px; margin-left: 12px; align-items: center;'",
+);
+const ASSETS_UXML_BASELINE = [
+  '<?xml version="1.0" encoding="utf-8"?>',
+  '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+  '  <Style src="Assets.uss" />',
+  '  <ui:VisualElement name="asset-root" class="asset-root">',
+  '    <ui:Image name="project-image" image="project://database/Assets/Textures/icon.png" />',
+  '    <ui:Image name="relative-image" image="../Textures/icon.png" />',
+  '    <ui:Image name="package-image" image="Packages/com.jethac.widgets/Textures/package-icon.png" />',
+  '  </ui:VisualElement>',
+  '</ui:UXML>',
+  '',
+].join('\n');
+const ASSETS_USS_BASELINE = [
+  '.asset-root {',
+  '  background-image: url("project://database/Assets/Textures/icon.png");',
+  '}',
+  '',
+  '.asset-root > #relative-image {',
+  '  background-image: url("../Textures/icon.png");',
+  '}',
+  '',
+  '.asset-root > #package-image {',
+  '  background-image: url("Packages/com.jethac.widgets/Textures/package-icon.png");',
+  '}',
+  '',
+].join('\n');
+const ASSETS_UXML_AFTER_ATTRIBUTES = ASSETS_UXML_BASELINE.replace(
+  'image="project://database/Assets/Textures/icon.png" />',
+  'image="project://database/Assets/Textures/replacement.png" src="Assets/Textures/icon.png" text="Icon preview" focusable="true" picking-mode="Ignore" />',
+);
+const ASSETS_UXML_AFTER_CLASS_ADD = ASSETS_UXML_AFTER_ATTRIBUTES.replace(
+  'picking-mode="Ignore" />',
+  'picking-mode="Ignore" class="asset-preview one" />',
+);
+const ASSETS_UXML_AFTER_CLASS_RENAME = ASSETS_UXML_AFTER_CLASS_ADD.replace(
+  'class="asset-preview one"',
+  'class="asset-preview main"',
+);
+const ASSETS_UXML_AFTER_CLASS_REORDER = ASSETS_UXML_AFTER_CLASS_RENAME.replace(
+  'class="asset-preview main"',
+  'class="main asset-preview"',
+);
+const ASSETS_UXML_AFTER_CLASS_REMOVE = ASSETS_UXML_AFTER_CLASS_REORDER.replace(
+  'class="main asset-preview"',
+  'class="main"',
+);
+const ASSETS_UXML_AFTER_MULTI_CLASS = ASSETS_UXML_AFTER_CLASS_REMOVE
+  .replace('class="main"', 'class="shared-icon"')
+  .replace('image="../Textures/icon.png" />', 'image="../Textures/icon.png" class="shared-icon" />');
+const NESTED_UXML_BASELINE = [
+  '<?xml version="1.0" encoding="utf-8"?>',
+  '<ui:UXML xmlns:ui="UnityEngine.UIElements">',
+  '  <Style src="base.uss" />',
+  '  <ui:VisualElement name="nested-root" class="nested-shell">',
+  '    <ui:Button name="nested-action" class="nested-action" text="Nested action" />',
+  '  </ui:VisualElement>',
+  '</ui:UXML>',
+  '',
+].join('\n');
+const NESTED_BASE_USS_BASELINE = [
+  '@import url("./components/buttons.uss");',
+  '',
+  '.nested-shell {',
+  '  padding: 20px;',
+  '  background-color: #e7eef6;',
+  '}',
+  '',
+  '.nested-action {',
+  '  color: #16324f;',
+  '  padding-left: 12px;',
+  '}',
+  '',
+].join('\n');
+const NESTED_BASE_USS_AFTER_ADD = NESTED_BASE_USS_BASELINE.replace(
+  '  background-color: #e7eef6;\n}',
+  '  background-color: #e7eef6;\n  margin-left: 8px;\n}',
+);
+const NESTED_BASE_USS_AFTER_REMOVE = NESTED_BASE_USS_AFTER_ADD.replace('  padding: 20px;\n', '');
+const NESTED_BASE_USS_AFTER_REORDER = NESTED_BASE_USS_AFTER_REMOVE.replace(
+  '  background-color: #e7eef6;\n  margin-left: 8px;',
+  '  margin-left: 8px;\n  background-color: #e7eef6;',
+);
+const NESTED_BUTTONS_USS_BASELINE = [
+  '.nested-action {',
+  '  width: 160px;',
+  '  color: #fef3c7;',
+  '  background-color: #245f9e;',
+  '}',
+  '',
+].join('\n');
 const UNSUPPORTED_AFTER_GENERIC_CREATE = [
   '<?xml version="1.0" encoding="utf-8"?>',
   '<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:acme="Acme.Widgets">',
@@ -265,6 +414,383 @@ test('rejects an unavailable production clipboard read without mutating source b
   await expect(page.locator('.canvas-interaction-status')).toContainText(/clipboard/i);
   expect(await visibleSourceText(page, MENU_UXML)).toBe(sourceBefore);
   expect(await project(page, MENU)).toEqual(before);
+});
+
+test('refuses a canvas resize for a selection without absolute authored layout', async ({ page }) => {
+  await openMenu(page);
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expectStructuralSelection(page, play, 'ui:Button');
+  await expectVisibleSource(page, MENU_UXML, MENU_BASELINE);
+
+  const resize = page.getByRole('button', { name: 'Resize selection' });
+  await expect(resize).toBeVisible();
+  const handle = await resize.boundingBox();
+  expect(handle).not.toBeNull();
+  await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle!.x + handle!.width / 2 + 12, handle!.y + handle!.height / 2 + 8);
+  await page.mouse.up();
+
+  await expect(page.locator('.canvas-interaction-status')).toContainText('Free movement requires computed position to be exactly absolute.');
+  await expectVisibleSource(page, MENU_UXML, MENU_BASELINE);
+  expect(await project(page, MENU)).toEqual(await baseline(page, MENU));
+});
+
+test('authors one snapped pointer move and one pointer resize as individually undoable canvas transactions', async ({ page }) => {
+  await openMenu(page);
+  const before = await project(page, MENU);
+  await showSource(page, MENU_UXML);
+  await replaceVisibleText(
+    page,
+    MENU_UXML,
+    'tooltip=\'Press &quot;Enter&quot;\'',
+    'style="position: absolute; left: 40px; top: 30px; width: 160px; height: 40px;" tooltip=\'Press &quot;Enter&quot;\'',
+  );
+  await replaceVisibleText(
+    page,
+    MENU_UXML,
+    "text='Quit &#x26; Save' />",
+    "text='Quit &#x26; Save' style=\"position: absolute; left: 225px; top: 30px; width: 160px; height: 40px;\" />",
+  );
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_BASELINE);
+
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expectStructuralSelection(page, play, 'ui:Button');
+  const target = page.getByTestId('canvas-renderer').getByText('Play & Go', { exact: true });
+  await expect(target).toBeVisible();
+  const targetBox = await target.boundingBox();
+  expect(targetBox).not.toBeNull();
+
+  await page.mouse.move(targetBox!.x + 20, targetBox!.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(targetBox!.x + 22, targetBox!.y + 20);
+  await expect(page.locator('.canvas-snap-guide')).toHaveCount(2);
+  await page.mouse.up();
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_AFTER_SNAP_MOVE);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_BASELINE);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_AFTER_SNAP_MOVE);
+
+  const resize = page.getByRole('button', { name: 'Resize selection' });
+  await expect(resize).toBeVisible();
+  const resizeBox = await resize.boundingBox();
+  expect(resizeBox).not.toBeNull();
+  await page.mouse.move(resizeBox!.x + resizeBox!.width / 2, resizeBox!.y + resizeBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(resizeBox!.x + resizeBox!.width / 2 + 12, resizeBox!.y + resizeBox!.height / 2 + 8);
+  await page.mouse.up();
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_AFTER_RESIZE);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_AFTER_SNAP_MOVE);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_AFTER_RESIZE);
+  await expectStructuralSelection(page, play, 'ui:Button');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await settled(page);
+  const saved = await project(page, MENU);
+  expect(saved.files[MENU_UXML]?.text).toBe(MENU_CANVAS_AFTER_RESIZE);
+  expect(saved.files[MENU_UXML]?.revision).not.toBe(before.files[MENU_UXML]?.revision);
+  expect(saved.files[MENU_USS]?.text).toBe(MENU_USS_BASELINE);
+  await runPaletteCommand(page, 'Close Project');
+  await expectClosedProject(page);
+  await runPaletteCommand(page, 'Reopen Project');
+  await expectOpenProject(page, 'Menu Fixture');
+  expect(await project(page, MENU)).toEqual(saved);
+  await expectVisibleSource(page, MENU_UXML, MENU_CANVAS_AFTER_RESIZE);
+});
+
+test('nudges with normal and accelerated steps, then distributes a real three-element canvas selection', async ({ page }) => {
+  await openMenu(page);
+  await showSource(page, MENU_UXML);
+  await replaceVisibleText(
+    page,
+    MENU_UXML,
+    'text="Main Menu" />',
+    'text="Main Menu" style="position: absolute; left: 40px; top: 20px; width: 80px; height: 20px;" />',
+  );
+  await replaceVisibleText(
+    page,
+    MENU_UXML,
+    'tooltip=\'Press &quot;Enter&quot;\'',
+    'style="position: absolute; left: 160px; top: 60px; width: 160px; height: 40px;" tooltip=\'Press &quot;Enter&quot;\'',
+  );
+  await replaceVisibleText(
+    page,
+    MENU_UXML,
+    "text='Quit &#x26; Save' />",
+    "text='Quit &#x26; Save' style=\"position: absolute; left: 340px; top: 120px; width: 160px; height: 40px;\" />",
+  );
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_BASELINE);
+
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const title = hierarchy.getByRole('treeitem', { name: 'menu-title' });
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  const quit = hierarchy.getByRole('treeitem', { name: 'quit-button' });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expectStructuralSelection(page, play, 'ui:Button');
+  const canvas = page.getByLabel('Canvas editing area');
+  await canvas.focus();
+  await page.keyboard.press('ArrowRight');
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_AFTER_NORMAL);
+  await canvas.focus();
+  await page.keyboard.press('Shift+ArrowDown');
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_AFTER_ACCELERATED);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_AFTER_NORMAL);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_AFTER_ACCELERATED);
+
+  await title.focus();
+  await page.keyboard.press('Enter');
+  await play.focus();
+  await page.keyboard.press('Control+Enter');
+  await quit.focus();
+  await page.keyboard.press('Control+Enter');
+  await expect(title).toHaveAttribute('aria-selected', 'true');
+  await expect(play).toHaveAttribute('aria-selected', 'true');
+  await expect(quit).toHaveAttribute('aria-selected', 'true');
+  const distribute = page.getByRole('button', { name: 'Distribute horizontally' });
+  await expect(distribute).toBeEnabled();
+  await distribute.click();
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_AFTER_DISTRIBUTE);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_AFTER_ACCELERATED);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, MENU_UXML, MENU_NUDGE_AFTER_DISTRIBUTE);
+  await expect(page.getByLabel('Inspector selection context')).toContainText('3 elements');
+});
+
+test('changes canvas viewport and pseudo-state controls without mutating authored bytes', async ({ page }) => {
+  await openMenu(page);
+  const before = await project(page, MENU);
+  const canvas = page.getByLabel('Canvas editing area');
+  const transform = page.getByTestId('canvas-transform');
+
+  await page.getByRole('button', { name: 'Pan tool' }).click();
+  await expect(page.getByRole('button', { name: 'Pan tool' })).toHaveAttribute('aria-pressed', 'true');
+  const field = await canvas.boundingBox();
+  expect(field).not.toBeNull();
+  await page.mouse.move(field!.x + 20, field!.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(field!.x + 45, field!.y + 32);
+  await page.mouse.up();
+  await expect(transform).toHaveAttribute('style', /translate\(25px, 12px\) scale\(1\)/);
+
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(page.getByLabel('Canvas zoom')).toHaveText('110%');
+  await expect(transform).toHaveAttribute('style', /scale\(1\.1\)/);
+  await page.getByRole('button', { name: 'Fit canvas' }).click();
+  await expect(page.getByLabel('Canvas zoom')).not.toHaveText('110%');
+  await page.getByRole('button', { name: 'Actual size' }).click();
+  await expect(page.getByLabel('Canvas zoom')).toHaveText('100%');
+
+  const preset = page.getByRole('combobox', { name: 'Device preset' });
+  await preset.selectOption('mobile');
+  await expect(preset).toHaveValue('mobile');
+  await expect(page.getByRole('spinbutton', { name: 'Canvas width' })).toHaveValue('390');
+  await expect(page.getByRole('spinbutton', { name: 'Canvas height' })).toHaveValue('844');
+  await page.getByRole('button', { name: 'Swap orientation' }).click();
+  await expect(preset).toHaveValue('custom');
+  await expect(page.getByRole('spinbutton', { name: 'Canvas width' })).toHaveValue('844');
+  await expect(page.getByRole('spinbutton', { name: 'Canvas height' })).toHaveValue('390');
+  const width = page.getByRole('spinbutton', { name: 'Canvas width' });
+  const height = page.getByRole('spinbutton', { name: 'Canvas height' });
+  await width.fill('512');
+  await width.blur();
+  await height.fill('320');
+  await height.blur();
+  await expect(preset).toHaveValue('custom');
+  await expect(width).toHaveValue('512');
+  await expect(height).toHaveValue('320');
+
+  const safeArea = page.getByRole('checkbox', { name: 'Show safe area' });
+  await safeArea.check();
+  await expect(page.getByTestId('safe-area')).toBeVisible();
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByLabel('Inspector selection context')).toContainText('Base state');
+  const hover = page.getByRole('checkbox', { name: 'Hover' });
+  await hover.check();
+  await expect(hover).toBeChecked();
+  await expect(page.getByLabel('Inspector selection context')).toContainText('Hover');
+  expect(await project(page, MENU)).toEqual(before);
+});
+
+test('authors inspector values through existing-rule, inline, and new-rule destinations with exact source history', async ({ page }) => {
+  await openMenu(page);
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  await play.focus();
+  await page.keyboard.press('Enter');
+  await expectStructuralSelection(page, play, 'ui:Button');
+
+  const background = page.getByRole('textbox', { name: 'Background color' });
+  await expect(background).toHaveValue('#18794e');
+  await expect(background).toHaveAccessibleDescription('Menu.uss · .menu-button.primary');
+  await background.fill('#2563eb');
+  await background.press('Enter');
+  const colorMenu = page.getByRole('menu', { name: 'Write background-color to' });
+  await expect(colorMenu).toBeVisible();
+  await colorMenu.getByRole('menuitem', { name: 'Menu.uss · .menu-button.primary' }).click();
+  await showSource(page, MENU_UXML);
+  await page.getByRole('combobox', { name: 'Source file' }).selectOption(MENU_USS);
+  await expectVisibleSource(page, MENU_USS, MENU_USS_AFTER_INSPECTOR_COLOR);
+
+  const width = page.getByRole('textbox', { name: 'Width', exact: true });
+  await width.fill('240px');
+  await width.press('Enter');
+  await page.getByRole('menu', { name: 'Write width to' }).getByRole('menuitem', { name: 'Inline style' }).click();
+  await page.getByRole('combobox', { name: 'Source file' }).selectOption(MENU_UXML);
+  await expectVisibleSource(page, MENU_UXML, MENU_UXML_AFTER_INSPECTOR_INLINE);
+  await width.fill('12pt');
+  await width.press('Enter');
+  await expect(width).toHaveAttribute('aria-invalid', 'true');
+  await expectVisibleSource(page, MENU_UXML, MENU_UXML_AFTER_INSPECTOR_INLINE);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_UXML, MENU_BASELINE);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, MENU_UXML, MENU_UXML_AFTER_INSPECTOR_INLINE);
+
+  const marginLeft = page.getByRole('textbox', { name: 'Margin left' });
+  await marginLeft.fill('12px');
+  await marginLeft.press('Enter');
+  await page.getByRole('menu', { name: 'Write margin-left to' }).getByRole('menuitem', { name: 'Inline style' }).click();
+  const alignItems = page.getByRole('combobox', { name: 'Align items' });
+  await alignItems.selectOption('center');
+  await page.getByRole('menu', { name: 'Write align-items to' }).getByRole('menuitem', { name: 'Inline style' }).click();
+  await expectVisibleSource(page, MENU_UXML, MENU_UXML_AFTER_INSPECTOR_BOX_ALIGNMENT);
+
+  const opacity = page.getByRole('textbox', { name: 'Opacity' });
+  await opacity.fill('0.8');
+  await opacity.press('Enter');
+  await page.getByRole('menu', { name: 'Write opacity to' }).getByRole('menuitem', { name: 'New rule: Menu.uss · #play-button' }).click();
+  await page.getByRole('combobox', { name: 'Source file' }).selectOption(MENU_USS);
+  await expectVisibleSource(page, MENU_USS, MENU_USS_AFTER_INSPECTOR_NEW_RULE);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, MENU_USS, MENU_USS_AFTER_INSPECTOR_COLOR);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, MENU_USS, MENU_USS_AFTER_INSPECTOR_NEW_RULE);
+  await expectStructuralSelection(page, play, 'ui:Button');
+});
+
+test('authors typed inspector attributes and class tokens, then persists an explicit mixed multi-edit', async ({ page }) => {
+  await openEditor(page);
+  await selectProject(page, ASSETS);
+  await page.getByRole('button', { name: 'Open Project' }).click();
+  await settled(page);
+  await expectOpenProject(page, 'Assets Fixture');
+  const before = await project(page, ASSETS);
+  const hierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const projectImage = hierarchy.getByRole('treeitem', { name: 'project-image' });
+  await projectImage.focus();
+  await page.keyboard.press('Enter');
+  await expectStructuralSelection(page, projectImage, 'ui:Image');
+
+  const assetSource = page.getByRole('textbox', { name: 'Asset source' });
+  await assetSource.fill('../invalid.png');
+  await assetSource.press('Enter');
+  await expect(assetSource).toHaveAttribute('aria-invalid', 'true');
+  await showSource(page, ASSETS_UXML);
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_BASELINE);
+  await page.getByRole('button', { name: 'Available asset source values' }).click();
+  await page.getByRole('combobox', { name: 'Asset source project asset' }).selectOption('Assets/Textures/icon.png');
+  await page.getByRole('button', { name: 'Use asset source asset' }).click();
+
+  const text = page.getByRole('textbox', { name: 'Text' });
+  await text.fill('Icon preview');
+  await text.press('Enter');
+  await page.getByRole('checkbox', { name: 'Focusable' }).check();
+  await page.getByRole('combobox', { name: 'Picking mode' }).selectOption('Ignore');
+  const image = page.getByRole('textbox', { name: 'image value' });
+  await image.fill('project://database/Assets/Textures/replacement.png');
+  await image.press('Enter');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_ATTRIBUTES);
+
+  const classes = page.getByRole('textbox', { name: 'Classes' });
+  await classes.fill('asset-preview asset-preview');
+  await classes.press('Enter');
+  await expect(classes).toHaveAttribute('aria-invalid', 'true');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_ATTRIBUTES);
+  await classes.fill('asset-preview one');
+  await classes.press('Enter');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_CLASS_ADD);
+  await classes.fill('asset-preview main');
+  await classes.press('Enter');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_CLASS_RENAME);
+  await classes.fill('main asset-preview');
+  await classes.press('Enter');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_CLASS_REORDER);
+  await classes.fill('main');
+  await classes.press('Enter');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_CLASS_REMOVE);
+
+  const relativeImage = hierarchy.getByRole('treeitem', { name: 'relative-image' });
+  await relativeImage.focus();
+  await page.keyboard.press('Control+Enter');
+  await expect(page.getByLabel('Inspector selection context')).toContainText('2 elements');
+  await expect(classes).toHaveAttribute('placeholder', 'Mixed');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_CLASS_REMOVE);
+  await classes.fill('shared-icon');
+  await classes.press('Enter');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_MULTI_CLASS);
+  await runPaletteCommand(page, 'Undo');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_CLASS_REMOVE);
+  await runPaletteCommand(page, 'Redo');
+  await expectVisibleSource(page, ASSETS_UXML, ASSETS_UXML_AFTER_MULTI_CLASS);
+
+  await page.getByRole('button', { name: 'Save' }).click();
+  await settled(page);
+  const saved = await project(page, ASSETS);
+  expect(saved.files[ASSETS_UXML]?.text).toBe(ASSETS_UXML_AFTER_MULTI_CLASS);
+  expect(saved.files[ASSETS_USS]?.text).toBe(ASSETS_USS_BASELINE);
+  expect(saved.files[ASSETS_USS]).toEqual(before.files[ASSETS_USS]);
+  await runPaletteCommand(page, 'Close Project');
+  await expectClosedProject(page);
+  await runPaletteCommand(page, 'Reopen Project');
+  await expectOpenProject(page, 'Assets Fixture');
+  expect(await project(page, ASSETS)).toEqual(saved);
+  const reopenedHierarchy = page.getByRole('tree', { name: 'Document hierarchy' });
+  const reopenedProjectImage = reopenedHierarchy.getByRole('treeitem', { name: 'project-image' });
+  await reopenedProjectImage.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('textbox', { name: 'Asset source' })).toHaveValue('Assets/Textures/icon.png');
+  await expect(page.getByRole('textbox', { name: 'Text' })).toHaveValue('Icon preview');
+  await expect(page.getByRole('checkbox', { name: 'Focusable' })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: 'Picking mode' })).toHaveValue('Ignore');
+  await expect(page.getByRole('textbox', { name: 'image value' })).toHaveValue('project://database/Assets/Textures/replacement.png');
+  await expect(page.getByRole('textbox', { name: 'Classes' })).toHaveValue('shared-icon');
+});
+
+test('adds, removes, and reorders USS declarations through the visible source editor without disturbing imports', async ({ page }) => {
+  await openEditor(page);
+  await selectProject(page, NESTED_STYLES);
+  await page.getByRole('button', { name: 'Open Project' }).click();
+  await settled(page);
+  await expectOpenProject(page, 'Nested Styles Fixture');
+  await showSource(page, NESTED_UXML);
+  await expectVisibleSource(page, NESTED_UXML, NESTED_UXML_BASELINE);
+  await page.getByRole('combobox', { name: 'Source file' }).selectOption(NESTED_BASE_USS);
+  await sourceEditor(page, NESTED_BASE_USS).fill(NESTED_BASE_USS_AFTER_ADD);
+  await drainSourceCallbacks(page);
+  await expectVisibleSource(page, NESTED_BASE_USS, NESTED_BASE_USS_AFTER_ADD);
+  await sourceEditor(page, NESTED_BASE_USS).fill(NESTED_BASE_USS_AFTER_REMOVE);
+  await drainSourceCallbacks(page);
+  await expectVisibleSource(page, NESTED_BASE_USS, NESTED_BASE_USS_AFTER_REMOVE);
+  await sourceEditor(page, NESTED_BASE_USS).fill(NESTED_BASE_USS_AFTER_REORDER);
+  await drainSourceCallbacks(page);
+  await expectVisibleSource(page, NESTED_BASE_USS, NESTED_BASE_USS_AFTER_REORDER);
+  await page.getByRole('combobox', { name: 'Source file' }).selectOption(NESTED_BUTTONS_USS);
+  await expectVisibleSource(page, NESTED_BUTTONS_USS, NESTED_BUTTONS_USS_BASELINE);
 });
 
 test('authors structure through palette, hierarchy, canvas, source, and pointer controls', async ({ page }) => {
@@ -677,7 +1203,7 @@ test('a replacement failure preserves bytes and surfaces a recoverable dirty edi
   expect((await hostObservations(page)).recovery['fixture:menu']).toBeNull();
 });
 
-type ProjectKey = 'menu' | 'options' | 'unsupported' | 'blank' | 'collision';
+type ProjectKey = 'menu' | 'options' | 'assets' | 'nested-styles' | 'unsupported' | 'blank' | 'collision';
 
 interface FileSnapshot {
   readonly text: string;
