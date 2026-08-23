@@ -82,12 +82,63 @@ describe('SourcePanel', () => {
 
     expect(coordinator.getSnapshot().drafts.get(entryPath)).toContain('Typed');
   });
+
+  it('preserves exact CRLF bytes outside a localized visible source edit', () => {
+    const crlfUxml = uxml.replace(/\n/g, '\r\n');
+    const coordinator = createCoordinator(crlfUxml);
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+    const editor = screen.getByRole('textbox', { name: `${entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    const from = view.state.doc.toString().indexOf('Original');
+
+    act(() => view.dispatch({
+      changes: { from, to: from + 'Original'.length, insert: 'Typed' },
+    }));
+
+    expect(coordinator.getSnapshot().drafts.get(entryPath)).toBe(crlfUxml.replace('Original', 'Typed'));
+  });
+
+  it('preserves untouched mixed separators across a localized visible source edit', async () => {
+    const user = userEvent.setup();
+    const mixedUss = '.title {\r\n  color: red;\n  width: 10px;\r}\r\n';
+    const coordinator = createCoordinator(uxml, mixedUss);
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Source file' }), sheetPath);
+    const editor = screen.getByRole('textbox', { name: `${sheetPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+    const from = view.state.doc.toString().indexOf('red');
+
+    act(() => view.dispatch({
+      changes: { from, to: from + 'red'.length, insert: 'blue' },
+    }));
+
+    expect(coordinator.getSnapshot().drafts.get(sheetPath)).toBe(mixedUss.replace('red', 'blue'));
+  });
+
+  it('maps rapid localized edits against the latest exact CRLF draft', () => {
+    const crlfUxml = uxml.replace(/\n/g, '\r\n');
+    const coordinator = createCoordinator(crlfUxml);
+    render(<SourcePanel coordinator={coordinator} diagnostics={[]} />);
+    const editor = screen.getByRole('textbox', { name: `${entryPath} source` });
+    const view = EditorView.findFromDOM(editor)!;
+
+    act(() => {
+      const first = view.state.doc.toString().indexOf('Assets/UI/Main.uss');
+      view.dispatch({ changes: { from: first, to: first + 'Assets/UI/Main.uss'.length, insert: 'M.uss' } });
+      const second = view.state.doc.toString().indexOf('Original');
+      view.dispatch({ changes: { from: second, to: second + 'Original'.length, insert: 'Typed' } });
+    });
+
+    expect(coordinator.getSnapshot().drafts.get(entryPath)).toBe(
+      crlfUxml.replace('Assets/UI/Main.uss', 'M.uss').replace('Original', 'Typed'),
+    );
+  });
 });
 
-function createCoordinator(): SourceEditCoordinator {
+function createCoordinator(entrySource = uxml, sheetSource = uss): SourceEditCoordinator {
   const session = DocumentSession.open(new Map([
-    [entryPath, uxml],
-    [sheetPath, uss],
+    [entryPath, entrySource],
+    [sheetPath, sheetSource],
   ]), entryPath, new UxmlPreviewAdapter());
   const coordinator = new SourceEditCoordinator(session);
   coordinators.push(coordinator);

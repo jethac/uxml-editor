@@ -36,8 +36,8 @@ export function SourcePanel({ coordinator, diagnostics }: SourcePanelProps) {
   const fileControlRef = useRef<HTMLSelectElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const synchronizingRef = useRef(false);
-  const snapshotRef = useRef(snapshot);
-  snapshotRef.current = snapshot;
+  const draftsRef = useRef(snapshot.drafts);
+  draftsRef.current = snapshot.drafts;
   const diagnosticSources = navigableDiagnostics(diagnostics, snapshot.drafts);
 
   useEffect(() => {
@@ -76,7 +76,16 @@ export function SourcePanel({ coordinator, diagnostics }: SourcePanelProps) {
           path.toLowerCase().endsWith('.uss') ? css() : xml(),
           EditorView.updateListener.of((update) => {
             if (update.docChanged && !synchronizingRef.current) {
-              coordinator.replace(update.state.doc.toString());
+              const source = draftsRef.current.get(path) ?? '';
+              const changes: EditorTextChange[] = [];
+              update.changes.iterChanges((from, to, _fromAfter, _toAfter, inserted) => {
+                changes.push({ from, to, insert: inserted.toString() });
+              });
+              const replacement = applyEditorChanges(source, changes);
+              const drafts = new Map(draftsRef.current);
+              drafts.set(path, replacement);
+              draftsRef.current = drafts;
+              coordinator.replace(replacement);
             }
           }),
         ],
@@ -94,14 +103,15 @@ export function SourcePanel({ coordinator, diagnostics }: SourcePanelProps) {
     const view = viewRef.current;
     if (view === null) return;
     const draft = snapshot.drafts.get(snapshot.activePath) ?? '';
+    const editorDraft = normalizeEditorLineEndings(draft);
     const current = view.state.doc.toString();
     const span = spanForActiveFile(snapshot.activeSpan, snapshot.activePath, draft.length);
     const effects = span === null ? undefined : EditorView.scrollIntoView(span.start, { y: 'center' });
-    if (current === draft && span === null) return;
+    if (current === editorDraft && span === null) return;
     synchronizingRef.current = true;
     try {
       view.dispatch({
-        ...(current === draft ? {} : { changes: { from: 0, to: current.length, insert: draft } }),
+        ...(current === editorDraft ? {} : { changes: { from: 0, to: current.length, insert: editorDraft } }),
         ...(span === null ? {} : { selection: { anchor: span.start, head: span.end }, effects }),
       });
     } finally {
@@ -207,4 +217,39 @@ function sameSpan(left: EditorSourceSpan, right: EditorSourceSpan | null): boole
     && left.path === right.path
     && left.start === right.start
     && left.end === right.end;
+}
+
+interface EditorTextChange {
+  readonly from: number;
+  readonly to: number;
+  readonly insert: string;
+}
+
+function applyEditorChanges(source: string, changes: readonly EditorTextChange[]): string {
+  const mapped = changes.map((change) => ({
+    from: editorOffsetToSourceOffset(source, change.from),
+    to: editorOffsetToSourceOffset(source, change.to),
+    insert: change.insert,
+  }));
+  let result = source;
+  for (let index = mapped.length - 1; index >= 0; index -= 1) {
+    const change = mapped[index]!;
+    result = result.slice(0, change.from) + change.insert + result.slice(change.to);
+  }
+  return result;
+}
+
+function editorOffsetToSourceOffset(source: string, target: number): number {
+  let sourceOffset = 0;
+  let editorOffset = 0;
+  while (sourceOffset < source.length && editorOffset < target) {
+    sourceOffset += source[sourceOffset] === '\r' && source[sourceOffset + 1] === '\n' ? 2 : 1;
+    editorOffset += 1;
+  }
+  if (editorOffset !== target) throw new RangeError(`Editor offset is outside the source: ${target}`);
+  return sourceOffset;
+}
+
+function normalizeEditorLineEndings(source: string): string {
+  return source.replace(/\r\n?/g, '\n');
 }

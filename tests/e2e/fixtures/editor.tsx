@@ -21,7 +21,7 @@ import {
   type MemoryFailure,
   type MemoryProjectInput,
 } from '../../../src/core/host/MemoryHost';
-import { SOURCE_EDIT_DEBOUNCE_MS } from '../../../src/core/documents/SourceEditCoordinator';
+import { FileWorkflow } from '../../../src/features/workspace/FileWorkflow';
 import {
   EDITOR_ASSET_URLS,
   editorFixtureProject,
@@ -53,8 +53,15 @@ interface HarnessSnapshot extends HostObservations {
   readonly projects: Readonly<Record<EditorFixtureProjectKey, ProjectSnapshot>>;
 }
 
+interface RuntimeState {
+  readonly activeRuntime: number;
+  readonly completedTeardowns: readonly number[];
+  readonly lateHostOperations: number;
+}
+
 export interface EditorFixtureBridge {
   reset(source?: Exclude<EditorFixtureProjectKey, 'blank' | 'collision'>): Promise<void>;
+  restart(): Promise<void>;
   settled(): Promise<void>;
   selectProject(key: EditorFixtureProjectKey): void;
   queueConfirmation(confirmed: boolean): void;
@@ -66,6 +73,7 @@ export interface EditorFixtureBridge {
   baseline(key: EditorFixtureProjectKey): ProjectSnapshot;
   observations(): Promise<HostObservations>;
   snapshot(): Promise<HarnessSnapshot>;
+  runtimeState(): RuntimeState;
 }
 
 class SelectableMemoryHost extends MemoryHost {
@@ -73,6 +81,8 @@ class SelectableMemoryHost extends MemoryHost {
   private readonly rootsByKey = new Map<EditorFixtureProjectKey, ProjectRoot>();
   private pendingOperations = 0;
   private activity = 0;
+  private retired = false;
+  private operationsAfterRetirement = 0;
 
   constructor(
     projects: readonly MemoryProjectInput[],
@@ -187,7 +197,6 @@ class SelectableMemoryHost extends MemoryHost {
   }
 
   async settled(): Promise<void> {
-    await delay(SOURCE_EDIT_DEBOUNCE_MS + 10);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       await Promise.resolve();
       if (this.pendingOperations === 0) {
@@ -202,6 +211,14 @@ class SelectableMemoryHost extends MemoryHost {
     throw new Error('Fixture host did not settle.');
   }
 
+  retire(): void {
+    this.retired = true;
+  }
+
+  get lateOperations(): number {
+    return this.operationsAfterRetirement;
+  }
+
   private requireRoot(key: EditorFixtureProjectKey): ProjectRoot {
     const root = this.rootsByKey.get(key);
     if (root === undefined) throw new Error(`Unknown fixture project: ${key}`);
@@ -209,6 +226,7 @@ class SelectableMemoryHost extends MemoryHost {
   }
 
   private async track<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.retired) this.operationsAfterRetirement += 1;
     this.pendingOperations += 1;
     this.activity += 1;
     try {
@@ -223,41 +241,35 @@ class SelectableMemoryHost extends MemoryHost {
 class ProductionEditorHarness {
   private reactRoot: Root | null = null;
   private host: SelectableMemoryHost | null = null;
+  private workflow: FileWorkflow | null = null;
   private baselines = new Map<EditorFixtureProjectKey, ProjectSnapshot>();
+  private runtimeSequence = 0;
+  private activeRuntime = 0;
+  private readonly completedTeardowns: number[] = [];
+  private readonly retiredHosts: SelectableMemoryHost[] = [];
 
   constructor(private readonly element: HTMLElement) {}
 
   async reset(source: Exclude<EditorFixtureProjectKey, 'blank' | 'collision'> = 'menu'): Promise<void> {
-    const previousHost = this.host;
-    if (this.reactRoot !== null) {
-      this.reactRoot.unmount();
-      this.reactRoot = null;
-      await previousHost?.settled();
-      this.element.replaceChildren();
-    }
+    await this.teardownCurrentRuntime(true);
     const host = new SelectableMemoryHost(editorFixtureProjects(source), source);
     const baselines = new Map<EditorFixtureProjectKey, ProjectSnapshot>();
     for (const key of fixtureProjectKeys()) baselines.set(key, await host.projectSnapshot(key));
     this.host = host;
     this.baselines = baselines;
-    const browserScope = Object.freeze({});
-    const runtimeScope = Object.freeze({
-      innerWidth: window.innerWidth,
-      innerHeight: window.innerHeight,
-    });
-    const store = createRuntimeEditorStore({
-      scope: runtimeScope,
-      browserHostOptions: { scope: browserScope, fallback: host },
-      storage: null,
-      viewport: { width: window.innerWidth, height: window.innerHeight },
-    });
-    this.reactRoot = createRoot(this.element);
-    this.reactRoot.render(<App store={store} />);
-    await host.settled();
+    await this.mountRuntime(host);
+  }
+
+  async restart(): Promise<void> {
+    const host = this.requireHost();
+    await this.teardownCurrentRuntime(false);
+    this.host = host;
+    await this.mountRuntime(host);
   }
 
   readonly bridge: EditorFixtureBridge = Object.freeze({
     reset: (source) => this.reset(source),
+    restart: () => this.restart(),
     settled: () => this.requireHost().settled(),
     selectProject: (key) => this.requireHost().selectProject(key),
     queueConfirmation: (confirmed) => this.requireHost().queueConfirmation(confirmed),
@@ -285,7 +297,53 @@ class ProductionEditorHarness {
       for (const key of fixtureProjectKeys()) projects[key] = await host.projectSnapshot(key);
       return Object.freeze({ projects: Object.freeze(projects), ...(await host.observations()) });
     },
+    runtimeState: () => Object.freeze({
+      activeRuntime: this.activeRuntime,
+      completedTeardowns: Object.freeze([...this.completedTeardowns]),
+      lateHostOperations: this.retiredHosts.reduce((total, host) => total + host.lateOperations, 0),
+    }),
   });
+
+  private async mountRuntime(host: SelectableMemoryHost): Promise<void> {
+    const browserScope = Object.freeze({});
+    const runtimeScope = Object.freeze({
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+    });
+    const store = createRuntimeEditorStore({
+      scope: runtimeScope,
+      browserHostOptions: { scope: browserScope, fallback: host },
+      storage: null,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    });
+    const runtimeHost = store.getSnapshot().host;
+    if (runtimeHost === null) throw new Error('Production editor fixture host is unavailable.');
+    const workflow = new FileWorkflow(store, runtimeHost);
+    this.workflow = workflow;
+    this.runtimeSequence += 1;
+    this.activeRuntime = this.runtimeSequence;
+    this.reactRoot = createRoot(this.element);
+    this.reactRoot.render(<App store={store} task16FileLifecycle={workflow} />);
+    await host.settled();
+  }
+
+  private async teardownCurrentRuntime(retireHost: boolean): Promise<void> {
+    if (this.reactRoot === null || this.host === null || this.workflow === null) return;
+    const runtime = this.activeRuntime;
+    const host = this.host;
+    const workflow = this.workflow;
+    this.reactRoot.unmount();
+    this.reactRoot = null;
+    this.workflow = null;
+    await workflow.dispose();
+    await host.settled();
+    if (retireHost) {
+      host.retire();
+      this.retiredHosts.push(host);
+    }
+    this.completedTeardowns.push(runtime);
+    this.element.replaceChildren();
+  }
 
   private requireHost(): SelectableMemoryHost {
     if (this.host === null) throw new Error('Fixture host is not initialized.');
@@ -319,10 +377,6 @@ function fixtureProjectKeys(): readonly EditorFixtureProjectKey[] {
 
 function nextPaint(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 const element = document.getElementById('root');

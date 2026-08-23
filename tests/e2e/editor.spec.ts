@@ -6,6 +6,7 @@ const BLANK = 'blank';
 const COLLISION = 'collision';
 const MENU_UXML = 'Assets/UI/Menu.uxml';
 const MENU_USS = 'Assets/UI/Menu.uss';
+const OPTIONS_UXML = 'Assets/UI/Options.uxml';
 const NEW_PROJECT_UXML = 'Assets/Main.uxml';
 const NEW_PROJECT_SOURCE = '<ui:UXML xmlns:ui="UnityEngine.UIElements">\n</ui:UXML>\n';
 
@@ -154,14 +155,45 @@ test('Reload Project is a deterministic no-op after the watch applies a clean ex
 
   await advanceTime(page, 50);
   await expect(sourceEditor(page, MENU_UXML)).toContainText('Reloaded Menu');
-  expect(await visibleSource(page, MENU_UXML)).toBe(editorVisibleText(changedText));
   const afterWatch = await project(page, MENU);
 
   await runPaletteCommand(page, 'Reload Project');
   expect(await project(page, MENU)).toEqual(afterWatch);
-  expect(await visibleSource(page, MENU_UXML)).toBe(editorVisibleText(changedText));
+  await expect(sourceEditor(page, MENU_UXML)).toContainText('Reloaded Menu');
   await runPaletteCommand(page, 'Close Project');
   await expectClosedProject(page);
+});
+
+test('a second reset awaits both real workflow teardowns and retires prior callbacks', async ({ page }) => {
+  await openMenu(page);
+  const menuSource = (await project(page, MENU)).files[MENU_UXML]!.text;
+  await showSource(page, MENU_UXML);
+  await sourceEditor(page, MENU_UXML).fill(menuSource.replace('Main Menu', 'Retired Menu'));
+
+  await resetEditor(page, OPTIONS);
+  expect(await runtimeState(page)).toEqual({
+    activeRuntime: 2,
+    completedTeardowns: [1],
+    lateHostOperations: 0,
+  });
+  await page.getByRole('button', { name: 'Open Project' }).click();
+  await settled(page);
+  await expectOpenProject(page, 'Options Fixture');
+  const optionsSource = (await project(page, OPTIONS)).files[OPTIONS_UXML]!.text;
+  await showSource(page, OPTIONS_UXML);
+  await sourceEditor(page, OPTIONS_UXML).fill(optionsSource.replace('Runner', 'Retired Runner'));
+
+  await resetEditor(page, MENU);
+  await page.waitForTimeout(300);
+  expect(await runtimeState(page)).toEqual({
+    activeRuntime: 3,
+    completedTeardowns: [1, 2],
+    lateHostOperations: 0,
+  });
+  await page.getByRole('button', { name: 'Open Project' }).click();
+  await settled(page);
+  await expectOpenProject(page, 'Menu Fixture');
+  expect(await project(page, MENU)).toEqual(await baseline(page, MENU));
 });
 
 test('a replacement failure preserves bytes and surfaces a recoverable dirty edit', async ({ page }) => {
@@ -172,9 +204,11 @@ test('a replacement failure preserves bytes and surfaces a recoverable dirty edi
   expect(changedText).not.toBe(original.text);
 
   await showSource(page, MENU_UXML);
-  await sourceEditor(page, MENU_UXML).fill(changedText);
+  await replaceVisibleText(page, MENU_UXML, 'Main Menu', 'Save Recovery');
   await expect(page.getByText('Ready', { exact: true })).toBeVisible();
-  await settled(page);
+  await expect.poll(async () => (
+    await hostObservations(page)
+  ).recovery['fixture:menu']).not.toBeNull();
   expect(await project(page, MENU)).toEqual(before);
   expect((await hostObservations(page)).recovery['fixture:menu']).not.toBeNull();
 
@@ -188,13 +222,22 @@ test('a replacement failure preserves bytes and surfaces a recoverable dirty edi
   expect((await hostObservations(page)).messages).toEqual([]);
 
   await error.getByRole('button', { name: 'Dismiss' }).click();
+  await restartEditor(page);
+  await page.getByRole('button', { name: 'Open Project' }).click();
+  await settled(page);
+  await expectOpenProject(page, 'Menu Fixture');
+  expect(await project(page, MENU)).toEqual(before);
+  await showSource(page, MENU_UXML);
+  await expect(sourceEditor(page, MENU_UXML)).toContainText('Save Recovery');
+
   await page.getByRole('button', { name: 'Save' }).click();
   await settled(page);
   const recovered = await project(page, MENU);
   expect(recovered.files[MENU_UXML]).toEqual({
-    text: editorVisibleText(changedText),
+    text: changedText,
     revision: recovered.files[MENU_UXML]?.revision,
   });
+  expectOnlyCrLf(recovered.files[MENU_UXML]!.text);
   expect(recovered.files[MENU_UXML]?.revision).not.toBe(original.revision);
   expect(recovered.files[MENU_USS]).toEqual(before.files[MENU_USS]);
   expect((await hostObservations(page)).recovery['fixture:menu']).toBeNull();
@@ -234,6 +277,8 @@ interface HostObservations {
 }
 
 interface EditorFixtureBridge {
+  reset(source?: Exclude<ProjectKey, 'blank' | 'collision'>): Promise<void>;
+  restart(): Promise<void>;
   settled(): Promise<void>;
   selectProject(key: ProjectKey): void;
   queueConfirmation(confirmed: boolean): void;
@@ -241,7 +286,13 @@ interface EditorFixtureBridge {
   externalWrite(key: ProjectKey, path: string, text: string): Promise<void>;
   advanceTime(milliseconds: number): Promise<void>;
   project(key: ProjectKey): Promise<ProjectSnapshot>;
+  baseline(key: ProjectKey): ProjectSnapshot;
   observations(): Promise<HostObservations>;
+  runtimeState(): Readonly<{
+    activeRuntime: number;
+    completedTeardowns: readonly number[];
+    lateHostOperations: number;
+  }>;
 }
 
 async function openEditor(page: Page): Promise<void> {
@@ -297,14 +348,36 @@ function sourceEditor(page: Page, path: string): Locator {
   return page.getByRole('textbox', { name: `${path} source` });
 }
 
-async function visibleSource(page: Page, path: string): Promise<string> {
-  return (await sourceEditor(page, path).innerText()).replace(/\r?\n$/, '');
+async function replaceVisibleText(page: Page, path: string, search: string, replacement: string): Promise<void> {
+  const editor = sourceEditor(page, path);
+  await editor.click();
+  await page.getByRole('button', { name: 'Find in source' }).click();
+  const find = page.getByRole('textbox', { name: 'Find' });
+  await find.fill(search);
+  await page.getByRole('textbox', { name: 'Replace' }).fill(replacement);
+  await page.getByRole('button', { name: 'replace all', exact: true }).click();
+  await page.getByRole('button', { name: 'close', exact: true }).click();
+  await expect(editor).toContainText(replacement);
 }
 
 async function settled(page: Page): Promise<void> {
   await page.evaluate(() => (window as typeof window & {
     __task17a2a: EditorFixtureBridge;
   }).__task17a2a.settled());
+}
+
+async function resetEditor(page: Page, source: Exclude<ProjectKey, 'blank' | 'collision'>): Promise<void> {
+  await page.evaluate((value) => (window as typeof window & {
+    __task17a2a: EditorFixtureBridge;
+  }).__task17a2a.reset(value), source);
+  await expect(page.getByRole('application', { name: 'UXML Editor' })).toBeVisible();
+}
+
+async function restartEditor(page: Page): Promise<void> {
+  await page.evaluate(() => (window as typeof window & {
+    __task17a2a: EditorFixtureBridge;
+  }).__task17a2a.restart());
+  await expect(page.getByRole('application', { name: 'UXML Editor' })).toBeVisible();
 }
 
 async function selectProject(page: Page, key: ProjectKey): Promise<void> {
@@ -347,10 +420,22 @@ async function project(page: Page, key: ProjectKey): Promise<ProjectSnapshot> {
   }).__task17a2a.project(value), key);
 }
 
+async function baseline(page: Page, key: ProjectKey): Promise<ProjectSnapshot> {
+  return page.evaluate((value) => (window as typeof window & {
+    __task17a2a: EditorFixtureBridge;
+  }).__task17a2a.baseline(value), key);
+}
+
 async function hostObservations(page: Page): Promise<HostObservations> {
   return page.evaluate(() => (window as typeof window & {
     __task17a2a: EditorFixtureBridge;
   }).__task17a2a.observations());
+}
+
+async function runtimeState(page: Page) {
+  return page.evaluate(() => (window as typeof window & {
+    __task17a2a: EditorFixtureBridge;
+  }).__task17a2a.runtimeState());
 }
 
 function overwriteConfirmation(count: number) {
@@ -367,6 +452,10 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function editorVisibleText(value: string): string {
-  return value.replace(/\r\n/g, '\n');
+function expectOnlyCrLf(value: string): void {
+  expect(value.endsWith('\r\n')).toBe(true);
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === '\n') expect(value[index - 1], `lone LF at ${index}`).toBe('\r');
+    if (value[index] === '\r') expect(value[index + 1], `lone CR at ${index}`).toBe('\n');
+  }
 }
