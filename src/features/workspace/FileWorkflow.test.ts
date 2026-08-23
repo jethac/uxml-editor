@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { CommandHistory } from '../../core/commands/CommandHistory';
 import { MemoryHost } from '../../core/host/MemoryHost';
 import {
   HostError,
@@ -492,6 +493,86 @@ describe('FileWorkflow', () => {
     expect(targetDispose).toHaveBeenCalledOnce();
     expect(sourceWatches).toBe(2);
     await expectConcurrentSourceRecoverable(context, sourceSession, 'Retiring');
+  });
+
+  it('journals a source edit after history retirement while pending recovery drains', async () => {
+    const context = saveAsFailureFixture({});
+    const { host, store, workflow, source, destination } = context;
+    const historyUnsubscribed = deferred<void>();
+    const subscribe = CommandHistory.prototype.subscribe;
+    vi.spyOn(CommandHistory.prototype, 'subscribe').mockImplementationOnce(function (
+      this: CommandHistory,
+      listener: Parameters<CommandHistory['subscribe']>[0],
+    ) {
+      const dispose = subscribe.call(this, listener);
+      return () => {
+        dispose();
+        historyUnsubscribed.resolve();
+      };
+    });
+    const sourceRetirement = deferred<DisposalOutcome>();
+    const sourceDisposeStarted = deferred<void>();
+    const targetDispose = vi.fn();
+    const watch = host.watch.bind(host);
+    let sourceWatches = 0;
+    vi.spyOn(host, 'watch').mockImplementation(async (root, listener) => {
+      const underlying = await watch(root, listener);
+      if (root.id === source.id) {
+        sourceWatches += 1;
+        if (sourceWatches === 1) {
+          return Object.freeze({
+            dispose: () => {
+              underlying.dispose();
+              sourceDisposeStarted.resolve();
+            },
+            completion: sourceRetirement.promise,
+          });
+        }
+        return underlying;
+      }
+      return Object.freeze({
+        dispose: () => {
+          targetDispose();
+          underlying.dispose();
+        },
+      });
+    });
+    await openDirtySaveAsSource(context);
+    const sourceSession = store.getSnapshot().session!;
+    const appendStarted = deferred<void>();
+    const releaseAppend = deferred<void>();
+    const writeRecovery = host.writeRecovery.bind(host);
+    let sourceAppendBlocked = false;
+    vi.spyOn(host, 'writeRecovery').mockImplementation(async (project, stored) => {
+      if (project === source.id && !sourceAppendBlocked) {
+        sourceAppendBlocked = true;
+        appendStarted.resolve();
+        await releaseAppend.promise;
+      }
+      await writeRecovery(project, stored);
+    });
+
+    const saving = workflow.saveAs(destination);
+    let saveAsSettled = false;
+    void saving.then(
+      () => { saveAsSettled = true; },
+      () => { saveAsSettled = true; },
+    );
+    await sourceDisposeStarted.promise;
+    replaceButtonText(store, 'Race', 'Queued');
+    await appendStarted.promise;
+    sourceRetirement.resolve(Object.freeze({ status: 'disposed' }));
+    await historyUnsubscribed.promise;
+
+    expect(saveAsSettled).toBe(false);
+    replaceButtonText(store, 'Queued', 'Concurrent');
+    releaseAppend.resolve();
+    const error = await captureSaveAsFailure(saving);
+
+    expectCompletedSaveAsFailure(error);
+    expect(targetDispose).toHaveBeenCalledOnce();
+    expect(sourceWatches).toBe(2);
+    await expectConcurrentSourceRecoverable(context, sourceSession, 'Concurrent');
   });
 
   it('reauthorizes a recent project instead of treating recent metadata as a grant', async () => {

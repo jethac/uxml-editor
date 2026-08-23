@@ -6,7 +6,7 @@ import type {
   DirtyState,
   SaveBeforeCloseResult,
 } from '../../core/desktop/DesktopLifecycleController';
-import { DocumentSession } from '../../core/documents/DocumentSession';
+import { DocumentSession, type CommitResult } from '../../core/documents/DocumentSession';
 import {
   HostError,
   projectPath,
@@ -462,14 +462,7 @@ export class FileWorkflow implements FileWorkflowPort {
       const localResults = results.filter((result) => !result.forward.id.startsWith('external-reload:v1:'));
       if (localResults.length === 0 || this.active !== active) return;
       if (!active.retired) this.publish();
-      active.recoveryTail = active.recoveryTail
-        .then(async () => {
-          for (const result of localResults) await active.recovery.appendCommitted(result);
-        })
-        .catch((error) => {
-          active.recoveryError = error;
-          if (!active.retired && this.active === active) this.publish();
-        });
+      this.queueRecoveryResults(active, localResults);
     });
     try {
       active.watch = await active.save.watch(
@@ -481,6 +474,17 @@ export class FileWorkflow implements FileWorkflowPort {
     } catch (error) {
       if (!(error instanceof HostError) || error.code !== 'unsupported') throw error;
     }
+  }
+
+  private queueRecoveryResults(active: ActiveProject, results: readonly CommitResult[]): void {
+    active.recoveryTail = active.recoveryTail
+      .then(async () => {
+        for (const result of results) await active.recovery.appendCommitted(result);
+      })
+      .catch((error) => {
+        active.recoveryError = error;
+        if (!active.retired && this.active === active) this.publish();
+      });
   }
 
   private activatePreparedProject(
@@ -605,14 +609,28 @@ export class FileWorkflow implements FileWorkflowPort {
           failure ??= error;
         }
       }
+      const retirementHistoryDispose = active.session.history.subscribe((results) => {
+        const localResults = results.filter((result) => !result.forward.id.startsWith('external-reload:v1:'));
+        if (localResults.length === 0 || this.active !== active) return;
+        this.queueRecoveryResults(active, localResults);
+      });
       try {
         active.historyDispose();
       } catch (error) {
         failure ??= error;
       }
+      while (true) {
+        const recoveryTail = active.recoveryTail;
+        try {
+          await recoveryTail;
+        } catch (error) {
+          failure ??= error;
+        }
+        if (recoveryTail === active.recoveryTail) break;
+      }
+      if (active.recoveryError !== null) failure ??= active.recoveryError;
       try {
-        await active.recoveryTail;
-        if (active.recoveryError !== null) failure ??= active.recoveryError;
+        retirementHistoryDispose();
       } catch (error) {
         failure ??= error;
       }
