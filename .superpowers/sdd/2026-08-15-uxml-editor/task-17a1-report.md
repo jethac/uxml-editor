@@ -110,3 +110,43 @@ menu fixtures and requires CRLF-only line endings in every representation. It
 also validates the real options asset, exact malformed preservation sentinels,
 the `acme` namespace binding, and responsive control classes. The build again
 emitted Vite's existing chunk-size warning and completed successfully.
+
+## Round 1 Concern Resolution
+
+Implementation commit: `6b08799ae9c0d62d190a70a131e3f9fb93e2d002` (`fix: define Task 17A CRLF whitespace semantics`)
+
+The earlier plain `git diff --check exit 0` result only checked a clean working
+tree. It did not inspect the committed change range from the round-one base,
+so it could not detect CRLF bytes reported as trailing whitespace in that
+range.
+
+### RED
+
+```text
+npm test -- tests/fixtures/fixtureAudit.test.ts
+Test Files  1 failed (1)
+Tests  1 failed | 7 passed (8)
+
+Expected: "cr-at-eol"
+Received: "unspecified"
+```
+
+### GREEN
+
+```text
+npm test -- tests/fixtures/fixtureAudit.test.ts
+Test Files  1 passed (1)
+Tests  8 passed (8)
+
+git check-attr whitespace -- fixtures/projects/menu/Assets/UI/Menu.uxml fixtures/projects/menu/Assets/UI/Menu.uss
+fixtures/projects/menu/Assets/UI/Menu.uxml: whitespace: cr-at-eol
+fixtures/projects/menu/Assets/UI/Menu.uss: whitespace: cr-at-eol
+
+git diff --check ad24d41be35d51a7c2602ba8f18c082a3091de54 HEAD
+exit 0
+```
+
+`.gitattributes` now applies `whitespace=cr-at-eol` alongside `-text` only to
+the two raw-CRLF menu fixtures. The audit asserts this exact Git attribute for
+both paths, so its removal regresses the focused audit. The ordinary range
+command passes without `-c core.whitespace=...` or `--ignore-space-at-eol`.
