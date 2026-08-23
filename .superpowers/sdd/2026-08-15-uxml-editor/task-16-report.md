@@ -1134,3 +1134,165 @@ Finding 11 is therefore resolved with evidence from the declared
 - This SHA contains all production changes, deterministic gate tests, and the
   complete round-3 red/green evidence above. The following report-only commit
   records this immutable implementation SHA.
+
+---
+
+## Fix Round 4/5
+
+### Status And Revision
+
+- Status: `DONE_WITH_CONCERNS`.
+- Fix base: `fa2461afa86d46306099f8a834d0024ff661dd29`.
+- Branch: `agent/uxml-editor`.
+- Immutable implementation SHA:
+  `58347e25699169cefcbb318b39bdacaa8027a02f`.
+- Implementation commit: `58347e25699169cefcbb318b39bdacaa8027a02f`
+  (`fix: close Save As retirement journal gap`).
+- No push or PR was performed.
+
+### Finding 1: Close The Unjournaled Retirement Window
+
+- Root cause: source retirement disposed the active history subscription and
+  then awaited the recovery promise captured at that point. A synchronous
+  `DocumentSession` transaction during that await advanced source generation
+  without adding its exact commit result to recovery. Round 3 correctly
+  restored fresh source runtime authority after the generation mismatch, but
+  reopening could recover only the last transaction observed before history
+  unsubscription.
+- The deterministic test wraps the source runtime's real history disposer only
+  to expose the exact unsubscribe boundary. It blocks a real source
+  `writeRecovery`, queues the `Queued` transaction while source watcher
+  retirement is pending, releases watcher completion, waits until the original
+  history listener is removed, and then commits `Concurrent` while retirement
+  is still blocked on the queued recovery write.
+- The test also proves Save As retains its accepted completed-write outcome
+  (`Assets/Main.uxml` and `Assets/Second.uxml` written, no pending paths),
+  disposes staged target authority, restores the same source session through a
+  fresh source watch runtime, and preserves project assets and Save All/reload
+  capabilities.
+
+### Deterministic RED Evidence
+
+- Supported runtime: `npx --yes node@24.15.0 --version` returned
+  `v24.15.0`.
+- Pre-test baseline command:
+  `npx --yes node@24.15.0 node_modules/vitest/vitest.mjs run src/features/workspace/FileWorkflow.test.ts`.
+- Baseline result: 1 file passed, 40/40 tests passed.
+- Red command after adding only the regression test:
+  `npx --yes node@24.15.0 node_modules/vitest/vitest.mjs run src/features/workspace/FileWorkflow.test.ts`.
+- Observed RED: 1 failed and 40 passed (41 total). The reopened source was
+  exactly `<UXML><Button text="Queued" /></UXML>\r\n` instead of expected
+  `<UXML><Button text="Concurrent" /></UXML>\r\n`, proving the post-unsubscribe
+  transaction bytes were absent from recovery.
+- No production code changed before this failure was observed.
+
+### Production Fix
+
+- Recovery queueing is factored into one workflow-local helper used by both
+  normal source history and retirement draining.
+- Retirement installs a short-lived recovery-only history listener before
+  disposing the original runtime listener. The handoff is synchronous, so
+  there is no interval in which neither listener owns local commit results.
+- The original runtime listener remains permanently disposed. The drain
+  listener never publishes workflow state, retains the existing external
+  reload filter, and is gated by the retired runtime's exact active identity.
+- Retirement repeatedly captures and awaits the latest `recoveryTail`. If a
+  transaction extends the tail during an await, the loop drains the new tail
+  before proceeding. The drain listener is disposed synchronously only after
+  the observed tail remains stable, with no later await before retirement
+  returns.
+- Existing failure precedence is retained: watcher, history disposal,
+  recovery, and drain disposal failures still preserve the first failure.
+- `DocumentSession` operations remain independently executable and are not
+  enqueued behind `FileWorkflow`.
+
+### Deterministic GREEN Evidence
+
+- Focused GREEN command:
+  `npx --yes node@24.15.0 node_modules/vitest/vitest.mjs run src/features/workspace/FileWorkflow.test.ts`.
+- Focused GREEN result: 1 file passed, 41/41 tests passed.
+- The regression now disposes/reopens the source and recovers exact
+  `Concurrent` bytes.
+
+### Round 4 Verification
+
+- Task 16 brief test matrix, run once:
+  `npx --yes node@24.15.0 node_modules/vitest/vitest.mjs run src/features/workspace src/core/store`
+  - PASS: 6 files, 132/132 tests.
+- Task 16 brief build, run once as its two script stages under Node 24.15.0:
+  - `npx --yes node@24.15.0 node_modules/typescript/bin/tsc --noEmit`
+    passed with no diagnostics.
+  - `npx --yes node@24.15.0 node_modules/vite/bin/vite.js build`
+    passed with 1,917 modules transformed.
+- Full frontend suite, run once:
+  `npx --yes node@24.15.0 node_modules/vitest/vitest.mjs run --reporter=dot`
+  - PASS: 44 files, 687/687 tests in 45.30 seconds.
+- `git diff --check` passed; PowerShell reported only informational future
+  LF-to-CRLF conversion notices before staging. `git diff --cached --check`
+  passed with no output.
+- Playwright and Tauri/Rust commands were not rerun because round 4 changes no
+  UI, accessibility, native, capability, or dependency boundary. The required
+  focused, brief, build, and full frontend verification all ran on the
+  supported Node runtime.
+
+### Accepted Behavior Preservation
+
+- [x] Failed Save As restores source root/name, exact session, project assets,
+  dirty state, recovery authority, Save All/reload capabilities, and a fresh
+  source watch runtime.
+- [x] Completed destination writes retain exact frozen written/pending paths;
+  no destination rollback is claimed.
+- [x] Staged target runtime is disposed on the retirement-race abort.
+- [x] The original history and watcher callbacks remain retired and cannot be
+  reactivated by fresh-runtime restoration.
+- [x] Every local result accepted during recovery draining is appended before
+  retirement returns, including tails extended while an earlier append waits.
+- [x] External reload history remains excluded from local recovery journaling.
+- [x] `DocumentSession` is not serialized behind `FileWorkflow`.
+- [x] No canvas, toolbar, layout, geometry, native, dependency, capability,
+  license, or unrelated file changed.
+
+### Changed Files
+
+- Production: `src/features/workspace/FileWorkflow.ts`.
+- Focused tests: `src/features/workspace/FileWorkflow.test.ts`.
+- Evidence: this append-only report.
+
+### Round 4 Self-Review
+
+- Traced the listener handoff, promise-tail extension ordering, source runtime
+  identity gates, staged target retirement, fresh source restoration, and
+  recovery replay through disposal/reopen.
+- Confirmed the temporary drain listener cannot publish and is removed before
+  the retired runtime returns; the original listener is never reactivated.
+- Confirmed the stable-tail loop observes every recovery promise assigned
+  during an earlier await and preserves the first retirement failure.
+- Confirmed the regression asserts real reopened bytes rather than listener
+  call counts; lifecycle spies only provide deterministic host/history gates.
+- Confirmed the implementation commit contains only the workflow and its
+  focused test.
+
+### Dependency And License Audit
+
+- No npm or Rust dependency/version changed. `package.json`,
+  `package-lock.json`, Cargo manifests, and lockfiles are unchanged.
+- `uxml-preview` remains exactly `0.4.0`.
+- No license or notice changed.
+
+### Round 4 Concerns
+
+- Full Vitest retains the pre-existing unawaited-assertion warning at
+  `src/core/host/BrowserHost.test.ts:74`. That file is unchanged; all 687 tests
+  passed. The warning remains outside the exact round-4 scope.
+- Vite retains the existing non-failing large-chunk warning for the production
+  bundle. No dependency, bundling, or layout work was in scope.
+
+### Round 4 Commit Finalization
+
+- BASE: `fa2461afa86d46306099f8a834d0024ff661dd29`.
+- Immutable implementation SHA:
+  `58347e25699169cefcbb318b39bdacaa8027a02f`.
+- Commit: `58347e25699169cefcbb318b39bdacaa8027a02f`
+  (`fix: close Save As retirement journal gap`).
+- The following report-only commit records this complete round-4 evidence
+  against the immutable implementation SHA.
