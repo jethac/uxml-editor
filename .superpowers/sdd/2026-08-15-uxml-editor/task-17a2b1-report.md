@@ -2,11 +2,12 @@
 
 ## Status
 
-PASS (fix round 2/5)
+PASS (fix round 3/5)
 
 - Original task base: `12c49ad5b985becbfba2a2b7e66c095b5c56d53a`
 - Fix-round base: `221758d5f71c60a8e6d29e0eb95070f6c4378ea2`
 - Fix-round 2 base: `a714a06291b3bb99b96490b5e11c1edf3e1de8bc`
+- Fix-round 3 base: `7672cd0756c5cd9a42299fbba11ce118c9a11c5e`
 - Runtime target: Node `v24.15.0`
 
 ## Scope And Architecture
@@ -350,3 +351,78 @@ Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.Com
 This confirms the requested range is whitespace-clean, the worktree is empty,
 and zero matching Playwright, Vite, or Vitest processes remain for this
 worktree.
+
+## Fix Round 3 Evidence
+
+### Scope And Test-First Outcome
+
+- Added one source-history assertion helper used at source edit, Undo, and Redo.
+  It proves the complete static source, nine-row hierarchy shape and levels,
+  selected `menu-title` and `play-button`, explicit unselected unrelated rows,
+  two-element inspector context, selected canvas overlay, and dirty state.
+- After namespace save/close/reopen, the E2E now compares the complete reopened
+  host snapshot with the saved snapshot, reasserts exact UXML and USS text plus
+  revisions, and opens `Unsupported.uss` through the visible Source file picker
+  to compare its complete normalized LF source against the independent literal.
+- No production, bridge, layout, CSS, visual, fixture, dependency, packaging,
+  license, or release code changed. No arbitrary sleeps were added.
+
+### Exact Focused RED And GREEN Evidence
+
+```text
+npx playwright test tests/e2e/editor.spec.ts --grep "authors structure|preserves an authored"
+1 failed, 1 passed (27.9s)
+Expected hierarchy shape: 8 tree rows.
+Received: 9 rows, including the explicit ui:UXML root.
+```
+
+The static shape oracle was corrected to include the root row and its level.
+
+```text
+npx playwright test tests/e2e/editor.spec.ts --grep "authors structure|preserves an authored"
+2 passed (21.2s)
+
+npx playwright test tests/e2e/editor.spec.ts
+12 passed (39.0s)
+
+npm test
+Test Files  46 passed (46)
+Tests       709 passed (709)
+Duration     49.59s
+
+npm run test:e2e
+28 passed (1.0m)
+
+npm run build
+tsc --noEmit: passed
+vite build: passed, 1917 modules transformed
+```
+
+### Round 3 Files And Audit
+
+```text
+.superpowers/sdd/2026-08-15-uxml-editor/task-17a2b1-report.md
+tests/e2e/editor.spec.ts
+```
+
+- The pre-existing production chunk-size warning remains the only measured
+  limitation.
+
+### Post-Commit Integrity Commands
+
+Executed after the round-3 commit; each command exited `0` with the literal
+output shown.
+
+```text
+git diff --check 7672cd0756c5cd9a42299fbba11ce118c9a11c5e..HEAD
+(no output)
+
+git status --short
+(no output)
+
+Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match [regex]::Escape('B:\usagi_dev\uxml-editor\.worktrees\uxml-editor') -and $_.CommandLine -match 'playwright|vite|vitest' } | Select-Object ProcessId, Name, CommandLine | Format-List
+(no output)
+```
+
+This confirms the requested base range is whitespace-clean, the worktree is
+empty, and zero matching Playwright, Vite, or Vitest processes remain.

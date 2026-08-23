@@ -356,19 +356,13 @@ test('authors structure through palette, hierarchy, canvas, source, and pointer 
   await expect(play).toHaveAttribute('aria-selected', 'true');
 
   await replaceVisibleText(page, MENU_UXML, 'Main Menu', 'Edited Menu');
-  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_SOURCE_EDIT);
   await expect(page.getByTestId('canvas-renderer')).toContainText('Edited Menu');
-  await expectStructuralSelection(page, hierarchy.getByRole('treeitem', { name: 'menu-title' }), '2 elements');
-  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+  await expectSourceHistoryState(page, hierarchy, MENU_AFTER_SOURCE_EDIT);
   await runPaletteCommand(page, 'Undo');
-  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_DELETE);
   await expect(page.getByTestId('canvas-renderer')).toContainText('Main Menu');
-  await expectStructuralSelection(page, hierarchy.getByRole('treeitem', { name: 'menu-title' }), '2 elements');
-  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+  await expectSourceHistoryState(page, hierarchy, MENU_AFTER_DELETE);
   await runPaletteCommand(page, 'Redo');
-  await expectMountedVisibleSource(page, MENU_UXML, MENU_AFTER_SOURCE_EDIT);
-  await expectStructuralSelection(page, hierarchy.getByRole('treeitem', { name: 'menu-title' }), '2 elements');
-  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
+  await expectSourceHistoryState(page, hierarchy, MENU_AFTER_SOURCE_EDIT);
 
   await menuRoot.focus();
   await page.keyboard.press('Enter');
@@ -433,6 +427,19 @@ test('preserves an authored non-UI namespace through generic palette creation an
   await runPaletteCommand(page, 'Reopen Project');
   await expectOpenProject(page, 'Unsupported Fixture');
   await expectVisibleSource(page, UNSUPPORTED_UXML, UNSUPPORTED_AFTER_GENERIC_CREATE);
+  const reopened = await project(page, UNSUPPORTED);
+  expect(reopened).toEqual(saved);
+  expect(reopened.files[UNSUPPORTED_UXML]).toEqual({
+    text: UNSUPPORTED_AFTER_GENERIC_CREATE,
+    revision: saved.files[UNSUPPORTED_UXML]?.revision,
+  });
+  expect(reopened.files[UNSUPPORTED_USS]).toEqual({
+    text: UNSUPPORTED_USS_BASELINE,
+    revision: saved.files[UNSUPPORTED_USS]?.revision,
+  });
+  await page.getByRole('combobox', { name: 'Source file' }).selectOption(UNSUPPORTED_USS);
+  await expect(sourceEditor(page, UNSUPPORTED_USS)).toBeVisible();
+  expect(await visibleSourceText(page, UNSUPPORTED_USS)).toBe(normalizeVisibleSource(UNSUPPORTED_USS_BASELINE));
 });
 
 test('creates, saves, closes, and reopens an unsaved project with exact bytes', async ({ page }) => {
@@ -806,6 +813,37 @@ async function expectStructuralSelection(page: Page, row: Locator, inspectorName
   await expect(row).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByLabel('Inspector selection context')).toContainText(inspectorName);
   await expect(page.getByTestId('selected-bounds')).toBeVisible();
+}
+
+async function expectSourceHistoryState(page: Page, hierarchy: Locator, expectedSource: string): Promise<void> {
+  const uxmlRoot = hierarchy.getByRole('treeitem', { name: 'ui:UXML' });
+  const menuRoot = hierarchy.getByRole('treeitem', { name: 'menu-root' });
+  const title = hierarchy.getByRole('treeitem', { name: 'menu-title' });
+  const scrollView = hierarchy.getByRole('treeitem', { name: 'ui:ScrollView' });
+  const wrapper = hierarchy.getByRole('treeitem', { name: 'ui:VisualElement' });
+  const play = hierarchy.getByRole('treeitem', { name: 'play-button' });
+  const quit = hierarchy.getByRole('treeitem', { name: 'quit-button' });
+  const unnamedButton = hierarchy.getByRole('treeitem', { name: 'ui:Button' });
+
+  await expectMountedVisibleSource(page, MENU_UXML, expectedSource);
+  await expect(hierarchy.getByRole('treeitem')).toHaveCount(9);
+  await expect(uxmlRoot).toHaveAttribute('aria-level', '1');
+  await expect(menuRoot).toHaveAttribute('aria-level', '2');
+  await expect(title).toHaveAttribute('aria-level', '3');
+  await expect(scrollView).toHaveAttribute('aria-level', '3');
+  await expect(wrapper).toHaveAttribute('aria-level', '4');
+  await expect(quit).toHaveAttribute('aria-level', '5');
+  await expect(play).toHaveAttribute('aria-level', '5');
+  await expect(unnamedButton).toHaveAttribute('aria-level', '3');
+  await expect(title).toHaveAttribute('aria-selected', 'true');
+  await expect(play).toHaveAttribute('aria-selected', 'true');
+  await expect(menuRoot).toHaveAttribute('aria-selected', 'false');
+  await expect(scrollView).toHaveAttribute('aria-selected', 'false');
+  await expect(quit).toHaveAttribute('aria-selected', 'false');
+  await expect(unnamedButton).toHaveAttribute('aria-selected', 'false');
+  await expect(page.getByLabel('Inspector selection context')).toContainText('2 elements');
+  await expect(page.getByTestId('selected-bounds')).toBeVisible();
+  await expect(page.getByLabel('Project status')).toHaveAttribute('aria-description', 'Project has unsaved changes.');
 }
 
 async function replaceVisibleText(page: Page, path: string, search: string, replacement: string): Promise<void> {
