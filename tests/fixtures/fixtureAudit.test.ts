@@ -1,14 +1,18 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, test } from 'vitest';
 
-const PROJECTS = resolve(process.cwd(), 'fixtures/projects');
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const PROJECTS = resolve(PROJECT_ROOT, 'fixtures/projects');
 const FIXTURE_PATHS = [
   'menu/Assets/UI/Menu.uxml',
   'menu/Assets/UI/Menu.uss',
   'options/Assets/UI/Options.uxml',
   'options/Assets/UI/Options.uss',
+  'options/Assets/Textures/icon.png',
   'nested-styles/Assets/UI/Nested.uxml',
   'nested-styles/Assets/UI/base.uss',
   'nested-styles/Assets/UI/components/buttons.uss',
@@ -31,11 +35,14 @@ describe('Task 17A deterministic fixture corpus', () => {
   });
 
   test('menu preserves exactly two authored buttons and byte-sensitive formatting', () => {
-    const uxml = text('menu/Assets/UI/Menu.uxml');
-    const uss = text('menu/Assets/UI/Menu.uss');
+    const menuPaths = ['menu/Assets/UI/Menu.uxml', 'menu/Assets/UI/Menu.uss'] as const;
+    const [uxml, uss] = menuPaths.map(text);
 
-    expectOnlyCrLf(uxml);
-    expectOnlyCrLf(uss);
+    for (const relativePath of menuPaths) {
+      expectOnlyCrLfBytes(bytes(relativePath), `working tree ${relativePath}`);
+      expectOnlyCrLfBytes(gitBlob(`HEAD:fixtures/projects/${relativePath}`), `HEAD blob ${relativePath}`);
+      expectOnlyCrLfBytes(gitBlob(`:fixtures/projects/${relativePath}`), `index blob ${relativePath}`);
+    }
     expect(uxml.match(/<ui:Button\b/g)).toHaveLength(2);
     expect(uxml).toContain('<!-- Task 17A menu: keep this comment byte-for-byte. -->\r\n');
     expect(uxml).toContain("<ui:UXML xmlns:ui='UnityEngine.UIElements'>");
@@ -58,13 +65,21 @@ describe('Task 17A deterministic fixture corpus', () => {
     expect(resolveRelativeFixture('options/Assets/UI/Options.uxml', 'Options.uss')).toBe(
       resolve(PROJECTS, 'options/Assets/UI/Options.uss'),
     );
-    expect(uxml).toContain('<ui:TextField name="profile-name" label="Profile name" value="Runner" />');
-    expect(uxml).toContain('<ui:SliderInt name="volume" label="Volume" low-value="0" high-value="100" value="75" />');
-    expect(uxml).toContain('<ui:Slider name="ui-scale" label="UI scale" low-value="0.75" high-value="1.5" value="1.25" />');
-    expect(uxml).toContain('<ui:DropdownField name="quality" label="Quality" choices="Low,Medium,High" value="High" />');
-    expect(uxml).toContain('<ui:Toggle name="fullscreen" label="Fullscreen" value="true" />');
-    expect(uxml).toContain('<ui:ColorField name="accent" label="Accent" value="#35a36f" />');
-    expect(uxml).toContain('<ui:ObjectField name="icon-asset" label="Icon" object-type="UnityEngine.Texture2D" value="project://database/Assets/Textures/icon.png" />');
+    expect(uxml).toContain('<ui:TextField class="option-control" name="profile-name" label="Profile name" value="Runner" />');
+    expect(uxml).toContain('<ui:SliderInt class="option-control" name="volume" label="Volume" low-value="0" high-value="100" value="75" />');
+    expect(uxml).toContain('<ui:Slider class="option-control" name="ui-scale" label="UI scale" low-value="0.75" high-value="1.5" value="1.25" />');
+    expect(uxml).toContain('<ui:DropdownField class="option-control" name="quality" label="Quality" choices="Low,Medium,High" value="High" />');
+    expect(uxml).toContain('<ui:Toggle class="option-control" name="fullscreen" label="Fullscreen" value="true" />');
+    expect(uxml).toContain('<ui:ColorField class="option-control" name="accent" label="Accent" value="#35a36f" />');
+    const assetReference = 'project://database/Assets/Textures/icon.png';
+    expect(uxml).toContain('<ui:ObjectField class="option-control" name="icon-asset" label="Icon" object-type="UnityEngine.Texture2D" value="project://database/Assets/Textures/icon.png" />');
+    expect(resolveProjectReference('options', assetReference)).toBe(resolve(PROJECTS, 'options/Assets/Textures/icon.png'));
+    const optionIcon = decodePng(bytes('options/Assets/Textures/icon.png'));
+    expect({ width: optionIcon.width, height: optionIcon.height }).toEqual({ width: 8, height: 8 });
+    expect(pixel(optionIcon, 1, 0)).toEqual([250, 204, 21, 255]);
+    expect(uniqueColors(optionIcon)).toBeGreaterThan(1);
+    expect(opaquePixelCount(optionIcon)).toBe(64);
+    expect(bytes('options/Assets/Textures/icon.png').equals(bytes('assets/Assets/Textures/icon.png'))).toBe(true);
     expect(uss).toMatch(/\.options-shell\s*\{[^}]*flex-direction:\s*column;/s);
     expect(uss).toMatch(/\.options-row\s*\{[^}]*flex-direction:\s*row;[^}]*flex-wrap:\s*wrap;/s);
     expect(uss).toMatch(/\.option-control\s*\{[^}]*min-width:\s*180px;[^}]*flex-grow:\s*1;/s);
@@ -142,6 +157,7 @@ describe('Task 17A deterministic fixture corpus', () => {
       uxml.indexOf('</acme:UnknownPanel>') + '</acme:UnknownPanel>'.length,
     );
 
+    expect(uxml).toContain('<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:acme="Acme.Widgets">');
     expect(unknown).toContain('mystery-mode="orbital"');
     expect(unknown).toContain('<ui:Label name="preserved-label" class="unsupported-child" text="Preserved child" />');
     expect(unknown).toContain('<ui:Button name="preserved-button" text="Still editable" />');
@@ -151,17 +167,34 @@ describe('Task 17A deterministic fixture corpus', () => {
   });
 
   test('malformed contains repairable UXML and USS spans plus formatting edges', () => {
-    const uxml = text('malformed/Assets/UI/Malformed.uxml');
-    const uss = text('malformed/Assets/UI/Malformed.uss');
+    const uxml = bytes('malformed/Assets/UI/Malformed.uxml');
+    const uss = bytes('malformed/Assets/UI/Malformed.uss');
+    const repairStart = '    <!-- repair-start: add a closing slash and angle bracket to the next element -->\n';
+    const repair = '    <ui:Button name="broken-button" text="Repair me"\n';
+    const repairEnd = '    <!-- repair-end -->\n';
 
-    expect(uxml).toMatch(/  <!-- preserved prefix: tabs and spacing stay untouched -->\r?\n/);
-    expect(uxml).toMatch(/\t<ui:Label name='before-repair' text="Before repair" \/>\r?\n/);
-    expect(uxml).toMatch(/    <ui:Button name="broken-button" text="Repair me"\r?\n/);
-    expect(uxml).toMatch(/    <ui:Label name="after-repair" text='After repair' \/>\r?\n/);
-    expect(uss).toMatch(/\.recover-root\{\r?\n\tpadding-left : 12px;/);
-    expect(uss).toContain('color: #12zz34;');
-    expect(uss).toContain('background-color: rgb(10, 20, );');
-    expect(uss).toContain('.trailing-edge { width: calc(100% - ); } /* keep */');
+    expect(uxml).toEqual(Buffer.from(
+      '<?xml version="1.0" encoding="utf-8"?>\n'
+      + '<ui:UXML xmlns:ui="UnityEngine.UIElements">\n'
+      + '  <!-- preserved prefix: tabs and spacing stay untouched -->\n'
+      + "\t<ui:Label name='before-repair' text=\"Before repair\" />\n"
+      + repairStart
+      + repair
+      + repairEnd
+      + "    <ui:Label name=\"after-repair\" text='After repair' />\n"
+      + '</ui:UXML>\n',
+    ));
+    expect(uxml.includes(Buffer.from(repairStart))).toBe(true);
+    expect(uxml.includes(Buffer.from(repairEnd))).toBe(true);
+    expect(uss).toEqual(Buffer.from(
+      '/* preserved header formatting remains exact */\n'
+      + '.recover-root{\n'
+      + '\tpadding-left : 12px;\n'
+      + '\tcolor: #12zz34; /* repair: invalid hexadecimal color */\n'
+      + '\tbackground-color: rgb(10, 20, ); /* repair: missing blue component */\n'
+      + '}\n\n'
+      + '.trailing-edge { width: calc(100% - ); } /* keep */\n',
+    ));
   });
 
   test('both checked-in PNGs decode to fixed nonblank pixels', () => {
@@ -190,6 +223,12 @@ function text(relativePath: string): string {
   return bytes(relativePath).toString('utf8');
 }
 
+function gitBlob(revisionAndPath: string): Buffer {
+  return execFileSync('git', ['-C', PROJECT_ROOT, 'cat-file', 'blob', revisionAndPath], {
+    encoding: 'buffer',
+  });
+}
+
 function resolveRelativeFixture(source: string, reference: string): string {
   const target = resolve(dirname(resolve(PROJECTS, source)), reference);
   expect(existsSync(target), `${source} -> ${reference}`).toBe(true);
@@ -210,10 +249,19 @@ function resolvePackageReference(project: string, reference: string): string {
   return target;
 }
 
-function expectOnlyCrLf(value: string): void {
-  expect(value.endsWith('\r\n')).toBe(true);
-  expect(value).toContain('\r\n');
-  expect(value.replaceAll('\r\n', '')).not.toMatch(/[\r\n]/);
+function expectOnlyCrLfBytes(value: Buffer, label: string): void {
+  expect(value.subarray(-2).equals(Buffer.from('\r\n')), label).toBe(true);
+  let lineEndings = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === 0x0a) {
+      expect(value[index - 1], `${label} has a lone LF at byte ${index}`).toBe(0x0d);
+      lineEndings += 1;
+    }
+    if (value[index] === 0x0d) {
+      expect(value[index + 1], `${label} has a lone CR at byte ${index}`).toBe(0x0a);
+    }
+  }
+  expect(lineEndings, `${label} has no CRLF line endings`).toBeGreaterThan(0);
 }
 
 interface DecodedPng {

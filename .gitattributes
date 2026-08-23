@@ -1,2 +1,4 @@
-fixtures/projects/menu/Assets/UI/Menu.uxml text eol=crlf
-fixtures/projects/menu/Assets/UI/Menu.uss text eol=crlf
+fixtures/projects/menu/Assets/UI/Menu.uxml -text
+fixtures/projects/menu/Assets/UI/Menu.uss -text
+fixtures/projects/malformed/Assets/UI/Malformed.uxml text eol=lf
+fixtures/projects/malformed/Assets/UI/Malformed.uss text eol=lf
