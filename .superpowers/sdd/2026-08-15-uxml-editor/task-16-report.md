@@ -1123,3 +1123,14 @@ Finding 11 is therefore resolved with evidence from the declared
   tests passed.
 - Vite retains the existing non-failing large-chunk warning. Playwright retains
   the existing `NO_COLOR`/`FORCE_COLOR` warning.
+
+### Round 3 Commit Finalization
+
+- BASE: `c39b86486bf09f25b2c66433f90804707085ef43`.
+- Implementation/report HEAD:
+  `11a604f7f63f52724467c05b10526f04e6838f8d`.
+- Commit: `11a604f7f63f52724467c05b10526f04e6838f8d`
+  (`fix: address Task 16 round 3 findings`).
+- This SHA contains all production changes, deterministic gate tests, and the
+  complete round-3 red/green evidence above. The following report-only commit
+  records this immutable implementation SHA.
