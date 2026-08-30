@@ -28,3 +28,7 @@ All notable changes to this project are documented here. The format follows
 
 - Host tests that prove Windows-only conditional replacement are gated to
   Windows; the non-Windows contract is asserted explicitly instead of failing.
+- Save writes every dirty document instead of only the entry document, so USS
+  edits are no longer reported as an incomplete save and left on disk unchanged.
+- A failed save names the documents that stayed unsaved and the underlying
+  host error.
