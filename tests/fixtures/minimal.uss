@@ -1,0 +1,9 @@
+@import "/Assets/UI/styles/palette.uss";
+
+Label {
+  color: #ffffff;
+}
+
+Button {
+  width: 120px;
+}

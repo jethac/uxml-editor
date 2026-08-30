@@ -1,0 +1,345 @@
+.workspace-pane--canvas {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.canvas-toolbar {
+  z-index: 3;
+  display: flex;
+  align-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 5px;
+  min-width: 0;
+  min-height: 34px;
+  max-height: 68px;
+  padding: 3px 6px;
+  overflow: auto;
+  border-bottom: 1px solid var(--color-tool-border);
+  background: #eef0ef;
+}
+
+.canvas-control,
+.canvas-check,
+.canvas-tool-button,
+.canvas-command-group,
+.canvas-states {
+  flex: 0 0 auto;
+}
+
+.canvas-control,
+.canvas-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 26px;
+  color: #414744;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.canvas-control select,
+.canvas-control input {
+  height: 26px;
+  min-width: 0;
+  padding: 0 5px;
+  border: 1px solid #aeb4b1;
+  border-radius: 3px;
+  color: #242927;
+  background: #ffffff;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-control select:focus,
+.canvas-control input:focus,
+.canvas-tool-button:focus-visible,
+.canvas-check input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.canvas-control input[aria-invalid='true'] {
+  border-color: #b5483d;
+  background: #fff4f2;
+}
+
+.canvas-control--preset select {
+  width: 126px;
+}
+
+.canvas-control--dimension input {
+  width: 61px;
+}
+
+.canvas-tool-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid #aeb4b1;
+  border-radius: 3px;
+  color: #303633;
+  background: #f9faf9;
+  cursor: pointer;
+}
+
+.canvas-tool-button:hover {
+  border-color: var(--color-primary);
+  background: #e7eee9;
+}
+
+.canvas-tool-button:disabled {
+  border-color: #c8cdca;
+  color: #8d9490;
+  background: #eef0ef;
+  cursor: default;
+}
+
+.canvas-tool-button--icon {
+  width: 26px;
+  padding: 0;
+}
+
+.canvas-command-group {
+  display: inline-flex;
+  gap: 2px;
+  padding-left: 4px;
+  border-left: 1px solid #c1c6c3;
+}
+
+.canvas-tool-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.canvas-check {
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.canvas-check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--color-primary-strong);
+}
+
+.canvas-states {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  height: 26px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.canvas-states legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.canvas-states:disabled {
+  opacity: 0.48;
+}
+
+.workspace-pane--canvas .canvas-field {
+  position: relative;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #d9dddb;
+  touch-action: none;
+}
+
+.workspace-pane--canvas .canvas-field:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.canvas-field--pan {
+  cursor: grab;
+}
+
+.canvas-field--pan:active {
+  cursor: grabbing;
+}
+
+.canvas-transform {
+  position: absolute;
+  top: 0;
+  left: 0;
+  flex: none;
+  overflow: visible;
+  border: 1px solid #626966;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgb(31 35 33 / 22%);
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.canvas-renderer {
+  position: relative;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.canvas-overlay {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  overflow: visible;
+}
+
+.canvas-interaction-layer {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.canvas-resize-handle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 2px solid #ffffff;
+  border-radius: 1px;
+  background: #147a4b;
+  box-shadow: 0 0 0 1px #147a4b;
+  cursor: nwse-resize;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+}
+
+.canvas-resize-handle:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.canvas-snap-guide {
+  position: absolute;
+  display: block;
+  background: #c2473b;
+}
+
+.canvas-snap-guide--x {
+  top: 0;
+  width: 1px;
+  height: 100%;
+}
+
+.canvas-snap-guide--y {
+  left: 0;
+  width: 100%;
+  height: 1px;
+}
+
+.canvas-interaction-status {
+  max-width: 220px;
+  margin: 0 0 0 3px;
+  overflow: hidden;
+  color: #762f27;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-stale-status {
+  max-width: 110px;
+  margin: 0 0 0 3px;
+  padding: 2px 5px;
+  overflow: hidden;
+  border: 1px solid #c98f87;
+  border-radius: 2px;
+  color: #762f27;
+  background: #fff4f2;
+  font-size: 10px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.canvas-bounds {
+  position: absolute;
+  border: 1px solid;
+}
+
+.canvas-bounds--hover {
+  border-color: #197d91;
+}
+
+.canvas-bounds--selected {
+  border-color: #147a4b;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 70%);
+}
+
+.canvas-bounds--parent {
+  border-color: #7c8580;
+  border-style: dashed;
+}
+
+.canvas-selection-handle {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border: 1px solid #ffffff;
+  background: #147a4b;
+}
+
+.canvas-selection-handle--nw { top: -4px; left: -4px; }
+.canvas-selection-handle--ne { top: -4px; right: -4px; }
+.canvas-selection-handle--sw { bottom: -4px; left: -4px; }
+.canvas-selection-handle--se { right: -4px; bottom: -4px; }
+
+.canvas-safe-area {
+  position: absolute;
+  inset: 5%;
+  border: 1px dashed #a55238;
+}
+
+.canvas-render-error {
+  position: absolute;
+  z-index: 4;
+  top: 10px;
+  left: 10px;
+  max-width: calc(100% - 20px);
+  padding: 6px 8px;
+  border: 1px solid #c98f87;
+  border-radius: 3px;
+  color: #762f27;
+  background: #fff4f2;
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .canvas-toolbar {
+    gap: 3px;
+    max-height: 72px;
+    padding-inline: 4px;
+  }
+
+  .canvas-control--preset > span,
+  .canvas-tool-button span {
+    display: none;
+  }
+
+  .canvas-tool-button {
+    width: 27px;
+    padding: 0;
+  }
+}

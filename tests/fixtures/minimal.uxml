@@ -1,0 +1,7 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements">
+  <Style src="Assets/UI/styles/minimal.uss" />
+  <ui:VisualElement name="root">
+    <ui:Label name="title" text="Welcome" />
+    <ui:Button name="continue" text="Continue" />
+  </ui:VisualElement>
+</ui:UXML>

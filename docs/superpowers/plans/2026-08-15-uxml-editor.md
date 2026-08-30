@@ -4,7 +4,7 @@
 
 **Goal:** Build and release a standalone, lossless visual editor for UXML and USS in `jethac/uxml-editor`.
 
-**Architecture:** A browser-testable TypeScript core owns source buffers, parses them through a pinned `uxml-preview` adapter, and converts every visual operation into deterministic minimal source patches. React renders a dense editor workbench around the `uxml-preview` DOM/Yoga canvas. Tauri 2 is the default thin desktop host for scoped filesystem access, dialogs, watching, atomic saves, and Windows packaging; the host decision is retained only if an executable spike passes.
+**Architecture:** A browser-testable TypeScript core owns an authoritative `DocumentSession` that atomically pairs exact source buffers with their parsed `uxml-preview` model, and converts every visual operation into deterministic minimal source patches that immediately produce the next parsed session state. React renders a dense editor workbench around the `uxml-preview` DOM/Yoga canvas without maintaining a second visual object graph. Tauri 2 is the default thin desktop host for scoped filesystem access, dialogs, watching, atomic saves, and Windows packaging; the host decision is retained only if an executable spike passes.
 
 **Tech Stack:** TypeScript 7, React 19, Vite 8, `uxml-preview@0.4.0`, CodeMirror 6, Lucide React, Vitest 4, Testing Library, Playwright 1.62, Tauri 2, Rust 1.92, npm lockfiles.
 
@@ -15,7 +15,9 @@
 - Pin `uxml-preview` exactly to `0.4.0` initially and commit `package-lock.json`.
 - Never copy or redistribute Unity Editor, UI Builder, UnityCsReference, or mirrored Unity package source.
 - The editor must not require Unity for normal operation.
-- Source text is authoritative; parsed and rendered structures are derived and replaceable.
+- `DocumentSession` is the sole source of truth: exact source buffers and the
+  parsed document advance atomically, while rendered and component state are
+  derived and replaceable.
 - Opening and saving without edits must be byte-identical.
 - Unsupported or malformed content must survive and must produce explicit diagnostics.
 - Every mutation is a typed transaction with deterministic apply, undo, redo, and replay.

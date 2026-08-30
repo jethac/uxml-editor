@@ -1,0 +1,4 @@
+fixtures/projects/menu/Assets/UI/Menu.uxml -text whitespace=cr-at-eol
+fixtures/projects/menu/Assets/UI/Menu.uss -text whitespace=cr-at-eol
+fixtures/projects/malformed/Assets/UI/Malformed.uxml text eol=lf
+fixtures/projects/malformed/Assets/UI/Malformed.uss text eol=lf
