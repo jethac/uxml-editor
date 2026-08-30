@@ -130,7 +130,7 @@ impl AppDataStore {
         );
         store
             .entries
-            .sort_by(|left, right| right.last_opened_at.cmp(&left.last_opened_at));
+            .sort_by_key(|entry| std::cmp::Reverse(entry.last_opened_at));
         store.entries.truncate(MAX_RECENT_PROJECTS);
         let bytes = serialize_record(&store, "recent-project")?;
         self.replace_record(&self.recent_path(), &bytes)

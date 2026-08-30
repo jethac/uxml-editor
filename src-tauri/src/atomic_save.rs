@@ -1,15 +1,20 @@
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use crate::error::HostError;
 use cap_std::fs::{Dir, File as CapFile, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
-    io::{Read, Seek, Write},
+    io::{Read, Seek},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
 };
+
+#[cfg(windows)]
+use std::io::Write;
 
 #[cfg(not(windows))]
 use std::fs;
@@ -213,6 +218,7 @@ fn replace_text_atomically_with_result_hook(
     (result, hook_result)
 }
 
+#[cfg_attr(not(windows), allow(clippy::needless_return))]
 fn replace_text_atomically_impl(
     parent: &Dir,
     target_name: &Path,
@@ -943,6 +949,7 @@ fn open_recovery_child_directory(parent: &Dir, name: &Path) -> std::io::Result<D
     parent.open_dir(name)
 }
 
+#[cfg_attr(not(windows), allow(clippy::needless_return))]
 fn recover_backup(
     directory: &Dir,
     prefix: &Path,
@@ -1391,12 +1398,14 @@ mod tests {
     use cap_std::{ambient_authority, fs::Dir};
     use std::{
         fs,
-        io::{Seek, SeekFrom, Write},
         path::PathBuf,
-        sync::{
-            atomic::{AtomicU64, Ordering},
-            Arc, Barrier,
-        },
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    #[cfg(windows)]
+    use std::{
+        io::{Seek, SeekFrom, Write},
+        sync::{Arc, Barrier},
     };
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
@@ -1498,6 +1507,22 @@ mod tests {
         )
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn replacement_is_unsupported_off_windows_and_never_touches_the_target() {
+        let fixture = Fixture::new();
+        let target = fixture.write("Main.uxml", b"<UXML />\r\n");
+        let original = content_revision(&target).unwrap();
+
+        let error = replace_text_atomically(&target, &original, "changed").unwrap_err();
+
+        assert_eq!(error.code, "unsupported");
+        assert_eq!(fs::read(&target).unwrap(), b"<UXML />\r\n");
+        assert_eq!(content_revision(&target).unwrap(), original);
+        fixture.assert_no_artifacts();
+    }
+
+    #[cfg(windows)]
     #[test]
     fn replaces_existing_file_with_exact_crlf_and_unicode_bytes() {
         let fixture = Fixture::new();
@@ -1517,6 +1542,7 @@ mod tests {
         fixture.assert_no_artifacts();
     }
 
+    #[cfg(windows)]
     #[test]
     fn rejects_stale_and_concurrent_replacements_without_touching_the_winner() {
         let fixture = Fixture::new();
@@ -1532,6 +1558,7 @@ mod tests {
         fixture.assert_no_artifacts();
     }
 
+    #[cfg(windows)]
     #[test]
     fn serializes_two_writers_observing_the_same_revision_so_only_one_commits() {
         let fixture = Fixture::new();
@@ -1571,6 +1598,7 @@ mod tests {
         fixture.assert_no_artifacts();
     }
 
+    #[cfg(windows)]
     #[test]
     fn external_writer_in_the_check_to_commit_interval_is_prevented_or_preserved() {
         let fixture = Fixture::new();
@@ -1604,6 +1632,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn external_path_replacement_in_the_final_commit_interval_is_never_overwritten() {
         let fixture = Fixture::new();
@@ -1757,6 +1786,7 @@ mod tests {
         assert!(fixture.has_recoverable_bytes("Main.uxml", b"original"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_raced_quarantine_name_is_never_overwritten() {
         let fixture = Fixture::new();
@@ -1790,6 +1820,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"original");
     }
 
+    #[cfg(windows)]
     #[test]
     fn existing_external_writer_is_excluded_or_its_bytes_are_restored() {
         let fixture = Fixture::new();
@@ -1833,6 +1864,7 @@ mod tests {
         fixture.assert_no_artifacts();
     }
 
+    #[cfg(windows)]
     #[test]
     fn every_post_quarantine_failure_retains_the_original_bytes_for_recovery() {
         for phase in [
@@ -1858,6 +1890,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn cleans_unique_sibling_temp_and_preserves_original_at_each_precommit_failure() {
         for phase in [FaultPhase::AfterTempSync, FaultPhase::BeforeReplace] {

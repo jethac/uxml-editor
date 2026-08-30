@@ -293,10 +293,11 @@ impl HostState {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::RecoveryWriteRequest;
     use super::{
         CreateTextRequest, FileEnumerationDto, GrantedProjectRequest, HostState, PathRequest,
-        ProjectRequest, RecentProjectRequest, RecoveryWriteRequest, ReplaceTextRequest,
-        WatchStopRequest,
+        ProjectRequest, RecentProjectRequest, ReplaceTextRequest, WatchStopRequest,
     };
     use std::{
         fs,
@@ -420,6 +421,7 @@ mod tests {
         assert_eq!(selected["atomicReplace"], "best-effort-safe-write");
     }
 
+    #[cfg(windows)]
     #[test]
     fn command_errors_do_not_expose_the_granted_absolute_root() {
         let fixture = Fixture::new();
@@ -458,6 +460,53 @@ mod tests {
         assert!(!stale.message.contains(absolute_root.as_ref()));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_commands_enumerate_and_read_exactly_but_refuse_replacement() {
+        let fixture = Fixture::new();
+        fixture.write("B.uss", b"Label {}\r\n");
+        fixture.write("A.uxml", "<UXML label=\"日本語\" />\r\n".as_bytes());
+        let state = HostState::new(fixture.root.join("app-data"));
+        let root = state.select_project(&fixture.project).unwrap();
+
+        let enumeration = state
+            .enumerate(&GrantedProjectRequest {
+                project_id: root.project_id.clone(),
+                grant: root.grant.clone(),
+            })
+            .unwrap();
+        let request = PathRequest {
+            project_id: root.project_id.clone(),
+            grant: root.grant.clone(),
+            relative_path: "A.uxml".to_string(),
+        };
+        let read = state.read(&request).unwrap();
+        let refused = state
+            .replace(&ReplaceTextRequest {
+                project_id: root.project_id,
+                grant: root.grant,
+                relative_path: "A.uxml".to_string(),
+                expected_revision: read.revision,
+                text: "replacement\r\n".to_string(),
+            })
+            .unwrap_err();
+
+        assert_eq!(enumeration.relative_paths, ["A.uxml", "B.uss"]);
+        assert_eq!(
+            read.text.as_bytes(),
+            "<UXML label=\"日本語\" />\r\n".as_bytes()
+        );
+        assert_eq!(refused.code, "unsupported");
+        assert!(!refused
+            .message
+            .contains(fixture.project.to_string_lossy().as_ref()));
+        assert_eq!(
+            fs::read(fixture.project.join("A.uxml")).unwrap(),
+            "<UXML label=\"日本語\" />\r\n".as_bytes()
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn command_fixture_composes_exact_read_replace_recovery_and_recent_behavior() {
         let fixture = Fixture::new();

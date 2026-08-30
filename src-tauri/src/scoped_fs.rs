@@ -416,7 +416,7 @@ fn atomic_replace_support(_authority: &Dir) -> AtomicReplaceSupport {
     AtomicReplaceSupport::Unsupported
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn atomic_replace_capability_from_filesystem(filesystem: Option<&str>) -> AtomicReplaceSupport {
     let _ = filesystem;
     AtomicReplaceSupport::Unsupported
@@ -847,19 +847,21 @@ fn is_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
         metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
-    false
+    {
+        let _ = metadata;
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        atomic_replace_capability_from_filesystem, validate_unique_paths, AtomicReplaceSupport,
-        NormalizedRelativePath, ScopedProjects,
-    };
     #[cfg(windows)]
     use super::{
-        atomic_replace_capability_from_volume_evidence, filesystem_name_from_utf16_buffer,
-        NativeQueryStatus, VolumeDeviceQueryEvidence,
+        atomic_replace_capability_from_filesystem, atomic_replace_capability_from_volume_evidence,
+        filesystem_name_from_utf16_buffer, NativeQueryStatus, VolumeDeviceQueryEvidence,
+    };
+    use super::{
+        validate_unique_paths, AtomicReplaceSupport, NormalizedRelativePath, ScopedProjects,
     };
     use sha2::{Digest, Sha256};
     use std::{
