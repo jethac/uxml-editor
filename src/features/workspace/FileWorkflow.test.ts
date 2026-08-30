@@ -54,6 +54,51 @@ describe('FileWorkflow', () => {
     expect(after).toEqual(before);
   });
 
+  it('saves every dirty document, not only the entry document', async () => {
+    const stylePath = 'Assets/Main.uss';
+    const host = new MemoryHost({
+      projects: [{
+        id: 'project-a',
+        name: 'Project A',
+        files: {
+          [ENTRY_PATH]: INITIAL_SOURCE,
+          [stylePath]: 'Button {\r\n  padding-left: 24px;\r\n}\r\n',
+        },
+      }],
+    });
+    const store = new EditorStore({ host, viewport: { width: 1280, height: 720 } });
+    const workflow = new FileWorkflow(store, host, { adapter: new PersistenceTestAdapter() });
+    const root = await host.chooseProject();
+    await workflow.openProject(root!);
+    const session = store.getSnapshot().session!;
+    const start = session.snapshot().files.get(stylePath)!.text.indexOf('24px');
+    session.history.execute({
+      id: 'set-padding',
+      label: 'Set padding',
+      patchesByFile: new Map([[stylePath, [{ start, end: start + 4, replacement: '120px' }]]]),
+    });
+    store.dispatch({ type: 'session/sync' });
+
+    await workflow.save();
+
+    expect((await host.readText(projectPath(root!, stylePath))).text)
+      .toBe('Button {\r\n  padding-left: 120px;\r\n}\r\n');
+    expect((await host.readText(projectPath(root!, ENTRY_PATH))).text).toBe(INITIAL_SOURCE);
+    expect(workflow.getSnapshot().dirtyState).toBe('clean');
+  });
+
+  it('names the unsaved file and the underlying reason when a save fails', async () => {
+    const { host, store, workflow } = fixture();
+    const root = await host.chooseProject();
+    await workflow.openProject(root!);
+    editButtonText(store, 'Race');
+    vi.spyOn(host, 'replaceTextAtomically').mockRejectedValue(new HostError('replace-failed', 'Disk is full.'));
+
+    await expect(workflow.save()).rejects.toThrow(
+      `The project could not be saved completely. Still unsaved: ${ENTRY_PATH}. Disk is full.`,
+    );
+  });
+
   it('creates a new unsaved document and saves it into an empty selected project', async () => {
     const host = new MemoryHost({
       projects: [{ id: 'destination', name: 'Destination', files: {} }],

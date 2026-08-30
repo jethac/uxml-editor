@@ -211,12 +211,7 @@ export class FileWorkflow implements FileWorkflowPort {
         if (this.unsavedSession !== null) await this.saveAsActive();
         return;
       }
-      if (this.store.getSnapshot().session !== active.session) return;
-      await active.recoveryTail;
-      if (active.recoveryError !== null) throw active.recoveryError;
-      this.requireSuccessfulSave(await active.save.save(active.session));
-      this.store.dispatch({ type: 'session/sync' });
-      this.publish();
+      this.requireSuccessfulSave(await this.saveAllActive());
     });
   }
 
@@ -679,7 +674,7 @@ export class FileWorkflow implements FileWorkflowPort {
   private requireSuccessfulSave(outcome: SaveOutcome | null): void {
     if (outcome !== null && outcome.dirtyPaths.length === 0
       && (outcome.status === 'saved' || outcome.status === 'noop')) return;
-    throw new Error('The project could not be saved completely.');
+    throw new Error(`The project could not be saved completely.${describeSaveShortfall(outcome)}`);
   }
 
   private async saveAsActive(root?: ProjectRoot): Promise<void> {
@@ -915,4 +910,13 @@ function chooseEntryPath(files: readonly FileReadResult[]): string {
 
 function formatPathOutcome(paths: readonly string[]): string {
   return paths.length === 0 ? 'none' : paths.join(', ');
+}
+
+function describeSaveShortfall(outcome: SaveOutcome | null): string {
+  if (outcome === null) return '';
+  const reason = outcome.files.find((file) => file.error !== undefined)?.error;
+  const unsaved = outcome.dirtyPaths.length === 0
+    ? ''
+    : ` Still unsaved: ${formatPathOutcome(outcome.dirtyPaths)}.`;
+  return `${unsaved}${reason === undefined ? '' : ` ${reason.message}`}`;
 }
