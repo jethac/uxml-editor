@@ -46,8 +46,9 @@ Fixtures under `fixtures/projects/menu` deliberately contain CRLF, comments, mix
   "Recovery journal base is stale.", clear the site's browser storage and reopen.
 - After a reload the picker often reopens already inside the last-used directory — check the breadcrumb before
   clicking Open, since selecting the inner `Assets` folder fails.
-- Diagnostics surfaces unsupported controls and malformed USS rules, but unknown USS *property names*
-  (e.g. `-unity-bogus-property`) may not produce any diagnostic.
+- Diagnostics surfaces unsupported controls, malformed USS rules, and unknown USS *property names*
+  (e.g. `-unity-bogus-property`, in a stylesheet or an inline `style` attribute). Custom `--name`
+  properties are valid and must never be reported.
 - The Source panel is a contenteditable code editor; `double_click` word selection can eat units
   (`24px` → typing `120` yields `120`), so re-check the text after typing.
 
