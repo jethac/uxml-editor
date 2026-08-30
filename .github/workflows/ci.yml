@@ -37,7 +37,7 @@ jobs:
           if-no-files-found: error
 
   host-linux:
-    name: Host (Linux: fmt, clippy, tests)
+    name: 'Host (Linux: fmt, clippy, tests)'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +58,7 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
 
   host-windows:
-    name: Host (Windows: tests, desktop build)
+    name: 'Host (Windows: tests, desktop build)'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
