@@ -35,3 +35,6 @@ All notable changes to this project are documented here. The format follows
   edits are no longer reported as an incomplete save and left on disk unchanged.
 - A failed save names the documents that stayed unsaved and the underlying
   host error.
+- While a draft keeps the preview stale, diagnostics for that file come from
+  the draft, so newly typed problems appear and locations match what is on
+  screen instead of the last good parse.

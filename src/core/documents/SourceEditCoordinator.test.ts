@@ -149,6 +149,34 @@ describe('SourceEditCoordinator', () => {
     expect(listenerCalls).toHaveLength(1);
   });
 
+  it('reports the malformed draft together with the other diagnostics it earns, located in the draft', () => {
+    const scheduler = new ManualScheduler();
+    const linkedUxml = `<ui:UXML xmlns:ui="UnityEngine.UIElements">
+  <Style src="Main.uss" />
+  <ui:Label name="title" text="Original" />
+</ui:UXML>\n`;
+    const session = DocumentSession.open(new Map([
+      [entryPath, linkedUxml],
+      [sheetPath, '.title { color: red; }\r\n'],
+    ]), entryPath, new UxmlPreviewAdapter());
+    const coordinator = new SourceEditCoordinator(session, { scheduler });
+    const draft = '.title { color red; }\r\n.other { colr: blue; }\r\n';
+
+    expect(coordinator.activate(sheetPath)).toBe(true);
+    coordinator.replace(draft);
+    scheduler.advanceBy(250);
+
+    const snapshot = coordinator.getSnapshot();
+    expect(snapshot.status).toBe('stale');
+    expect(snapshot.draftDiagnosticPaths).toEqual(new Set([sheetPath]));
+    expect(snapshot.diagnostics.map((diagnostic) => diagnostic.kind)).toEqual(
+      expect.arrayContaining(['malformed', 'unsupported-property']),
+    );
+    const unknown = snapshot.diagnostics.find((diagnostic) => diagnostic.kind === 'unsupported-property')!;
+    expect(unknown.message).toContain('colr');
+    expect(draft.slice(unknown.source!.start, unknown.source!.end)).toBe('colr: blue');
+  });
+
   it('clears stale feedback when a malformed draft is reverted to current authority', () => {
     const scheduler = new ManualScheduler();
     const session = openSession();

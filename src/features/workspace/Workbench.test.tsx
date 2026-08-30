@@ -271,6 +271,30 @@ describe('Workbench regions and command bar', () => {
     expect(session.history.undoDepth).toBe(1);
   });
 
+  it('replaces a drafted file\'s committed diagnostics instead of listing them against the draft', async () => {
+    const user = userEvent.setup();
+    const path = 'Assets/UI/Main.uxml';
+    const session = DocumentSession.open(
+      new Map([[path, '<UXML><Button style="colour: red;" /></UXML>']]),
+      path,
+      new UxmlPreviewAdapter(),
+    );
+    const store = new EditorStore({ session, viewport: { width: 1024, height: 768 } });
+    render(<Workbench store={store} />);
+    expect(screen.getByText(/colour is not a USS property/)).toBeVisible();
+
+    await user.click(screen.getByRole('tab', { name: 'Source' }));
+    const view = EditorView.findFromDOM(screen.getByRole('textbox', { name: `${path} source` }))!;
+    act(() => view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: '<UXML><Button style="bogus-prop: red;"' },
+    }));
+    await screen.findByText('Stale preview', {}, { timeout: 1500 });
+
+    await user.click(screen.getByRole('tab', { name: 'Diagnostics' }));
+    expect(screen.getByText(/bogus-prop is not a USS property/)).toBeVisible();
+    expect(screen.queryByText(/colour is not a USS property/)).toBeNull();
+  });
+
   it('disposes a pending source edit when the authoritative session is replaced', async () => {
     const user = userEvent.setup();
     const first = openSession();

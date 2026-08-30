@@ -93,7 +93,12 @@ export function Workbench({ store, registry, workflow, ui, sourceEditScheduler }
     view.focus();
   }, [snapshot.activePanel, store, uiSnapshot.searchRequest]);
   const diagnostics = sourceSnapshot?.status === 'stale'
-    ? [...sourceSnapshot.diagnostics, ...snapshot.diagnostics]
+    ? [
+        ...sourceSnapshot.diagnostics,
+        ...snapshot.diagnostics.filter((diagnostic) =>
+          diagnostic.source === undefined
+          || !sourceSnapshot.draftDiagnosticPaths.has(diagnostic.source.path)),
+      ]
     : snapshot.diagnostics;
   const desktopPanes = useRef<Record<EditorPanel, HTMLElement | null>>({
     hierarchy: null,

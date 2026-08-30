@@ -18,7 +18,14 @@ export interface SourceEditSnapshot {
   readonly drafts: ReadonlyMap<string, string>;
   readonly status: 'ready' | 'stale';
   readonly diagnostics: readonly EditorDiagnostic[];
+  /** Files whose `diagnostics` describe the draft, superseding the committed parse. */
+  readonly draftDiagnosticPaths: ReadonlySet<string>;
   readonly previewDocument: ParsedPreviewDocument;
+}
+
+interface DraftFeedback {
+  readonly malformed: boolean;
+  readonly diagnostics: readonly EditorDiagnostic[];
 }
 
 export interface SourceEditCoordinatorOptions {
@@ -31,7 +38,7 @@ export class SourceEditCoordinator {
   private readonly onAccepted: ((result: CommitResult) => void) | undefined;
   private readonly drafts = new Map<string, string>();
   private readonly authoritative = new Map<string, string>();
-  private readonly feedbackByFile = new Map<string, readonly EditorDiagnostic[]>();
+  private readonly feedbackByFile = new Map<string, DraftFeedback>();
   private readonly scheduled = new Map<string, { readonly revision: number; readonly task: SourceEditScheduledTask }>();
   private readonly listeners = new Set<() => void>();
   private transactionSequence = 0;
@@ -131,9 +138,9 @@ export class SourceEditCoordinator {
       this.publish();
       return;
     }
-    const malformed = this.preflight(path, text);
-    if (malformed.length > 0) {
-      this.feedbackByFile.set(path, malformed);
+    const feedback = this.preflight(path, text);
+    if (feedback.malformed) {
+      this.feedbackByFile.set(path, feedback);
       this.publish();
       return;
     }
@@ -150,27 +157,35 @@ export class SourceEditCoordinator {
     this.onAccepted?.(result);
   }
 
-  private preflight(path: string, text: string): readonly EditorDiagnostic[] {
+  /** Parses the draft so its diagnostics are located against the draft, not the committed text. */
+  private preflight(path: string, text: string): DraftFeedback {
     const files = new Map<string, string>();
     for (const [candidatePath, buffer] of this.session.snapshot().files) {
       files.set(candidatePath, candidatePath === path ? text : buffer.text);
     }
+    const wholeFile = Object.freeze({ path, start: 0, end: text.length });
     try {
       const candidate = DocumentSession.open(files, this.session.entryPath, this.session.adapter);
-      return Object.freeze(candidate.diagnostics
-        .filter((diagnostic) => diagnostic.kind === 'malformed')
-        .map((diagnostic) => Object.freeze({
-          ...diagnostic,
-          source: diagnostic.source ?? Object.freeze({ path, start: 0, end: text.length }),
-        })));
+      const diagnostics = candidate.diagnostics.flatMap((diagnostic) => {
+        const source = diagnostic.source ?? (diagnostic.kind === 'malformed' ? wholeFile : undefined);
+        if (source?.path !== path) return [];
+        return [Object.freeze({ ...diagnostic, source })];
+      });
+      return Object.freeze({
+        malformed: diagnostics.some((diagnostic) => diagnostic.kind === 'malformed'),
+        diagnostics: Object.freeze(diagnostics),
+      });
     } catch (error) {
-      return Object.freeze([Object.freeze({
-        origin: 'parse' as const,
-        severity: 'warning' as const,
-        kind: 'malformed' as const,
-        message: error instanceof Error ? error.message : 'The source could not be parsed.',
-        source: Object.freeze({ path, start: 0, end: text.length }),
-      })]);
+      return Object.freeze({
+        malformed: true,
+        diagnostics: Object.freeze([Object.freeze({
+          origin: 'parse' as const,
+          severity: 'warning' as const,
+          kind: 'malformed' as const,
+          message: error instanceof Error ? error.message : 'The source could not be parsed.',
+          source: wholeFile,
+        })]),
+      });
     }
   }
 
@@ -184,6 +199,7 @@ export class SourceEditCoordinator {
       drafts: new ImmutableMap(this.drafts),
       status,
       diagnostics: Object.freeze([...diagnostics]),
+      draftDiagnosticPaths: Object.freeze(new Set(this.feedbackByFile.keys())),
       activeSpan: this.activeSpan,
       previewDocument: this.previewDocument,
     });
@@ -196,7 +212,7 @@ export class SourceEditCoordinator {
   private feedback(): readonly EditorDiagnostic[] {
     return Object.freeze([...this.feedbackByFile.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
-      .flatMap(([, diagnostics]) => diagnostics));
+      .flatMap(([, entry]) => entry.diagnostics));
   }
 
   private publish(): void {
