@@ -15,6 +15,7 @@ import type {
   StyleOrigin,
   UxmlDocument,
   Warning,
+  WarningKindMap,
 } from 'uxml-preview';
 import type {
   EditorDiagnostic,
@@ -104,6 +105,30 @@ function sourceForReference(
   return path === null || path === undefined ? undefined : { path, ...reference.span };
 }
 
+/**
+ * Every engine warning kind, named once, so a kind the engine gains has to be
+ * classified here rather than reaching the UI as an unknown label.
+ */
+const DIAGNOSTIC_KINDS: WarningKindMap<EditorDiagnosticKind> = {
+  'unsupported-control': 'unsupported-control',
+  'unsupported-property': 'unsupported-property',
+  'unsupported-selector': 'unsupported-selector',
+  'unsupported-unit': 'unsupported-unit',
+  'version-dependent': 'version-dependent',
+  'asset-unresolved': 'asset-unresolved',
+  'import-unresolved': 'import-unresolved',
+  malformed: 'malformed',
+  'template-src-unresolved': 'template-src-unresolved',
+  'template-not-declared': 'template-not-declared',
+  'template-cycle': 'template-cycle',
+  'template-depth-exceeded': 'template-depth-exceeded',
+  'template-slot-unsupported': 'template-slot-unsupported',
+  'override-target-missing': 'override-target-missing',
+  'override-style-ignored': 'override-style-ignored',
+  'duplicate-name-in-tree': 'duplicate-name-in-tree',
+  'package-path-not-searched': 'package-path-not-searched',
+};
+
 function diagnosticFromWarning(
   warning: Warning,
   origin: EditorDiagnostic['origin'],
@@ -118,7 +143,7 @@ function diagnosticFromWarning(
   return {
     origin,
     severity: 'warning',
-    kind: warning.kind as EditorDiagnosticKind,
+    kind: DIAGNOSTIC_KINDS[warning.kind],
     message: warning.message,
     ...(nodeId === undefined ? {} : { nodeId }),
     ...(source === undefined ? {} : { source }),

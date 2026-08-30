@@ -12,9 +12,9 @@ export class ImmutableMap<K, V> implements ReadonlyMap<K, V> {
   forEach(callbackfn: (value: V, key: K, map: ReadonlyMap<K, V>) => void, thisArg?: unknown): void {
     this.#entriesMap.forEach((value, key) => callbackfn.call(thisArg, value, key, this));
   }
-  entries(): IterableIterator<[K, V]> { return this.#entriesMap.entries(); }
-  keys(): IterableIterator<K> { return this.#entriesMap.keys(); }
-  values(): IterableIterator<V> { return this.#entriesMap.values(); }
-  [Symbol.iterator](): IterableIterator<[K, V]> { return this.#entriesMap.entries(); }
+  entries(): MapIterator<[K, V]> { return this.#entriesMap.entries(); }
+  keys(): MapIterator<K> { return this.#entriesMap.keys(); }
+  values(): MapIterator<V> { return this.#entriesMap.values(); }
+  [Symbol.iterator](): MapIterator<[K, V]> { return this.#entriesMap.entries(); }
   get [Symbol.toStringTag](): string { return 'ReadonlyMap'; }
 }

@@ -26,6 +26,16 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - Vendor chunks are split so no production bundle exceeds the size budget.
+- The preview engine is vendored source under `vendor/uxml-preview/` at
+  `uxml-preview` 0.5.0 (Apache-2.0) instead of an npm dependency, so Unity 6.3
+  parity, further controls, and transition playback can be implemented in it.
+  Its upstream test suite runs as part of `npm test`, and the adapter is still
+  the engine's only import site. See
+  [ADR 0002](docs/adr/0002-vendored-preview-engine.md).
+- Engine warnings are mapped through an exhaustive table, so the nine warning
+  kinds 0.5.0 added — template resolution, override, duplicate-name, and
+  package-path warnings — are classified instead of cast, and a new kind fails
+  the typecheck.
 
 ### Fixed
 

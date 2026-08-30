@@ -1,0 +1,255 @@
+// @vitest-environment node
+
+/**
+ * Structural assertions on the parsed tree.
+ *
+ * The round-trip suite cannot catch a wrong tree: slicing the source reproduces
+ * the file even if elements were nested wrongly, so long as the spans still
+ * cover the text. These tests are what actually says the parse is right, and
+ * they are what Phase 3 relies on when a selector fails to match.
+ */
+
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { parse, serialize } from '../../src/index';
+import type { ElementNode } from '../../src/model/types';
+
+const DIR = fileURLToPath(new URL('../fixtures/uxml', import.meta.url));
+const load = (name: string): ElementNode =>
+  parse(readFileSync(join(DIR, name), 'utf8')).root;
+
+const tag = (n: ElementNode): string =>
+  n.name.prefix === null ? n.name.local : `${n.name.prefix}:${n.name.local}`;
+const attr = (n: ElementNode, name: string): string | undefined =>
+  n.attributes.find((a) => a.name === name)?.value;
+
+describe('minimal.uxml', () => {
+  const root = load('minimal.uxml');
+
+  it('roots at ui:UXML with one Label child', () => {
+    expect(tag(root)).toBe('ui:UXML');
+    expect(root.children.map(tag)).toEqual(['ui:Label']);
+    expect(attr(root.children[0]!, 'text')).toBe('Hello');
+  });
+});
+
+describe('comments.uxml', () => {
+  const root = load('comments.uxml');
+
+  it('does not turn comments into elements', () => {
+    expect(root.children.map(tag)).toEqual(['ui:VisualElement']);
+    expect(root.children[0]!.children.map(tag)).toEqual(['ui:Label', 'ui:Label']);
+  });
+
+  it('keeps the labels distinguishable', () => {
+    const labels = root.children[0]!.children;
+    expect(labels.map((l) => attr(l, 'text'))).toEqual(['A', 'B']);
+  });
+});
+
+describe('formatting.uxml', () => {
+  const root = load('formatting.uxml');
+  const container = root.children[0]!;
+
+  it('preserves attribute order as written', () => {
+    expect(container.attributes.map((a) => a.name)).toEqual([
+      'class',
+      'name',
+      'picking-mode',
+    ]);
+  });
+
+  it('reads single-quoted values', () => {
+    expect(attr(container.children[0]!, 'text')).toBe('단일 따옴표로 감싼 값');
+  });
+
+  it('reads attributes split across lines', () => {
+    const button = container.children[1]!;
+    expect(tag(button)).toBe('ui:Button');
+    expect(attr(button, 'class')).toBe('btn btn--primary');
+    expect(attr(button, 'tooltip')).toBe('여러 줄에 걸친 속성');
+  });
+
+  it('distinguishes self-closing from an explicit end tag', () => {
+    expect(container.children[0]!.spans.closeTag).toBeNull();
+    expect(container.children[2]!.spans.closeTag).not.toBeNull();
+    expect(container.children[2]!.children).toHaveLength(0);
+  });
+});
+
+describe('unsupported.uxml', () => {
+  const root = load('unsupported.uxml');
+
+  it('keeps unknown elements in the tree with their prefixes', () => {
+    expect(root.children.map(tag)).toEqual([
+      'ui:Template',
+      'ui:ScrollView',
+      'custom:HealthBar',
+      'ui:Instance',
+    ]);
+  });
+
+  it('still parses supported controls nested inside unsupported ones', () => {
+    const scroll = root.children[1]!;
+    expect(scroll.children.map(tag)).toEqual(['ui:Label']);
+  });
+});
+
+describe('entities.uxml', () => {
+  const root = load('entities.uxml');
+  const texts = root.children.map((c) => attr(c, 'text'));
+
+  it('leaves entity references encoded', () => {
+    // `&amp;` and `&#38;` both mean `&`. Decoding would make them
+    // indistinguishable and the round trip would have to guess.
+    expect(texts[0]).toBe('A &amp; B');
+    expect(texts[1]).toBe('A &#38; B');
+    expect(texts[2]).toBe('&lt;tag&gt; &quot;큰따옴표&quot; &apos;작은따옴표&apos;');
+  });
+});
+
+describe('prologue.uxml', () => {
+  const source = readFileSync(join(DIR, 'prologue.uxml'), 'utf8');
+  const root = parse(source).root;
+
+  it('starts the root span after the declaration and leading comment', () => {
+    expect(source.slice(root.spans.openTag.start, root.spans.openTag.start + 8)).toBe(
+      '<ui:UXML',
+    );
+    expect(source.slice(0, root.spans.openTag.start)).toContain('<?xml');
+  });
+});
+
+describe('inline-style.uxml', () => {
+  const root = load('inline-style.uxml');
+
+  it('keeps the style attribute as raw text', () => {
+    expect(attr(root.children[0]!, 'style')).toBe(
+      'flex-direction: row; padding: 6px 14px;',
+    );
+    expect(attr(root.children[2]!, 'style')).toBe('  margin-top : 8px ;  ');
+  });
+});
+
+describe('every fixture', () => {
+  const names = [
+    'minimal.uxml',
+    'comments.uxml',
+    'formatting.uxml',
+    'unsupported.uxml',
+    'entities.uxml',
+    'prologue.uxml',
+    'inline-style.uxml',
+    'crlf.uxml',
+  ];
+
+  it('parses without warnings', () => {
+    for (const name of names) {
+      const doc = parse(readFileSync(join(DIR, name), 'utf8'));
+      expect(doc.warnings, `${name}: ${JSON.stringify(doc.warnings)}`).toEqual([]);
+    }
+  });
+
+  it('assigns every node a distinct id', () => {
+    for (const name of names) {
+      const seen = new Set<number>();
+      const walk = (n: ElementNode): void => {
+        expect(seen.has(n.id), `${name}: duplicate id ${n.id}`).toBe(false);
+        seen.add(n.id);
+        n.children.forEach(walk);
+      };
+      walk(load(name));
+    }
+  });
+});
+
+/**
+ * `<Style src="…">` — the third way a document points outside itself.
+ *
+ * USS can name a stylesheet with `@import` and an image with `url()`, and both
+ * have gone through `resolveImport` / `resolveAsset` since Phase 3. UXML naming
+ * its own stylesheet is the same problem and was the one entry point left
+ * unwired, which is why a real project's file rendered unstyled with nothing
+ * said about it. UI Builder writes this element into the file the moment a
+ * stylesheet is attached, so it is the ordinary shape of a real document.
+ */
+describe('<Style src>', () => {
+  const doc = (uss: string) =>
+    `<ui:UXML xmlns:ui="UnityEngine.UIElements">\n` +
+    `  <Style src="project://database/Assets/UI/${uss}" />\n` +
+    '  <ui:VisualElement name="a" />\n' +
+    '</ui:UXML>\n';
+
+  it('loads the stylesheet through the same hook as @import', () => {
+    const parsed = parse(doc('panel.uss'), undefined, {
+      resolveImport: (url) => (url.endsWith('panel.uss') ? '#a { width: 42px; }' : null),
+    });
+    expect(parsed.sheets).toHaveLength(1);
+    expect(parsed.warnings).toHaveLength(0);
+  });
+
+  // Silence here was the actual defect: the document said where its styles were
+  // and the answer was to render it unstyled without comment.
+  it('says so when no hook was given, and says what to do', () => {
+    const parsed = parse(doc('panel.uss'));
+    expect(parsed.sheets).toHaveLength(0);
+    const warning = parsed.warnings.find((w) => w.kind === 'import-unresolved');
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain('renders unstyled');
+  });
+
+  it('says so when the hook cannot find it', () => {
+    const parsed = parse(doc('missing.uss'), undefined, { resolveImport: () => null });
+    expect(parsed.warnings.some((w) => w.kind === 'import-unresolved')).toBe(true);
+  });
+
+  it('keeps the element, so the document still round-trips', () => {
+    const text = doc('panel.uss');
+    expect(serialize(parse(text)).uxml).toBe(text);
+  });
+
+  it('lets a directly-passed stylesheet win over the referenced one', () => {
+    const parsed = parse(doc('panel.uss'), '#a { width: 7px; }', {
+      resolveImport: () => '#a { width: 42px; }',
+    });
+    expect(parsed.sheets).toHaveLength(2);
+  });
+});
+
+/**
+ * Paths reach the host as values, not as stored text.
+ *
+ * Attribute values keep their entities in the model so serialization is
+ * byte-exact, but a hook is given the thing the text *means*. UI Builder writes
+ * `?fileID=…&amp;guid=…&amp;type=3`, and a host handed that undecoded would try
+ * to read `amp;guid` as a parameter name.
+ */
+describe('<Style src> entity decoding', () => {
+  const raw =
+    'project://database/Assets/UI/panel.uss?fileID=7433441132597879392&amp;guid=abc123&amp;type=3#panel';
+
+  it('hands the hook a decoded path', () => {
+    const seen: string[] = [];
+    parse(
+      `<ui:UXML xmlns:ui="UnityEngine.UIElements"><Style src="${raw}" /></ui:UXML>`,
+      undefined,
+      {
+        resolveImport: (url) => {
+          seen.push(url);
+          return '';
+        },
+      },
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('&guid=abc123');
+    expect(seen[0]).not.toContain('&amp;');
+  });
+
+  it('still round-trips the raw text', () => {
+    const text = `<ui:UXML xmlns:ui="UnityEngine.UIElements"><Style src="${raw}" /></ui:UXML>`;
+    expect(serialize(parse(text)).uxml).toBe(text);
+  });
+});

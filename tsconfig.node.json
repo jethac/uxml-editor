@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["vite.config.ts", "vitest.config.ts", "vendor/uxml-preview"]
+}

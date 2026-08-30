@@ -12,10 +12,15 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "uxml-preview": ["./vendor/uxml-preview/src/index.ts"],
+      "uxml-preview/unity-project": ["./vendor/uxml-preview/src/unity-project/index.ts"]
+    },
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
     "types": ["vite/client", "vitest/globals"]
   },
-  "include": ["src", "vite.config.ts", "vitest.config.ts"]
+  "include": ["src"]
 }

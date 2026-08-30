@@ -28,7 +28,16 @@ export type EditorDiagnosticKind =
   | 'version-dependent'
   | 'asset-unresolved'
   | 'import-unresolved'
-  | 'malformed';
+  | 'malformed'
+  | 'template-src-unresolved'
+  | 'template-not-declared'
+  | 'template-cycle'
+  | 'template-depth-exceeded'
+  | 'template-slot-unsupported'
+  | 'override-target-missing'
+  | 'override-style-ignored'
+  | 'duplicate-name-in-tree'
+  | 'package-path-not-searched';
 
 export interface EditorDiagnostic {
   readonly origin: 'parse' | 'render';
