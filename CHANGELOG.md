@@ -19,6 +19,9 @@ All notable changes to this project are documented here. The format follows
 - GitHub Actions CI covering typecheck, unit tests, Playwright, browser build,
   license allowlist, and Linux/Windows host tests.
 - `scripts/check-licenses.mjs` dependency license gate.
+- Diagnostics for property names Unity's USS importer drops, in stylesheets
+  (reported at the declaration span) and in inline `style` attributes
+  (reported against the element). Custom `--name` properties are exempt.
 
 ### Changed
 

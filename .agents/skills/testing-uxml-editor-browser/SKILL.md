@@ -30,13 +30,22 @@ Fixtures under `fixtures/projects/menu` deliberately contain CRLF, comments, mix
 (`name = 'play-button'`), and entities (`&#x26;`, `&quot;`) — those are the things to assert unchanged.
 
 ## Known pitfalls / things that may be broken
-- **USS saves may fail.** With any dirty `.uss` draft (valid or not) the Save button can produce
-  "Save failed — The project could not be saved completely." and the `.uss` on disk stays untouched, while
-  `.uxml` in the same save is written. If Save fails, check whether only the stylesheet is dirty: undoing the
-  USS edit and saving again is a workaround that lets UXML changes persist.
-- The failure dialog is generic (no file name / no reason). Check the browser console for the underlying error.
-- Unsaved drafts survive a page reload (recovery journal), so a reload does **not** give you a clean slate;
-  undo back to a clean state or use a fresh scratch project directory when isolating a bug.
+- **Saving non-entry files (e.g. `.uss`) is a historically fragile path.** `FileWorkflow.save()` must route through
+  `saveAllActive()` → `SaveCoordinator.saveAll()`; when it only saved the entry document, dirty `.uss` files stayed
+  on disk untouched while the `.uxml` was written and the dialog reported an incomplete save. Any change in this
+  area should be re-verified with a USS-only edit and a mixed UXML+USS edit, checking bytes on disk both times.
+- The failure dialog should name the unsaved paths and the host reason, e.g.
+  "The project could not be saved completely. Still unsaved: Assets/UI/Menu.uss, Assets/UI/Menu.uxml.
+  Could not replace file: Assets/UI/Menu.uss". A bare generic message = regression.
+- **Forcing a real host write failure:** `chmod 555 /tmp/uxml-proj/Assets/UI` blocks Chrome from creating its
+  `.crswap` file, so `createWritable()` fails for real. Bytes must be preserved, no `.crswap` left behind, and the
+  drafts must stay dirty; `chmod 755` and Save again should then persist them.
+- A no-op save (nothing dirty) must leave md5s **and** mtimes untouched — check `stat -c '%n %Y'`, not just md5.
+- Unsaved drafts can survive a page reload (recovery journal), so a reload does **not** always give a clean slate;
+  undo back to a clean state or use a fresh scratch project directory when isolating a bug. If reopening fails with
+  "Recovery journal base is stale.", clear the site's browser storage and reopen.
+- After a reload the picker often reopens already inside the last-used directory — check the breadcrumb before
+  clicking Open, since selecting the inner `Assets` folder fails.
 - Diagnostics surfaces unsupported controls and malformed USS rules, but unknown USS *property names*
   (e.g. `-unity-bogus-property`) may not produce any diagnostic.
 - The Source panel is a contenteditable code editor; `double_click` word selection can eat units

@@ -341,6 +341,53 @@ describe('UxmlPreviewAdapter', () => {
     }));
   });
 
+  it('reports an unknown stylesheet property at its declaration span and leaves valid ones alone', () => {
+    const adapter = new UxmlPreviewAdapter();
+    const entry = 'Button {\n  -unity-bogus-property: 7px;\n  padding-left: 24px;\n  --brand: #ff0000;\n}\n';
+    const parsed = adapter.parseProject({
+      uxmlPath: 'Assets/UI/screen.uxml',
+      uxml: '<ui:UXML xmlns:ui="UnityEngine.UIElements"><Style src="entry.uss" /></ui:UXML>\n',
+      stylesheets: new Map([['entry.uss', entry]]),
+      resolveImport: () => null,
+    });
+    const unsupported = parsed.diagnostics.filter((diagnostic) => diagnostic.kind === 'unsupported-property');
+
+    expect(unsupported).toEqual([{
+      origin: 'parse',
+      severity: 'warning',
+      kind: 'unsupported-property',
+      message: '-unity-bogus-property is not a USS property; Unity drops the declaration',
+      source: {
+        path: 'entry.uss',
+        start: entry.indexOf('-unity-bogus-property'),
+        end: entry.indexOf('7px') + '7px'.length,
+      },
+    }]);
+  });
+
+  it('reports an unknown inline style property against the element that carries it', () => {
+    const adapter = new UxmlPreviewAdapter();
+    const uxmlSource = '<ui:UXML xmlns:ui="UnityEngine.UIElements">'
+      + '<ui:Label style="colour: red; width: 20px;" />'
+      + '</ui:UXML>\n';
+    const parsed = adapter.parseProject({
+      uxmlPath: 'Assets/UI/screen.uxml',
+      uxml: uxmlSource,
+      stylesheets: new Map<string, string>(),
+      resolveImport: () => null,
+    });
+    const label = parsed.root.children[0]!;
+
+    expect(parsed.diagnostics).toContainEqual({
+      origin: 'parse',
+      severity: 'warning',
+      kind: 'unsupported-property',
+      message: 'colour is not a USS property; Unity drops the declaration',
+      nodeId: label.id,
+      source: label.attributes[0]!.source,
+    });
+  });
+
   it('renders every expected fixture element with unconditional reverse lookup', async () => {
     const adapter = new UxmlPreviewAdapter();
     const parsed = adapter.parseProject(fixtureInput());

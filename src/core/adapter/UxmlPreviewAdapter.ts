@@ -36,11 +36,13 @@ import type {
 } from './types';
 import { freezeParsedPreviewDocument } from './immutableParsedDocument';
 import { editorStylesheetFromParsed, parseEditorDeclarationList } from './UssSourceAdapter';
+import { isKnownUssProperty } from '../uss/ussProperties';
 
 const documentModels = new WeakMap<ParsedPreviewDocument, UxmlDocument>();
 const documentNodes = new WeakMap<ParsedPreviewDocument, ReadonlyMap<EditorNodeId, ElementNode>>();
 let layoutEnginePromise: Promise<void> | undefined;
 const EMPTY_UXML = '<ui:UXML xmlns:ui="UnityEngine.UIElements" />';
+const INLINE_SELECTOR = '__inline__';
 
 function editorNodeId(nodeId: NodeId): EditorNodeId {
   return String(nodeId) as EditorNodeId;
@@ -121,6 +123,72 @@ function diagnosticFromWarning(
     ...(nodeId === undefined ? {} : { nodeId }),
     ...(source === undefined ? {} : { source }),
   };
+}
+
+function unknownPropertyDiagnostic(
+  property: string,
+  source: EditorSourceSpan | undefined,
+  nodeId: EditorNodeId | undefined,
+): EditorDiagnostic {
+  return {
+    origin: 'parse',
+    severity: 'warning',
+    kind: 'unsupported-property',
+    message: `${property} is not a USS property; Unity drops the declaration`,
+    ...(nodeId === undefined ? {} : { nodeId }),
+    ...(source === undefined ? {} : { source }),
+  };
+}
+
+/**
+ * Unity's importer drops a declaration whose property it does not recognize, so
+ * the preview silently matches Unity while the author sees nothing at all. The
+ * preview engine only warns about CSS properties it knows USS lacks, and only
+ * once a rule matches an element; this covers every misspelling, in every rule.
+ */
+function unknownSheetPropertyDiagnostics(
+  model: UxmlDocument,
+  originsBySheet: readonly (string | null)[],
+): EditorDiagnostic[] {
+  const diagnostics: EditorDiagnostic[] = [];
+  model.sheets.forEach((sheet, sheetIndex) => {
+    const path = originsBySheet[sheetIndex] ?? null;
+    for (const item of sheet.items) {
+      if (item.kind !== 'rule') continue;
+      for (const declaration of item.rule.declarations) {
+        if (isKnownUssProperty(declaration.property)) continue;
+        diagnostics.push(unknownPropertyDiagnostic(
+          declaration.property,
+          path === null ? undefined : { path, ...declaration.span },
+          undefined,
+        ));
+      }
+    }
+  });
+  return diagnostics;
+}
+
+function unknownInlinePropertyDiagnostics(
+  input: import('./types').ProjectParseInput,
+  nodes: ReadonlyMap<EditorNodeId, ElementNode>,
+): EditorDiagnostic[] {
+  const diagnostics: EditorDiagnostic[] = [];
+  for (const [nodeId, node] of nodes) {
+    const style = node.attributes.find((attribute) => attribute.name === 'style');
+    if (style === undefined) continue;
+    const sheet = parse(EMPTY_UXML, `${INLINE_SELECTOR} {${style.value}}`).sheets[0];
+    const item = sheet?.items[0];
+    if (item?.kind !== 'rule') continue;
+    for (const declaration of item.rule.declarations) {
+      if (isKnownUssProperty(declaration.property)) continue;
+      diagnostics.push(unknownPropertyDiagnostic(
+        declaration.property,
+        { path: input.uxmlPath, ...style.span },
+        nodeId,
+      ));
+    }
+  }
+  return diagnostics;
 }
 
 function sourceForRuleOrigin(
@@ -235,7 +303,7 @@ export class UxmlPreviewAdapter implements UxmlPreviewPort, UssSourcePort {
   }
 
   parseDeclarationList(path: string, source: string, start: number, end: number) {
-    const prefix = '__inline__ {';
+    const prefix = `${INLINE_SELECTOR} {`;
     const sheet = editorStylesheetFromParsed(
       path,
       parse(EMPTY_UXML, `${prefix}${source.slice(start, end)}}`).sheets[0],
@@ -269,13 +337,17 @@ export class UxmlPreviewAdapter implements UxmlPreviewPort, UssSourcePort {
       root,
       originsBySheet,
       localStyleSheetIndices: [...new Set((model.styleRoots ?? []).map((root) => root.sheet))],
-      diagnostics: model.warnings.map((warning) => diagnosticFromWarning(
-        warning,
-        'parse',
-        source,
-        originsBySheet,
-        nodes,
-      )),
+      diagnostics: [
+        ...model.warnings.map((warning) => diagnosticFromWarning(
+          warning,
+          'parse',
+          source,
+          originsBySheet,
+          nodes,
+        )),
+        ...unknownSheetPropertyDiagnostics(model, originsBySheet),
+        ...unknownInlinePropertyDiagnostics(source, nodes),
+      ],
     });
     documentModels.set(document, model);
     documentNodes.set(document, nodes);
