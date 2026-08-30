@@ -169,7 +169,8 @@ export class SourceEditCoordinator {
       const diagnostics = candidate.diagnostics.flatMap((diagnostic) => {
         const source = diagnostic.source ?? (diagnostic.kind === 'malformed' ? wholeFile : undefined);
         if (source?.path !== path) return [];
-        return [Object.freeze({ ...diagnostic, source })];
+        const { nodeId: _draftNodeId, ...rest } = diagnostic;
+        return [Object.freeze({ ...rest, source })];
       });
       return Object.freeze({
         malformed: diagnostics.some((diagnostic) => diagnostic.kind === 'malformed'),

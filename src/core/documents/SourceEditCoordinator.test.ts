@@ -149,6 +149,25 @@ describe('SourceEditCoordinator', () => {
     expect(listenerCalls).toHaveLength(1);
   });
 
+  it('drops node ids from draft diagnostics, which name nodes of the throwaway draft parse', () => {
+    const scheduler = new ManualScheduler();
+    const session = openSession();
+    const coordinator = new SourceEditCoordinator(session, { scheduler });
+
+    expect(coordinator.activate(entryPath)).toBe(true);
+    coordinator.replace(`<ui:UXML xmlns:ui="UnityEngine.UIElements">
+  <ui:Label name=oops />
+  <ui:Label name="title" style="colour: red;" />
+</ui:UXML>\n`);
+    scheduler.advanceBy(250);
+
+    const snapshot = coordinator.getSnapshot();
+    expect(snapshot.status).toBe('stale');
+    expect(snapshot.diagnostics.map((diagnostic) => diagnostic.kind))
+      .toEqual(expect.arrayContaining(['malformed', 'unsupported-property']));
+    expect(snapshot.diagnostics.every((diagnostic) => diagnostic.nodeId === undefined)).toBe(true);
+  });
+
   it('reports the malformed draft together with the other diagnostics it earns, located in the draft', () => {
     const scheduler = new ManualScheduler();
     const linkedUxml = `<ui:UXML xmlns:ui="UnityEngine.UIElements">
