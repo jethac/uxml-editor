@@ -8,6 +8,7 @@ import uxml from '../../../tests/fixtures/minimal.uxml?raw';
 import { parse as parseJavaScript } from '@babel/parser';
 import { describe, expect, it, vi } from 'vitest';
 import { UxmlPreviewAdapter } from './UxmlPreviewAdapter';
+import { EDITOR_DIAGNOSTIC_KINDS } from './types';
 import type { EditorElement, ProjectParseInput } from './types';
 
 const paletteUss = 'VisualElement { padding-left: 4px; }\n';
@@ -479,6 +480,30 @@ describe('UxmlPreviewAdapter', () => {
 
     expect(firstElement.isConnected).toBe(false);
     second.dispose();
+    container.remove();
+  });
+
+  it('reports template diagnostics with a kind the store accepts', async () => {
+    const adapter = new UxmlPreviewAdapter();
+    const parsed = adapter.parseProject({
+      uxmlPath: 'Assets/UI/Main.uxml',
+      uxml: '<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Instance template="Card" name="card" />\n</ui:UXML>\n',
+      stylesheets: new Map(),
+      resolveImport: () => null,
+    });
+    const container = document.createElement('div');
+    document.body.append(container);
+
+    const frame = await adapter.render(parsed, container, {
+      size: { width: 320, height: 180 },
+      measureText: deterministicMeasureText,
+    });
+
+    expect(frame.diagnostics.map((diagnostic) => diagnostic.kind)).toContain('template-not-declared');
+    for (const diagnostic of frame.diagnostics) {
+      expect(EDITOR_DIAGNOSTIC_KINDS).toContain(diagnostic.kind);
+    }
+    frame.dispose();
     container.remove();
   });
 

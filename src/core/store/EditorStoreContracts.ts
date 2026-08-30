@@ -1,3 +1,4 @@
+import { EDITOR_DIAGNOSTIC_KINDS } from '../adapter/types';
 import type { EditorDiagnostic, EditorDiagnosticKind, EditorNodeId } from '../adapter/types';
 import type { DocumentSession } from '../documents/DocumentSession';
 import type { ElementLocator } from '../documents/ElementLocator';
@@ -342,15 +343,10 @@ function isPreviewState(value: unknown): value is PreviewState {
   return value === 'edit' || value === 'preview';
 }
 
+const diagnosticKinds: ReadonlySet<string> = new Set(EDITOR_DIAGNOSTIC_KINDS);
+
 function isDiagnosticKind(value: unknown): value is EditorDiagnosticKind {
-  return value === 'unsupported-control'
-    || value === 'unsupported-property'
-    || value === 'unsupported-selector'
-    || value === 'unsupported-unit'
-    || value === 'version-dependent'
-    || value === 'asset-unresolved'
-    || value === 'import-unresolved'
-    || value === 'malformed';
+  return typeof value === 'string' && diagnosticKinds.has(value);
 }
 
 function isFiniteNumber(value: unknown): value is number {
