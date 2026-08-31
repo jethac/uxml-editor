@@ -75,6 +75,30 @@ export const THEME_USS = `:disabled {
 }
 `;
 
+/** Unity version whose documentation `DOCUMENTED_USS` was read from. */
+export const DOCUMENTED_UNITY_VERSION = '6000.3';
+
+/**
+ * Control defaults taken from Unity's documentation, never measured.
+ *
+ * Kept as its own sheet rather than merged into `THEME_USS` for the reason that
+ * file opens with: everything above is derived from a layout dump, and a
+ * documented value sitting among them would be indistinguishable from measured
+ * ground truth. Same cascade, same rank, different provenance — declarations
+ * from here carry `evidence: 'documented'` so an editor can say which it is
+ * showing.
+ *
+ * `flex-direction: row` on `.unity-base-field` is structural rather than
+ * cosmetic: a field puts its label beside its input, and column would stack
+ * them, so leaving it out would not be neutral. Sizes are absent on purpose —
+ * Unity's default label width is a number this has no way to know, and guessing
+ * it would move every field's input by an amount no test could catch.
+ */
+export const DOCUMENTED_USS = `.unity-base-field {
+  flex-direction: row;
+}
+`;
+
 /**
  * Width a visible vertical scrollbar takes from a ScrollView's viewport, in px.
  *

@@ -370,7 +370,20 @@ export type StyleOrigin =
    * between Unity versions, and when one stops matching this is the first thing
    * to check.
    */
-  | { kind: 'builtin-theme'; selector: string; property: string; unityVersion: string }
+  | {
+      kind: 'builtin-theme';
+      selector: string;
+      property: string;
+      unityVersion: string;
+      /**
+       * Absent means measured from a layout dump on `unityVersion`. `'documented'`
+       * means it comes from Unity's published class names and hierarchy for that
+       * version and has never been compared to a running Unity — the difference
+       * between "may have moved since" and "has never been checked", which an
+       * editor showing provenance should not flatten into one sentence.
+       */
+      evidence?: 'documented';
+    }
   /** USS default, which is not always the CSS default — `flex-direction` is `column`. */
   | { kind: 'default' };
 
