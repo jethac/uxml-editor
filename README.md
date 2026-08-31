@@ -32,9 +32,13 @@ user formatting survive a round trip.
   engine in [`vendor/uxml-preview`](vendor/uxml-preview), which is measured
   against Unity 6000.0.40f1 and has no `filter`, `aspect-ratio`, SVG, 9-slice,
   or text-outline support.
-- Controls beyond `VisualElement`, `Label`, `Button`, `Image`, and
-  `ScrollView`. Unknown controls stay in the tree, render as fallback boxes,
-  and raise a warning.
+- Controls beyond `VisualElement`, `Label`, `Button`, `Image`, `ScrollView`,
+  `Toggle`, `TextField`, `IntegerField`, `FloatField`, `DropdownField`,
+  `Slider`, `SliderInt`, and `Foldout`. Unknown controls stay in the tree,
+  render as fallback boxes, and raise a warning. Everything after `ScrollView`
+  is built from Unity's documented element names and USS classes rather than
+  from measurements, so captions, classes, and nesting are right but default
+  sizes and spacing are not; each says so through a diagnostic.
 - Atomic conditional replacement off Windows. The native
   `replaceTextAtomically` returns `unsupported` on other platforms; the browser
   host uses its own revision-checked write path.
@@ -80,7 +84,7 @@ The preview engine is vendored source, not an npm dependency:
 [`vendor/uxml-preview`](vendor/uxml-preview) holds `uxml-preview` 0.5.0 under
 Apache-2.0, with its upstream test suite, its license, and the import recorded
 in [`vendor/uxml-preview/PROVENANCE.md`](vendor/uxml-preview/PROVENANCE.md). It
-is vendored because Unity 6.3 parity, controls beyond the five renderers, and
+is vendored because Unity 6.3 parity, controls beyond its five renderers, and
 transition playback all need engine changes upstream has scoped out. `npm test`
 runs the upstream suite, so engine edits still have to satisfy the measurements
 they came from.

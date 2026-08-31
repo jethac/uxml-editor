@@ -15,7 +15,7 @@
 import type { ElementNode, NodeId, Warning } from '../model/types';
 import type { ComputedStyle } from '../style/resolve';
 import type { LayoutBox, LayoutPart } from '../layout/yoga';
-import { resolveControl } from '../controls/registry';
+import { contentPartOf, resolveControl } from '../controls/registry';
 import { decodeEntities } from '../parser/entities';
 import { toCss } from './css-map';
 import type { CssMapOptions } from './css-map';
@@ -47,6 +47,12 @@ export interface PaintOptions extends CssMapOptions {
   document: Document;
 }
 
+/** Left and top border widths of the box a child is positioned against. */
+interface Origin {
+  left: number;
+  top: number;
+}
+
 /**
  * Purpose:      build the DOM for one laid-out document under `container`.
  * Deps/Effects: replaces the container's children. The caller owns disposal.
@@ -71,7 +77,7 @@ export function paint(
    * border — so the border has to come back out of the number, or the browser
    * counts it twice and every descendant of a bordered element sits too far in.
    */
-  function borderOrigin(node: ElementNode): { left: number; top: number } {
+  function borderOrigin(node: ElementNode): Origin {
     const style = styles.get(node.id);
     const read = (property: string): number => {
       const text = style?.get(property)?.value ?? INITIAL[property] ?? '0';
@@ -82,7 +88,7 @@ export function paint(
   }
 
   /** Same correction as `borderOrigin`, for a part, whose style is not in `styles`. */
-  function partBorderOrigin(part: LayoutPart): { left: number; top: number } {
+  function partBorderOrigin(part: LayoutPart): Origin {
     const read = (property: string): number => {
       const text = part.style.get(property)?.value ?? INITIAL[property] ?? '0';
       const { length } = parseLength(text);
@@ -94,7 +100,7 @@ export function paint(
   function build(
     node: ElementNode,
     parentBox: LayoutBox | null,
-    parentBorder: { left: number; top: number },
+    parentBorder: Origin,
   ): HTMLElement | null {
     const box = boxes.get(node.id);
     // Not laid out. Every element gets a box now, including controls with no
@@ -142,12 +148,13 @@ export function paint(
       }
       el.textContent = decodeEntities(text);
     } else {
-      // The control's own parts nest between this element and the file's
-      // children, so `host` walks inward and the children are appended to the
-      // innermost one — matching the tree Unity actually builds.
-      let host = el;
-      let hostBox = box;
-      let hostBorder = borderOrigin(node);
+      // The control's own parts go between this element and the file's
+      // children, as the tree Unity actually builds — a tree, not a chain, so
+      // each part is appended to the part it names as its parent and the
+      // children go to the content part, which may be neither the innermost
+      // nor the last.
+      const frames = new Map<string, { el: HTMLElement; box: LayoutBox; border: Origin }>();
+      const ownFrame = { el, box, border: borderOrigin(node) };
 
       for (const part of parts.get(node.id) ?? []) {
         const partEl = options.document.createElement('div');
@@ -156,10 +163,12 @@ export function paint(
 
         const partCss = toCss(part.style, node.id, options);
         warnings.push(...partCss.warnings);
+        // Parents precede their children in the layout, so the frame exists.
+        const into = part.parent === undefined ? ownFrame : (frames.get(part.parent) ?? ownFrame);
         const partDeclarations: Record<string, string> = {
           position: 'absolute',
-          left: `${part.box.left - hostBox.left - hostBorder.left}px`,
-          top: `${part.box.top - hostBox.top - hostBorder.top}px`,
+          left: `${part.box.left - into.box.left - into.border.left}px`,
+          top: `${part.box.top - into.box.top - into.border.top}px`,
           width: `${part.box.width}px`,
           height: `${part.box.height}px`,
           margin: '0',
@@ -169,17 +178,34 @@ export function paint(
           partEl.style.setProperty(property, value);
         }
 
-        host.appendChild(partEl);
-        host = partEl;
-        hostBox = part.box;
-        hostBorder = partBorderOrigin(part);
+        // A part that draws its owner's caption is where the words go. Unity
+        // puts them in a child TextElement, and the layout measured this box
+        // for exactly this string.
+        if (part.text !== undefined) {
+          partEl.style.setProperty('display', partCss.declarations['display'] ?? 'flex');
+          if (partCss.declarations['align-items'] === undefined) {
+            partEl.style.setProperty('align-items', 'flex-start');
+          }
+          if (partCss.declarations['justify-content'] === undefined) {
+            partEl.style.setProperty('justify-content', 'flex-start');
+          }
+          partEl.textContent = decodeEntities(part.text);
+        }
+
+        into.el.appendChild(partEl);
+        frames.set(part.name, { el: partEl, box: part.box, border: partBorderOrigin(part) });
       }
+
+      const contentName = contentPartOf(spec);
+      const host = (contentName === undefined ? undefined : frames.get(contentName)) ?? ownFrame;
+      const hostBox = host.box;
+      const hostBorder = host.border;
 
       for (const child of node.children) {
         const childEl = build(child, hostBox, hostBorder);
         // Appended in document order: later siblings paint on top, which is
         // how USS orders overlap.
-        if (childEl !== null) host.appendChild(childEl);
+        if (childEl !== null) host.el.appendChild(childEl);
       }
     }
 

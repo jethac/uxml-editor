@@ -22,8 +22,8 @@ import type { Node as YogaNode, Yoga } from 'yoga-layout/load';
 
 import type { ElementNode, NodeId, Warning } from '../model/types';
 import type { ComputedStyle } from '../style/resolve';
-import { isNonVisual, resolveControl } from '../controls/registry';
-import type { ControlPart } from '../controls/registry';
+import { contentPartOf, isNonVisual, resolveControl } from '../controls/registry';
+import type { ControlEvidence } from '../controls/registry';
 import { THEME_UNITY_VERSION, verticalScrollbarWidth } from '../controls/theme';
 import { expandShorthand } from '../style/properties';
 import type { ComputedValue } from '../style/resolve';
@@ -102,19 +102,30 @@ export interface LayoutOptions {
 export interface LayoutPart {
   /** Unity's name, e.g. `unity-content-viewport`. */
   name: string;
+  /** The part this one sits inside; absent means the owner itself. */
+  parent?: string;
   /** The element whose control built it. */
   owner: NodeId;
   box: LayoutBox;
   /** Fixed styling, with `builtin-theme` provenance on every value. */
   style: ComputedStyle;
+  /**
+   * Text this part draws, from the attribute its spec names.
+   *
+   * A caption lives here rather than on the owner because that is where Unity
+   * puts it: `<ui:Toggle label="Sound" />` has no text of its own, and the word
+   * belongs to the child element that is laid out and measured for it.
+   */
+  text?: string;
 }
 
 export interface LayoutTree {
   /** Computed box per element, in panel coordinates. */
   boxes: ReadonlyMap<NodeId, LayoutBox>;
   /**
-   * Parts each element's control built, outermost first. The element's own
-   * children were laid out inside the last one.
+   * Parts each element's control built, parents before children. The element's
+   * own children were laid out inside its content part, which is not always
+   * the innermost or the last one.
    */
   parts: ReadonlyMap<NodeId, readonly LayoutPart[]>;
   /** Elements that were laid out, parents before children. */
@@ -200,12 +211,14 @@ export function layoutDocument(
   const parts = new Map<NodeId, LayoutPart[]>();
   const painted: ElementNode[] = [];
   const yogaOf = new Map<ElementNode, YogaNode>();
-  /** Yoga node per part, in the same order as `parts`, so `collect` can pair them. */
-  const partNodes = new Map<NodeId, YogaNode[]>();
+  /** Yoga node per part, by name, so `collect` and the scrollbar pass can find them. */
+  const partNodes = new Map<NodeId, Map<string, YogaNode>>();
   let created = 0;
   let disposed = false;
-  /** Version warning for control parts, raised once per document. */
+  /** Version warning for measured control parts, raised once per document. */
   let themeReported = false;
+  /** Control names already reported as drawn from documentation, not measurement. */
+  const documentedReported = new Set<string>();
 
   const read = (style: ComputedStyle, property: string): string =>
     style.get(property)?.value ?? INITIAL[property] ?? '';
@@ -291,8 +304,35 @@ export function layoutDocument(
     }
   }
 
+  function attributeText(node: ElementNode, name: string): string | undefined {
+    const value = node.attributes.find((a) => a.name === name)?.value;
+    return value === undefined || value.length === 0 ? undefined : value;
+  }
+
   function textOf(node: ElementNode): string | undefined {
-    return node.attributes.find((a) => a.name === 'text')?.value;
+    return attributeText(node, 'text');
+  }
+
+  /**
+   * Purpose:      make `target` size itself to `text`.
+   * Deps/Effects: installs a Yoga measure function reading `options.measureText`.
+   * Requires:     `target` must have no children — Yoga rejects both at once.
+   *
+   * Shared by an element that draws its own text and a part that draws its
+   * owner's caption, because the two have to agree: a `Label`'s width and a
+   * `Toggle` label part's width come out of the same measurement or the two
+   * disagree about what the same string is worth.
+   */
+  function measureAs(target: YogaNode, style: ComputedStyle, node: ElementNode, text: string): void {
+    const fontSize = length(style, 'font-size', node);
+    const context: TextContext = {
+      fontSize: fontSize !== null && fontSize.kind === 'px' ? fontSize.value : 12,
+      fontStyle: read(style, '-unity-font-style') || 'normal',
+      whiteSpace: read(style, 'white-space') || 'normal',
+    };
+    target.setMeasureFunc((availableWidth) =>
+      options.measureText(text, context, Number.isFinite(availableWidth) ? availableWidth : 0),
+    );
   }
 
   /**
@@ -309,6 +349,51 @@ export function layoutDocument(
     return CAPTION_ATTRIBUTES.filter((name) =>
       node.attributes.some((a) => a.name === name && a.value.length > 0),
     );
+  }
+
+  /**
+   * Purpose:      say where a control's implicit children came from.
+   * Deps/Effects: appends at most one `version-dependent` warning per document
+   *               for measured controls, and one per control name for
+   *               documented ones.
+   *
+   * Two messages rather than one because the risks are different sizes. A
+   * measured control may be a version behind; a documented one has never been
+   * compared to Unity at all, and an author reading a Toggle's label position
+   * off this preview deserves to be told which of the two they are looking at.
+   */
+  function reportProvenance(node: ElementNode, evidence: ControlEvidence): void {
+    if (evidence === 'measured') {
+      // A part's styling and the scrollbar width beside it are both measured on
+      // one Unity version, exactly like the Button margin — but neither goes
+      // through the cascade, so neither reached the warning the cascade raises.
+      // A ScrollView-only document was using version-specific geometry in
+      // silence, and a document that happened to contain a Button got the
+      // warning for an unrelated reason. Reported here, once, where it applies.
+      if (themeReported) return;
+      themeReported = true;
+      warnings.push({
+        kind: 'version-dependent',
+        message:
+          `<${node.name.local}> is drawn with the implicit child elements Unity ` +
+          `builds for it, and their geometry was measured on Unity ${THEME_UNITY_VERSION}. ` +
+          'Other versions may differ; see src/controls/theme.ts.',
+        node: node.id,
+      });
+      return;
+    }
+
+    if (documentedReported.has(node.name.local)) return;
+    documentedReported.add(node.name.local);
+    warnings.push({
+      kind: 'version-dependent',
+      message:
+        `<${node.name.local}> is drawn from the child elements and USS classes Unity ` +
+        'documents for it, and none of its geometry has been measured against any Unity ' +
+        'version. Its caption and structure are shown so they can be styled; the exact ' +
+        'sizes and spacing are not authoritative.',
+      node: node.id,
+    });
   }
 
   function build(node: ElementNode, parent: YogaNode | null): void {
@@ -352,19 +437,7 @@ export function layoutDocument(
           node,
         );
       }
-      const fontSize = length(style, 'font-size', node);
-      const context: TextContext = {
-        fontSize: fontSize !== null && fontSize.kind === 'px' ? fontSize.value : 12,
-        fontStyle: read(style, '-unity-font-style') || 'normal',
-        whiteSpace: read(style, 'white-space') || 'normal',
-      };
-      yg.setMeasureFunc((availableWidth) =>
-        options.measureText(
-          text,
-          context,
-          Number.isFinite(availableWidth) ? availableWidth : 0,
-        ),
-      );
+      measureAs(yg, style, node, text);
       return;
     }
 
@@ -373,53 +446,63 @@ export function layoutDocument(
     // unsupported control, which names the wrong problem — the stylesheet is
     // handled in `parse`, and if it could not be loaded that is what warns.
     // A control's own parts go between it and the file's children, so the
-    // children are built into the innermost part rather than into the element.
+    // children are built into its content part rather than into the element.
     // Skipping this is exactly the bug that puts every descendant of a
     // ScrollView in the wrong place.
     let host = yg;
     if (spec.parts.length > 0) {
-      // A part's styling and the scrollbar width beside it are both measured on
-      // one Unity version, exactly like the Button margin — but neither goes
-      // through the cascade, so neither reached the warning the cascade raises.
-      // A ScrollView-only document was using version-specific geometry in
-      // silence, and a document that happened to contain a Button got the
-      // warning for an unrelated reason. Reported here, once, where it applies.
-      if (!themeReported) {
-        themeReported = true;
-        warnings.push({
-          kind: 'version-dependent',
-          message:
-            `<${node.name.local}> is drawn with the implicit child elements Unity ` +
-            `builds for it, and their geometry was measured on Unity ${THEME_UNITY_VERSION}. ` +
-            'Other versions may differ; see src/controls/theme.ts.',
-          node: node.id,
-        });
-      }
+      reportProvenance(node, spec.evidence);
       const chain: LayoutPart[] = [];
-      const nodes: YogaNode[] = [];
+      const nodes = new Map<string, YogaNode>();
       const resolvedParts = partStyles.get(node.id);
+      const content = contentPartOf(spec);
       for (const part of spec.parts) {
         // Falls back to nothing rather than to the registry defaults: if the
         // cascade did not resolve this part, styling it from a second source
         // here is exactly the divergence this refactor removed.
-        const style: ComputedStyle = resolvedParts?.get(part.name) ?? new Map();
+        const partStyle: ComputedStyle = resolvedParts?.get(part.name) ?? new Map();
         const partNode = yoga!.Node.create();
         created++;
         liveNodes++;
-        applyStyle(partNode, style, node);
-        host.insertChild(partNode, host.getChildCount());
-        host = partNode;
-        nodes.push(partNode);
+        applyStyle(partNode, partStyle, node);
+        // Parents come first in the spec, so the node is already built.
+        const into = part.parent === undefined ? yg : (nodes.get(part.parent) ?? yg);
+        into.insertChild(partNode, into.getChildCount());
+        nodes.set(part.name, partNode);
+
+        // A measured node may not have children, so a part that will receive
+        // any is laid out from its style instead of from its caption.
+        const caption = part.textFrom === undefined ? undefined : attributeText(node, part.textFrom);
+        const receivesChildren =
+          spec.parts.some((other) => other.parent === part.name) ||
+          (content === part.name && node.children.length > 0);
+        if (caption !== undefined && !receivesChildren) {
+          measureAs(partNode, partStyle, node, caption);
+        } else if (caption !== undefined) {
+          warn(
+            `<${node.name.local}> draws its ${part.textFrom} through ${part.name}, which also ` +
+              'holds children here; the text is not measured',
+            node,
+          );
+        }
+
         // Box filled in by `collect`, once layout has actually run.
         chain.push({
           name: part.name,
+          ...(part.parent === undefined ? {} : { parent: part.parent }),
           owner: node.id,
           box: { left: 0, top: 0, width: 0, height: 0 },
-          style,
+          style: partStyle,
+          ...(caption === undefined ? {} : { text: caption }),
         });
       }
       parts.set(node.id, chain);
       partNodes.set(node.id, nodes);
+      // `contentContainer`, not the innermost part: a Toggle's children sit
+      // beside its label and input, and a ScrollView's inside its container.
+      if (content !== undefined) host = nodes.get(content) ?? yg;
+    } else if (spec.evidence === 'documented') {
+      reportProvenance(node, spec.evidence);
     }
 
     // Every child is built. A control this version does not know still gets a
@@ -454,15 +537,15 @@ export function layoutDocument(
   const reserved = new Map<NodeId, number>();
   for (let pass = 0; pass < 3; pass++) {
     let changed = false;
-    for (const [owner, chain] of parts) {
+    for (const [owner] of parts) {
       const nodes = partNodes.get(owner);
       if (nodes === undefined) continue;
-      const viewport = chain.findIndex((p) => p.name === 'unity-content-viewport');
-      const content = chain.findIndex((p) => p.name === 'unity-content-container');
-      if (viewport === -1 || content === -1) continue;
+      const viewport = nodes.get('unity-content-viewport');
+      const content = nodes.get('unity-content-container');
+      if (viewport === undefined || content === undefined) continue;
 
-      const viewportBox = nodes[viewport]!.getComputedLayout();
-      const contentBox = nodes[content]!.getComputedLayout();
+      const viewportBox = viewport.getComputedLayout();
+      const contentBox = content.getComputedLayout();
       // A hair of tolerance: equal heights are not an overflow, and floating
       // point should not decide whether a scrollbar exists.
       const overflows = contentBox.height > viewportBox.height + 0.01;
@@ -470,7 +553,7 @@ export function layoutDocument(
       if ((reserved.get(owner) ?? 0) === want) continue;
 
       reserved.set(owner, want);
-      nodes[viewport]!.setMargin(Edge.Right, want);
+      viewport.setMargin(Edge.Right, want);
       changed = true;
     }
     if (!changed) break;
@@ -479,27 +562,40 @@ export function layoutDocument(
 
   // Yoga reports each box relative to its parent; the painter wants panel
   // coordinates, so offsets accumulate on the way down — through the parts as
-  // well, since a child sits inside the innermost one.
+  // well, along the branch each one is actually on. Accumulating along the
+  // whole list instead, as a chain could, would offset a Toggle's input by its
+  // label's position and everything below the control with it.
   function collect(node: ElementNode, offsetX: number, offsetY: number): void {
     const yg = yogaOf.get(node);
     if (yg === undefined) return;
     const box = yg.getComputedLayout();
-    let left = offsetX + box.left;
-    let top = offsetY + box.top;
+    const left = offsetX + box.left;
+    const top = offsetY + box.top;
     boxes.set(node.id, { left, top, width: box.width, height: box.height });
 
+    let childX = left;
+    let childY = top;
     const chain = parts.get(node.id);
     const nodes = partNodes.get(node.id);
     if (chain !== undefined && nodes !== undefined) {
-      chain.forEach((part, index) => {
-        const partBox = nodes[index]!.getComputedLayout();
-        left += partBox.left;
-        top += partBox.top;
-        part.box = { left, top, width: partBox.width, height: partBox.height };
-      });
+      const origin = new Map<string, { left: number; top: number }>();
+      for (const part of chain) {
+        const base = part.parent === undefined ? { left, top } : origin.get(part.parent);
+        const from = base ?? { left, top };
+        const partBox = nodes.get(part.name)!.getComputedLayout();
+        const at = { left: from.left + partBox.left, top: from.top + partBox.top };
+        origin.set(part.name, at);
+        part.box = { ...at, width: partBox.width, height: partBox.height };
+      }
+      const content = contentPartOf(resolveControl(node).spec);
+      const host = content === undefined ? undefined : origin.get(content);
+      if (host !== undefined) {
+        childX = host.left;
+        childY = host.top;
+      }
     }
 
-    for (const child of node.children) collect(child, left, top);
+    for (const child of node.children) collect(child, childX, childY);
   }
   collect(root, 0, 0);
 

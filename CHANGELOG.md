@@ -19,6 +19,14 @@ All notable changes to this project are documented here. The format follows
 - GitHub Actions CI covering typecheck, unit tests, Playwright, browser build,
   license allowlist, and Linux/Windows host tests.
 - `scripts/check-licenses.mjs` dependency license gate.
+- `Toggle`, `TextField`, `IntegerField`, `FloatField`, `DropdownField`,
+  `Slider`, `SliderInt`, and `Foldout` are drawn with the child elements and USS
+  classes Unity documents for them, so their `label`, `text` and `value`
+  captions appear and `.unity-base-field__label`-style selectors
+  reach the generated elements. Their structure is documented, not measured
+  against a running Unity, and each says so once through a `version-dependent`
+  diagnostic; declarations they contribute carry `evidence: 'documented'` in
+  style provenance so the inspector can tell them from measured theme values.
 - Diagnostics for property names Unity's USS importer drops, in stylesheets
   (reported at the declaration span) and in inline `style` attributes
   (reported against the element). Custom `--name` properties are exempt.

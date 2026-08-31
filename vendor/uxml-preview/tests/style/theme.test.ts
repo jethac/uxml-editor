@@ -235,7 +235,7 @@ describe('the unreachable part-selector warning', () => {
   // boxes still have none, so `#unity-text-input` goes on doing nothing — the
   // same silent failure in a different control, which rule 6 forbids.
   it('fires for a part name no control in the document builds', () => {
-    const messages = unity('<ui:TextField name="t" />', '#unity-text-input { width: 40px; }');
+    const messages = unity('<ui:MinMaxSlider name="t" />', '#unity-text-input { width: 40px; }');
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain('#unity-text-input');
     // Says why, not just that: the control is drawn as a plain box.

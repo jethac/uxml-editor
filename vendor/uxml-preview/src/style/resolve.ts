@@ -27,8 +27,20 @@ import type {
   UxmlDocument,
   Warning,
 } from '../model/types';
-import { implicitClassesOf, resolveControl, supportedControlNames } from '../controls/registry';
-import { THEME_UNITY_VERSION, THEME_USS } from '../controls/theme';
+import {
+  contentPartOf,
+  implicitClassesOf,
+  partNamed,
+  resolveControl,
+  supportedControlNames,
+} from '../controls/registry';
+import type { ControlEvidence, ControlPart } from '../controls/registry';
+import {
+  DOCUMENTED_UNITY_VERSION,
+  DOCUMENTED_USS,
+  THEME_UNITY_VERSION,
+  THEME_USS,
+} from '../controls/theme';
 import { parseUss } from '../parser/uss';
 import { attributeValueStart, parseDeclarationList } from '../parser/uss';
 import { expandShorthand, isInherited } from './properties';
@@ -103,9 +115,8 @@ type Target =
   | {
       readonly kind: 'part';
       readonly owner: ElementNode;
-      readonly name: string;
-      /** Index in the owner's part chain; 0 is outermost. */
-      readonly depth: number;
+      /** The spec, not an index: parts form a tree, so depth means nothing. */
+      readonly part: ControlPart;
     };
 
 /**
@@ -150,6 +161,10 @@ interface FlatRule {
   scope?: NodeId;
   /** From the built-in control defaults rather than from the user's files. */
   builtin?: boolean;
+  /** Source text of the built-in sheet, for provenance: spans index into it. */
+  builtinSource?: string;
+  /** A built-in rule read from Unity's documentation rather than measured. */
+  documented?: boolean;
 }
 
 /**
@@ -160,14 +175,56 @@ interface FlatRule {
  * identical rule in a user's file would be a second cascade, and the bug it
  * produced would be unreproducible from the stylesheet the user can see.
  */
-const THEME_RULES: FlatRule[] = parseUss(THEME_USS, null, -1).sheet.items.flatMap(
-  (item, index) =>
-    item.kind === 'rule' ? [{ rule: item.rule, sheet: -1, item: index, builtin: true }] : [],
-);
+function builtinRules(source: string, documented: boolean): FlatRule[] {
+  return parseUss(source, null, -1).sheet.items.flatMap((item, index) =>
+    item.kind === 'rule'
+      ? [
+          {
+            rule: item.rule,
+            sheet: -1,
+            item: index,
+            builtin: true,
+            builtinSource: source,
+            ...(documented ? { documented: true } : {}),
+          },
+        ]
+      : [],
+  );
+}
+
+const THEME_RULES: FlatRule[] = [
+  ...builtinRules(THEME_USS, false),
+  ...builtinRules(DOCUMENTED_USS, true),
+];
+
+/**
+ * Purpose:      the version and evidence fields of a `builtin-theme` origin.
+ * Ensures:      a documented default never carries a measured version silently
+ *               — `evidence` is what tells the two apart downstream.
+ */
+function provenanceOf(
+  evidence: ControlEvidence,
+): { unityVersion: string; evidence?: 'documented' } {
+  return evidence === 'documented'
+    ? { unityVersion: DOCUMENTED_UNITY_VERSION, evidence: 'documented' }
+    : { unityVersion: THEME_UNITY_VERSION };
+}
+
+/**
+ * How a part's own declarations are described in provenance: the selector an
+ * author would have to write to reach it, which is `#id` only where Unity
+ * actually names the element and its first class otherwise.
+ */
+function partSelectorText(part: ControlPart): string {
+  if (part.id !== undefined) return `#${part.id}`;
+  const first = part.classes?.[0];
+  return first === undefined ? part.name : `.${first}`;
+}
 
 /** The selector text a theme rule was written with, for provenance. */
-function themeSelectorText(rule: Rule): string {
-  return THEME_USS.slice(rule.selectorSpan.start, rule.selectorSpan.end).trim();
+function themeSelectorText(flat: FlatRule): string {
+  const source = flat.builtinSource ?? '';
+  return source.slice(flat.rule.selectorSpan.start, flat.rule.selectorSpan.end).trim();
 }
 
 /**
@@ -338,10 +395,13 @@ function prepare(doc: UxmlDocument, options?: ResolveOptions): Prepared {
         const parent = parents.get(target.node) ?? null;
         return parent === null ? null : { kind: 'element', node: parent };
       }
-      if (target.depth === 0) return { kind: 'element', node: target.owner };
-      const chain = resolveControl(target.owner).spec.parts;
-      const outer = chain[target.depth - 1]!;
-      return { kind: 'part', owner: target.owner, name: outer.name, depth: target.depth - 1 };
+      const outer =
+        target.part.parent === undefined
+          ? undefined
+          : partNamed(target.owner, target.part.parent);
+      return outer === undefined
+        ? { kind: 'element', node: target.owner }
+        : { kind: 'part', owner: target.owner, part: outer };
     },
     isRoot: (target: Target): boolean =>
       target.kind === 'element' && target.node === doc.root,
@@ -349,16 +409,19 @@ function prepare(doc: UxmlDocument, options?: ResolveOptions): Prepared {
     // Not measured — `part-type-selector` is the case that will settle it.
     typeNameOf: (target: Target): string =>
       target.kind === 'element' ? target.node.name.local : 'VisualElement',
+    // Only a part Unity actually names answers `#id`. The rest are internal
+    // keys, and claiming them would report matches Unity would not make.
     idOf: (target: Target): string | undefined =>
-      target.kind === 'element' ? attributeNamed(target.node, 'name') : target.name,
+      target.kind === 'element' ? attributeNamed(target.node, 'name') : target.part.id,
     // Implicit classes are as real as written ones for matching: in Unity the
     // element genuinely carries them, which is why `.unity-button` in author USS
-    // hits a plain `<ui:Button />`. Parts carry classes too in Unity, but which
-    // ones is unmeasured, so none are claimed here.
+    // hits a plain `<ui:Button />`. Parts carry them too — `.unity-toggle__input`
+    // is how a Toggle is styled at all, so a part without its classes is a part
+    // author USS cannot reach.
     classesOf: (target: Target): readonly string[] =>
       target.kind === 'element'
         ? [...writtenClasses(target.node), ...implicitClassesOf(target.node)]
-        : [],
+        : (target.part.classes ?? []),
   };
 
   // Two contexts, and the order matters. `base` has no states at all and is what
@@ -470,17 +533,16 @@ function collectCandidates(
   // stylesheet has to be able to override `flex-direction` on the container.
   // Specificity is irrelevant at this rank, so it is left at zero.
   if (target.kind === 'part') {
-    const part = resolveControl(target.owner).spec.parts[target.depth];
-    for (const [property, value] of Object.entries(part?.style ?? {})) {
+    for (const [property, value] of Object.entries(target.part.style)) {
       for (const [expanded, v] of expandShorthand(property, value)) {
         push(
           expanded,
           v,
           {
             kind: 'builtin-theme',
-            selector: `#${target.name}`,
+            selector: partSelectorText(target.part),
             property: expanded,
-            unityVersion: THEME_UNITY_VERSION,
+            ...provenanceOf(resolveControl(target.owner).spec.evidence),
           },
           Rank.BuiltinTheme,
           [0, 0, 0],
@@ -529,9 +591,9 @@ function collectCandidates(
           flat.builtin === true
             ? {
                 kind: 'builtin-theme',
-                selector: themeSelectorText(flat.rule),
+                selector: themeSelectorText(flat),
                 property,
-                unityVersion: THEME_UNITY_VERSION,
+                ...provenanceOf(flat.documented === true ? 'documented' : 'measured'),
               }
             : {
                 kind: 'rule',
@@ -731,22 +793,33 @@ export function resolveStyles(doc: UxmlDocument, options?: ResolveOptions): Reso
     const self = computeFor({ kind: 'element', node }, inherited, node.id);
     styles.set(node.id, self.computed);
 
-    // Children hang off the innermost part when the control builds any, so what
-    // they inherit has to come through the parts rather than around them.
-    let downstream = self.forChildren;
-    const chain = resolveControl(node).spec.parts;
-    if (chain.length > 0) {
+    // Children hang off the content part when the control builds any, so what
+    // they inherit has to come through the parts rather than around them —
+    // along the branch they actually sit on. A Toggle's children inherit from
+    // the Toggle, not through its label, which is what a single chain would
+    // have handed them.
+    let downstream: ReadonlyMap<string, ComputedValue> = self.forChildren;
+    const spec = resolveControl(node).spec;
+    if (spec.parts.length > 0) {
       const byName = new Map<string, ComputedStyle>();
-      chain.forEach((part, depth) => {
-        const resolved = computeFor(
-          { kind: 'part', owner: node, name: part.name, depth },
-          downstream,
-          node.id,
-        );
+      const downstreamOf = new Map<string, ReadonlyMap<string, ComputedValue>>();
+      for (const part of spec.parts) {
+        // Parents precede their children in the table, so this is present
+        // whenever the name is right; `control-parts` asserts every name is.
+        const from =
+          part.parent === undefined
+            ? self.forChildren
+            : (downstreamOf.get(part.parent) ?? self.forChildren);
+        const resolved = computeFor({ kind: 'part', owner: node, part }, from, node.id);
         byName.set(part.name, resolved.computed);
-        downstream = resolved.forChildren;
-      });
+        downstreamOf.set(part.name, resolved.forChildren);
+      }
       partStyles.set(node.id, byName);
+
+      const content = contentPartOf(spec);
+      if (content !== undefined) {
+        downstream = downstreamOf.get(content) ?? self.forChildren;
+      }
     }
 
     for (const child of node.children) visit(child, downstream);

@@ -30,7 +30,7 @@ describe('template adversarial regressions', () => {
   it('keeps control diagnostics and ScrollView parts inside expanded templates', () => {
     const source = host('<ui:Template name="Pane" src="pane.uxml" /><ui:Instance template="Pane" />');
     const pane = host(
-      '<ui:Toggle name="toggle" />' +
+      '<ui:MinMaxSlider name="range" />' +
         '<ui:ScrollView name="scroll" style="width: 200px; height: 80px;">' +
         '<ui:VisualElement style="height: 180px;" />' +
         '</ui:ScrollView>',
