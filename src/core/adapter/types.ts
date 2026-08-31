@@ -20,15 +20,32 @@ export interface ProjectParseInput {
   readonly resolveImport: (url: string, from: string | null) => ResolvedText | null;
 }
 
-export type EditorDiagnosticKind =
-  | 'unsupported-control'
-  | 'unsupported-property'
-  | 'unsupported-selector'
-  | 'unsupported-unit'
-  | 'version-dependent'
-  | 'asset-unresolved'
-  | 'import-unresolved'
-  | 'malformed';
+/**
+ * The kinds a diagnostic can carry, named once so the compile-time union and
+ * the store's runtime validation cannot drift apart: a kind missing from the
+ * validator is rejected as malformed and takes the preview down with it.
+ */
+export const EDITOR_DIAGNOSTIC_KINDS = Object.freeze([
+  'unsupported-control',
+  'unsupported-property',
+  'unsupported-selector',
+  'unsupported-unit',
+  'version-dependent',
+  'asset-unresolved',
+  'import-unresolved',
+  'malformed',
+  'template-src-unresolved',
+  'template-not-declared',
+  'template-cycle',
+  'template-depth-exceeded',
+  'template-slot-unsupported',
+  'override-target-missing',
+  'override-style-ignored',
+  'duplicate-name-in-tree',
+  'package-path-not-searched',
+] as const);
+
+export type EditorDiagnosticKind = typeof EDITOR_DIAGNOSTIC_KINDS[number];
 
 export interface EditorDiagnostic {
   readonly origin: 'parse' | 'render';

@@ -50,7 +50,27 @@ Fixtures under `fixtures/projects/menu` deliberately contain CRLF, comments, mix
   (e.g. `-unity-bogus-property`, in a stylesheet or an inline `style` attribute). Custom `--name`
   properties are valid and must never be reported.
 - The Source panel is a contenteditable code editor; `double_click` word selection can eat units
-  (`24px` → typing `120` yields `120`), so re-check the text after typing.
+  (`24px` → typing `120` yields `120`), so re-check the text after typing. Prefer **insertion-only** edits
+  (click, type one or two characters, at most one `Delete`) and zoom on the line afterwards to confirm the
+  exact text; `Home`+`shift+End`+Backspace has eaten adjacent lines in past runs. Recover with in-editor
+  `ctrl+z`, or the toolbar **Undo** which reverts the whole source-edit step at once.
+- Toolbar button geometry at 1024px width: Open ≈ x208, Save ≈ x228, Undo ≈ x246, Redo ≈ x266 (y≈68). They
+  are ~18px apart, so an imprecise click on "Save" easily lands on Undo — verify via the Undo/Redo disabled
+  state or the source text after clicking.
+- **Draft/stale diagnostics:** with a malformed-but-recoverable draft (e.g. `color red;` in USS, or
+  `<ui:Label name=oops />` in UXML) the status goes `Preview stale`; draft rows must supersede committed rows
+  for the drafted file (exactly one row per issue) and must display the **draft's** shifted `line:col`.
+  Activation should target the drafted line. Draft diagnostics intentionally carry no `nodeId`, so they must
+  not select an element at all (a wrong-element selection such as `menu-root` used to be the failure mode).
+- **"Preview unavailable: Editor diagnostic is malformed" plus 0 diagnostic rows** means a diagnostic kind
+  was rejected by runtime validation in `src/core/store/EditorStoreContracts.ts` (`isDiagnosticKind`) before
+  reaching the panel; the browser console stays silent. Kinds now come from the single
+  `EDITOR_DIAGNOSTIC_KINDS` list in `src/core/adapter/types.ts`, so a new engine warning only needs adding
+  there — if the banner reappears, something reintroduced a second hand-written list.
+- Template/`<ui:Instance>` UXML: `DocumentSession.resolveImport` only indexes `.uss` files, so a
+  `<ui:Template src="Card.uxml">` can never resolve in the editor; the expected outcome is a readable
+  `template-src-unresolved` sentence, not expansion. Template warnings are produced inside the engine's
+  `render()`, so they only appear once the draft commits (status back to `Ready`).
 
 ## Devin Secrets Needed
 None — all testing is local.

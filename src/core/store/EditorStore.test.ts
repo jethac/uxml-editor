@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { EDITOR_DIAGNOSTIC_KINDS } from '../adapter/types';
 import type { EditorDiagnostic, EditorNodeId } from '../adapter/types';
 import { UxmlPreviewAdapter } from '../adapter/UxmlPreviewAdapter';
 import { DocumentSession } from '../documents/DocumentSession';
@@ -97,6 +98,25 @@ describe('EditorStore snapshots', () => {
     }]);
     expect(Object.isFrozen(store.getSnapshot().diagnostics[0])).toBe(true);
     expect(Object.isFrozen(store.getSnapshot().diagnostics[0].source)).toBe(true);
+  });
+
+  it('accepts every diagnostic kind the adapter can produce', () => {
+    const store = new EditorStore();
+    const diagnostics: EditorDiagnostic[] = EDITOR_DIAGNOSTIC_KINDS.map((kind) => ({
+      origin: 'parse',
+      severity: 'warning',
+      kind,
+      message: `${kind} happened`,
+    }));
+
+    store.dispatch({ type: 'diagnostics/set', diagnostics });
+
+    expect(store.getSnapshot().diagnostics.map((diagnostic) => diagnostic.kind))
+      .toEqual([...EDITOR_DIAGNOSTIC_KINDS]);
+    expect(() => store.dispatch({
+      type: 'diagnostics/set',
+      diagnostics: [{ origin: 'parse', severity: 'warning', kind: 'not-a-kind', message: 'x' } as unknown as EditorDiagnostic],
+    })).toThrow(EditorStoreError);
   });
 
   it('validates, derives, and deeply freezes deterministic project asset metadata', () => {

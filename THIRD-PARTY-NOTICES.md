@@ -26,22 +26,27 @@ https://github.com/bytecodealliance/cap-std,
 https://github.com/RustCrypto/hashes,
 https://github.com/serde-rs, and https://github.com/microsoft/windows-rs.
 
-## uxml-preview
+## uxml-preview (vendored source)
 
-- Package: [uxml-preview](https://www.npmjs.com/package/uxml-preview)
-- Version: 0.4.0
-- npm integrity: `sha512-CS26v3f85dQ5ZFbTGnoCyTtpyaD1/emDlg6/7+/G3JeGi82oghiGBxxmh5qSdJDQrzs53lKXqPhEvVc4CDQXSg==`
-- Upstream tag commit: `f358e98a805d4ae5a52fc04ff6989b3053354539`
+The preview engine is no longer consumed from npm: its source is redistributed
+in this repository under `vendor/uxml-preview/`, with the upstream `LICENSE`,
+`THIRD-PARTY-NOTICES.md` and `CHANGELOG.md` alongside it and the import recorded
+in `vendor/uxml-preview/PROVENANCE.md`.
+
+- Version: 0.5.0 (tag `v0.5.0`)
+- Upstream tag commit: `8cbd5cb72d7b5fb0e9ea0e7b32dfdc9e10879e4a`
 - License: Apache-2.0
 - Source: https://github.com/ReuHomi/uxml-preview
 
 Copyright 2026 Reu Homi and uxml-preview contributors. `uxml-preview` is used
-under the Apache License, Version 2.0. Its license is available from the
-upstream package and repository.
+and modified under the Apache License, Version 2.0; the full text is at
+`vendor/uxml-preview/LICENSE`. Modifications made in this repository are listed
+under "Local changes" in `vendor/uxml-preview/PROVENANCE.md`.
 
 ## yoga-layout
 
-Vite bundles `yoga-layout` and its WebAssembly runtime through `uxml-preview`.
+Vite bundles `yoga-layout` and its WebAssembly runtime through the vendored
+`uxml-preview` layout engine.
 
 - Package: [yoga-layout](https://www.npmjs.com/package/yoga-layout)
 - Version: 3.2.1

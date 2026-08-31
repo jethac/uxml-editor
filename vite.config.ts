@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { previewEngineAlias } from './vendor/uxml-preview/alias.ts';
 
 const vendorChunks: readonly (readonly [string, string])[] = [
-  ['node_modules/uxml-preview/', 'preview-engine'],
+  ['vendor/uxml-preview/src/', 'preview-engine'],
   ['node_modules/yoga-layout/', 'preview-engine'],
   ['node_modules/@codemirror/', 'code-editor'],
   ['node_modules/@lezer/', 'code-editor'],
@@ -12,6 +13,7 @@ const vendorChunks: readonly (readonly [string, string])[] = [
 
 export default defineConfig({
   plugins: [react()],
+  resolve: { alias: previewEngineAlias() },
   clearScreen: false,
   server: {
     port: 1420,

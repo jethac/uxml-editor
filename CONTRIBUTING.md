@@ -42,6 +42,13 @@ CI runs all of these on Linux and repeats the Rust tests plus
   tree and render as fallback boxes.
 - **`uxml-preview` is imported by `src/core/adapter/UxmlPreviewAdapter.ts` and
   nothing else.** An import-boundary test enforces this.
+- **The engine is vendored source, not a dependency.** It lives in
+  `vendor/uxml-preview/` under Apache-2.0. Edit it there when a fix belongs in
+  the engine, keep the upstream suite in `vendor/uxml-preview/tests/` green, and
+  record every divergence from the imported tag under "Local changes" in
+  `vendor/uxml-preview/PROVENANCE.md` so a re-sync can replay it. Node typings
+  for its Node-only files belong to `tsconfig.node.json`; the application
+  program must stay free of them.
 - **Do not conflate coverage, accuracy, and control range** in any claim about
   Unity fidelity, and mark values that were read from documentation rather than
   measured.

@@ -1,14 +1,18 @@
 import packageJsonText from '../../../package.json?raw';
 import packageLockText from '../../../package-lock.json?raw';
 import noticesText from '../../../THIRD-PARTY-NOTICES.md?raw';
+import provenanceText from '../../../vendor/uxml-preview/PROVENANCE.md?raw';
+import appTsconfigText from '../../../tsconfig.json?raw';
 import minimalUss from '../../../tests/fixtures/minimal.uss?raw';
 import uxml from '../../../tests/fixtures/minimal.uxml?raw';
 import { parse as parseJavaScript } from '@babel/parser';
 import { describe, expect, it, vi } from 'vitest';
 import { UxmlPreviewAdapter } from './UxmlPreviewAdapter';
+import { EDITOR_DIAGNOSTIC_KINDS } from './types';
 import type { EditorElement, ProjectParseInput } from './types';
 
 const paletteUss = 'VisualElement { padding-left: 4px; }\n';
+const vendoredEngineCommit = '8cbd5cb72d7b5fb0e9ea0e7b32dfdc9e10879e4a';
 const sourceModules = import.meta.glob('/src/**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}', {
   eager: true,
   query: '?raw',
@@ -479,6 +483,30 @@ describe('UxmlPreviewAdapter', () => {
     container.remove();
   });
 
+  it('reports template diagnostics with a kind the store accepts', async () => {
+    const adapter = new UxmlPreviewAdapter();
+    const parsed = adapter.parseProject({
+      uxmlPath: 'Assets/UI/Main.uxml',
+      uxml: '<ui:UXML xmlns:ui="UnityEngine.UIElements">\n  <ui:Instance template="Card" name="card" />\n</ui:UXML>\n',
+      stylesheets: new Map(),
+      resolveImport: () => null,
+    });
+    const container = document.createElement('div');
+    document.body.append(container);
+
+    const frame = await adapter.render(parsed, container, {
+      size: { width: 320, height: 180 },
+      measureText: deterministicMeasureText,
+    });
+
+    expect(frame.diagnostics.map((diagnostic) => diagnostic.kind)).toContain('template-not-declared');
+    for (const diagnostic of frame.diagnostics) {
+      expect(EDITOR_DIAGNOSTIC_KINDS).toContain(diagnostic.kind);
+    }
+    frame.dispose();
+    container.remove();
+  });
+
   it('explains computed author, theme, inherited, default, inline, and stateful values', () => {
     const adapter = new UxmlPreviewAdapter();
     const input = styleFixtureInput();
@@ -648,10 +676,13 @@ describe('UxmlPreviewAdapter', () => {
     expect(() => (sheet.rules as unknown[]).push({})).toThrow();
   });
 
-  it('keeps the preview pin and detects every import form outside the adapter boundary', () => {
+  it('pins the vendored engine and detects every import form outside the adapter boundary', () => {
     const packageJson = JSON.parse(packageJsonText) as {
       dependencies: Record<string, string>;
       devDependencies: Record<string, string>;
+    };
+    const appTsconfig = JSON.parse(appTsconfigText) as {
+      compilerOptions: { types: readonly string[] };
     };
     const packageLock = JSON.parse(packageLockText) as {
       packages: Record<string, { version?: string; integrity?: string }>;
@@ -675,15 +706,12 @@ describe('UxmlPreviewAdapter', () => {
     expect(importsPreview(`const p = require(packageName);`)).toBe(false);
     expect(importsPreview(`const p = require('other-package');`)).toBe(false);
     expect(importsPreview(`// import '${previewPackage}'\nconst value = '${previewPackage}';\nconst template = \`import '${previewPackage}'\`;`)).toBe(false);
-    expect(packageJson.dependencies['uxml-preview']).toBe('0.4.0');
+    expect(packageJson.dependencies).not.toHaveProperty('uxml-preview');
+    expect(packageLock.packages).not.toHaveProperty('node_modules/uxml-preview');
     expect(packageJson.dependencies).not.toHaveProperty('@types/node');
-    expect(packageJson.devDependencies).not.toHaveProperty('@types/node');
-    expect(packageLock.packages).not.toHaveProperty('node_modules/@types/node');
-    expect(packageLock.packages['node_modules/uxml-preview']).toMatchObject({
-      version: '0.4.0',
-      integrity: 'sha512-CS26v3f85dQ5ZFbTGnoCyTtpyaD1/emDlg6/7+/G3JeGi82oghiGBxxmh5qSdJDQrzs53lKXqPhEvVc4CDQXSg==',
-    });
-    expect(noticesText).toContain('f358e98a805d4ae5a52fc04ff6989b3053354539');
+    expect(appTsconfig.compilerOptions.types).not.toContain('node');
+    expect(provenanceText).toContain(vendoredEngineCommit);
+    expect(noticesText).toContain(vendoredEngineCommit);
     expect(previewImporters).toEqual(['src/core/adapter/UxmlPreviewAdapter.ts']);
   });
 });

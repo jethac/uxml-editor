@@ -28,9 +28,10 @@ user formatting survive a round trip.
 
 - Animation of any kind. USS transitions are parsed and preserved but never
   played; pseudo-state toggles are static.
-- Unity 6.3 features. Rendering comes from `uxml-preview@0.4.0`, which is
-  measured against Unity 6000.0.40f1 and has no `filter`, `aspect-ratio`, SVG,
-  9-slice, or text-outline support.
+- Unity 6.3 features. Rendering comes from the vendored `uxml-preview` 0.5.0
+  engine in [`vendor/uxml-preview`](vendor/uxml-preview), which is measured
+  against Unity 6000.0.40f1 and has no `filter`, `aspect-ratio`, SVG, 9-slice,
+  or text-outline support.
 - Controls beyond `VisualElement`, `Label`, `Button`, `Image`, and
   `ScrollView`. Unknown controls stay in the tree, render as fallback boxes,
   and raise a warning.
@@ -75,8 +76,19 @@ persistence/recovery layer. `src/features` holds the panels. `src/app` wires a
 host implementation (`BrowserHost`, `MemoryHost`, or the Tauri host in
 `src-tauri`) into the shell.
 
-`uxml-preview` is reachable from exactly one file,
-`src/core/adapter/UxmlPreviewAdapter.ts`; an import-boundary test enforces it.
+The preview engine is vendored source, not an npm dependency:
+[`vendor/uxml-preview`](vendor/uxml-preview) holds `uxml-preview` 0.5.0 under
+Apache-2.0, with its upstream test suite, its license, and the import recorded
+in [`vendor/uxml-preview/PROVENANCE.md`](vendor/uxml-preview/PROVENANCE.md). It
+is vendored because Unity 6.3 parity, controls beyond the five renderers, and
+transition playback all need engine changes upstream has scoped out. `npm test`
+runs the upstream suite, so engine edits still have to satisfy the measurements
+they came from.
+
+It is reachable from exactly one file,
+`src/core/adapter/UxmlPreviewAdapter.ts`; an import-boundary test enforces that,
+that the package is absent from `dependencies`, and that the app's TypeScript
+program stays free of Node typings.
 
 Decisions are recorded in [`docs/adr`](docs/adr).
 
